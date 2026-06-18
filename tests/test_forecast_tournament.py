@@ -17,6 +17,12 @@ from macro_llm_tournament.forecast_cards import (
 )
 from macro_llm_tournament.forecast_controls import build_control_forecasts
 from macro_llm_tournament.forecast_data import clean_numeric, quarter_index
+from macro_llm_tournament.download_data import (
+    DownloadResult,
+    extract_scf_download_links,
+    extract_spf_download_links,
+    summarize,
+)
 from macro_llm_tournament.forecast_llm import ForecastLLMClient, normalize_forecast_payload, run_llm_forecasts
 from macro_llm_tournament.forecast_scoring import score_forecast_slices, score_forecasts, verdict_from_scores
 from macro_llm_tournament.fred_vintage import approximate_spf_as_of_date, build_vintage_context_for_cards
@@ -247,7 +253,57 @@ class ForecastTournamentTests(unittest.TestCase):
                 with self.assertRaises(LLMUnavailable):
                     client.forecast_card(cards[1])
 
-            self.assertEqual(client.live_call_count, 1)
+        self.assertEqual(client.live_call_count, 1)
+
+    def test_spf_download_link_extractor_preserves_xlsx_urls(self):
+        page_url = "https://www.philadelphiafed.org/surveys-and-data/data-files/cpi"
+        html = """
+        <a href="/surveys-and-data/real-time-data-research/survey-of-professional-forecasters/data-files/Individual_CPI.xlsx?sc_lang=en&amp;hash=ABC">individual</a>
+        <a href="/surveys-and-data/real-time-data-research/survey-of-professional-forecasters/data-files/Mean_CPI_Level.xls">mean</a>
+        <a href="/assets/images/preview.xlsx">asset</a>
+        <a href="/surveys-and-data/other/data-files/private.xlsx">other</a>
+        """
+
+        links = extract_spf_download_links(page_url, html)
+
+        self.assertEqual(len(links), 2)
+        self.assertTrue(any("Individual_CPI.xlsx?" in link for link in links))
+        self.assertTrue(any(link.endswith("Mean_CPI_Level.xls") for link in links))
+        self.assertFalse(any("assets/images" in link for link in links))
+
+    def test_scf_download_link_extractor_keeps_curated_modern_files(self):
+        page_url = "https://www.federalreserve.gov/econres/scf_2019.htm"
+        html = """
+        <a href="/econres/files/scfp2019excel.zip">summary excel</a>
+        <a href="/econres/files/scfp2019.zip">summary sas</a>
+        <a href="/econres/files/2019map.xlsx">map</a>
+        <a href="/econres/files/codebk2019.txt">codebook</a>
+        <a href="/econres/files/scf2019rw1.zip">replicate weights</a>
+        <a href="/econres/files/unrelated.xlsx">unrelated</a>
+        """
+
+        links = extract_scf_download_links(page_url, html)
+
+        self.assertEqual(len(links), 4)
+        self.assertTrue(any(link.endswith("scfp2019excel.zip") for link in links))
+        self.assertTrue(any(link.endswith("2019map.xlsx") for link in links))
+        self.assertFalse(any("rw1" in link for link in links))
+
+    def test_download_summary_tracks_skipped_without_counting_as_file(self):
+        summary = summarize(
+            [
+                DownloadResult("fred", "a", "https://example.test/a", "work/a.csv", "downloaded", bytes=10),
+                DownloadResult("fred", "b", "https://example.test/b", "work/b.csv", "skipped"),
+                DownloadResult("spf", "c", "https://example.test/c", "work/c.csv", "error", error="boom"),
+            ]
+        )
+
+        self.assertEqual(summary["files"], 1)
+        self.assertEqual(summary["bytes"], 10)
+        self.assertEqual(summary["errors"], 1)
+        self.assertEqual(summary["skipped"], 1)
+        self.assertEqual(summary["groups"]["fred"], {"files": 1, "bytes": 10, "errors": 0, "skipped": 1})
+        self.assertEqual(summary["groups"]["spf"], {"files": 0, "bytes": 0, "errors": 1, "skipped": 0})
 
 
 if __name__ == "__main__":

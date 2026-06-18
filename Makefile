@@ -1,4 +1,4 @@
-.PHONY: test fixture
+.PHONY: test fixture data
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -11,3 +11,6 @@ fixture:
 		--belief-targets best_effort \
 		--typed-agent-panel \
 		--output-dir outputs/spf_fixture
+
+data:
+	PYTHONPATH=src python3 -m macro_llm_tournament.download_data

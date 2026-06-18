@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 macro-llm-forecast-tournament = "macro_llm_tournament.forecast_tournament:main"
+macro-llm-download-data = "macro_llm_tournament.download_data:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

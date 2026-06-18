@@ -45,6 +45,14 @@ This downloads public SPF/SCE/Michigan data as needed, writes local outputs unde
 
 After installing the package, the same runner is available as `macro-llm-forecast-tournament`.
 
+Download the public local data bundle:
+
+```bash
+make data
+```
+
+This writes ignored files under `work/`, including SPF workbooks, survey-belief files, public FRED/ALFRED graph CSVs, and SCF public files.
+
 ## Live LLM runs
 
 Live runs are deliberately capped. A live run fails unless `--max-live-calls` is positive.
