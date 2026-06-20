@@ -65,7 +65,35 @@ This builds post-cutoff SPF cards from official SPF mean forecast files. Rows wi
 
 Live runs are deliberately capped. A live run fails unless `--max-live-calls` is positive.
 
-The current hard-gate command uses true real-time FRED/ALFRED context:
+The post-cutoff gate is the main contamination-clean screen. It uses SPF detail forecast files after the model cutoff and scores rows when FRED proxy realizations are complete:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
+  --provider codex_cli \
+  --model gpt-5.5 \
+  --llm-mode live \
+  --max-live-calls 9 \
+  --vintage-context require \
+  --belief-targets best_effort \
+  --typed-agent-panel \
+  --output-dir outputs/spf_postcutoff_gpt55_2026q1q2
+```
+
+Use replay mode to rescore frozen post-cutoff cards after new public data arrives without spending live calls:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
+  --provider codex_cli \
+  --model gpt-5.5 \
+  --llm-mode replay \
+  --max-live-calls 0 \
+  --vintage-context require \
+  --belief-targets best_effort \
+  --typed-agent-panel \
+  --output-dir outputs/spf_postcutoff_gpt55_replay
+```
+
+The historical tournament remains useful for scale, controls, and debugging, but its holdout is pre-cutoff:
 
 ```bash
 PYTHONPATH=src python3 -m macro_llm_tournament.forecast_tournament \
@@ -86,20 +114,6 @@ Requirements for that run:
 - `FRED_API_KEY` set in `.env` or the process environment.
 
 Copy `.env.example` to `.env` and fill in only the keys you need.
-
-The post-cutoff live gate uses the same call cap discipline:
-
-```bash
-PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
-  --provider codex_cli \
-  --model gpt-5.5 \
-  --llm-mode live \
-  --max-live-calls 9 \
-  --vintage-context require \
-  --belief-targets best_effort \
-  --typed-agent-panel \
-  --output-dir outputs/spf_postcutoff_gpt55_2026q1q2
-```
 
 ## Scope
 
