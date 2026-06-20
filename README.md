@@ -15,6 +15,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/agent_economy.py` runs the forecast-first typed agent economy CLI.
 - `src/macro_llm_tournament/agent_llm.py`, `agent_runtime.py`, `agent_types.py`, `agent_targets.py`, and `agent_report.py` hold the LLM-agent schema, accounting runtime, SCF-style type cells, origin-level household-belief scoring, and report rendering.
 - `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against public stimulus-response targets for MPC, liquidity gradients, debt repayment, and liquid saving.
+- `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
 
 ## Quick start
 
@@ -79,6 +80,14 @@ make behavior-fixture
 ```
 
 This scores SCF-style household types against public stimulus-response targets from the tax-rebate, 2008 stimulus, and 2020 EIP literature. The target gate covers aggregate MPC/spending, liquidity gradients, debt repayment, and liquid saving.
+
+Run the zero-cost post-cutoff household behavior proxy fixture:
+
+```bash
+make postcutoff-behavior-fixture
+```
+
+This exercises the contamination-clean behavior runner without using live data or LLM calls.
 
 ## Live LLM runs
 
@@ -171,6 +180,22 @@ PYTHONPATH=src python3 -m macro_llm_tournament.behavior_gate \
 
 The behavior gate uses one packed LLM call per event scenario. The deterministic layer then aggregates household-type allocations and scores them against published spending, debt-repayment, saving, and liquidity-gradient moments.
 
+Run the contamination-clean post-cutoff household behavior proxy gate:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_behavior_gate \
+  --provider codex_cli \
+  --model gpt-5.5 \
+  --data-mode fred \
+  --agent-mode live \
+  --max-live-calls 4 \
+  --fresh-cache \
+  --scoreable-only \
+  --output-dir outputs/postcutoff_behavior_gate_gpt55_fresh
+```
+
+This gate hides calendar dates, event labels, target months, and realized targets from the prompt. It scores only target months after the configured model cutoff and freezes target rows whose public data are not complete yet. It uses aggregate FRED behavior proxies, so it complements rather than replaces direct micro household behavior data.
+
 ## Scope
 
 This is an experimental research harness. The working hypothesis is that LLMs are most useful as structured belief engines, then household/firm/bank behavior should be constrained by accounting rather than left to free-form simulation. Public source files are limited to runners, controls, tests, and setup instructions. Research interpretations and generated summaries should be kept outside the public repository until they are ready for release.
@@ -186,6 +211,10 @@ This is an experimental research harness. The working hypothesis is that LLMs ar
 - Parker, Souleles, Johnson, and McClelland 2008 ESP replication archive: https://www.openicpsr.org/openicpsr/project/116117/version/V1/view
 - CFPB/Pagel et al. liquidity and EIP response note: https://files.consumerfinance.gov/f/documents/cfpb_pagel_income-liquidity-and-the-consumption-response-to-the-2020-economic-_H7TYltp.pdf
 - NY Fed Liberty Street Economics EIP use summary: https://libertystreeteconomics.newyorkfed.org/2020/10/how-have-households-used-their-stimulus-payments-and-how-would-they-spend-the-next/
+- FRED Personal Consumption Expenditures: https://fred.stlouisfed.org/series/PCE
+- FRED Personal Saving Rate: https://fred.stlouisfed.org/series/PSAVERT
+- FRED Revolving Consumer Credit: https://fred.stlouisfed.org/series/REVOLSL
+- FRED Advance Retail Sales: https://fred.stlouisfed.org/series/RSAFS
 
 ## License
 

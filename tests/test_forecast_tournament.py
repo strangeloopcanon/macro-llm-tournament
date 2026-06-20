@@ -56,6 +56,18 @@ from macro_llm_tournament.postcutoff_tournament import (
     read_simple_xlsx,
     realize_variable,
 )
+from macro_llm_tournament.postcutoff_behavior_gate import (
+    PostcutoffBehaviorLLMClient,
+    TARGET_SPECS,
+    aggregate_agent_proxy_forecasts,
+    build_postcutoff_behavior_cards,
+    build_proxy_control_forecasts,
+    fixture_fred_proxy_frames,
+    normalize_postcutoff_behavior_payload,
+    postcutoff_behavior_prompt,
+    run_postcutoff_behavior_agents,
+    score_proxy_forecasts,
+)
 from macro_llm_tournament.survey_beliefs import survey_context_by_card
 
 
@@ -808,6 +820,107 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(combined.shape[0], 1)
         self.assertAlmostEqual(combined.iloc[0]["spf_forecast"], 2.538)
         self.assertEqual(combined.iloc[0]["source_url"], "detail")
+
+    def test_postcutoff_behavior_proxy_cards_hide_target_dates_and_values(self):
+        frames = fixture_fred_proxy_frames()
+        cards, targets, context = build_postcutoff_behavior_cards(
+            frames,
+            cutoff_date="2025-12-01",
+            asof_start="2025-12-15",
+            asof_end="2026-01-15",
+            history_months=12,
+            scoreable_only=False,
+        )
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        prompt = postcutoff_behavior_prompt(cards[0], type_cells)
+
+        self.assertEqual(len(cards), 2)
+        self.assertFalse(targets.empty)
+        self.assertFalse(context.empty)
+        self.assertTrue(targets["target_available"].all())
+        self.assertEqual(set(targets["contamination_label"]), {"post_model_cutoff_clean"})
+        self.assertNotIn(cards[0].target_month, prompt)
+        self.assertNotIn(cards[0].as_of_date, prompt)
+        self.assertNotIn("target_value", prompt)
+        self.assertIn("target_month_hidden", prompt)
+
+    def test_postcutoff_behavior_proxy_fixture_run_scores_agents_and_controls(self):
+        frames = fixture_fred_proxy_frames()
+        cards, targets, _context = build_postcutoff_behavior_cards(
+            frames,
+            cutoff_date="2025-12-01",
+            asof_start="2025-12-15",
+            asof_end="2026-02-15",
+            history_months=12,
+            scoreable_only=True,
+        )
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        client = PostcutoffBehaviorLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0)
+
+        actions = run_postcutoff_behavior_agents(cards, type_cells, llm_client=client)
+        llm_forecasts = aggregate_agent_proxy_forecasts(cards, actions, source="llm_codex_cli_gpt-5.5")
+        controls = build_proxy_control_forecasts(cards)
+        scores, joined = score_proxy_forecasts(pd.concat([llm_forecasts, controls], ignore_index=True), targets)
+
+        self.assertEqual(len(client.raw_records), len(cards))
+        self.assertEqual(actions.groupby("card_id")["type_id"].nunique().min(), type_cells.shape[0])
+        self.assertEqual(llm_forecasts.groupby("card_id")["target_name"].nunique().min(), len(TARGET_SPECS))
+        self.assertFalse(joined.empty)
+        self.assertFalse(scores.empty)
+        self.assertIn("ALL", set(scores["target_name"]))
+        self.assertTrue(scores["rmse_scaled"].map(np.isfinite).all())
+
+    def test_postcutoff_behavior_proxy_exact_forecasts_score_zero(self):
+        frames = fixture_fred_proxy_frames()
+        cards, targets, _context = build_postcutoff_behavior_cards(
+            frames,
+            cutoff_date="2025-12-01",
+            asof_start="2025-12-15",
+            asof_end="2025-12-15",
+            history_months=12,
+            scoreable_only=True,
+        )
+        exact = targets[["card_id", "period_id", "target_name"]].copy()
+        exact["source"] = "exact"
+        exact["prediction"] = targets["target_value"].to_numpy()
+        exact["method"] = "oracle_fixture"
+
+        scores, joined = score_proxy_forecasts(exact, targets)
+
+        self.assertEqual(len(cards), 1)
+        self.assertFalse(joined.empty)
+        overall = scores[(scores["source"] == "exact") & (scores["target_name"] == "ALL")].iloc[0]
+        self.assertAlmostEqual(float(overall["rmse_scaled"]), 0.0)
+
+    def test_postcutoff_behavior_payload_fails_closed_when_type_missing(self):
+        frames = fixture_fred_proxy_frames()
+        cards, _targets, _context = build_postcutoff_behavior_cards(
+            frames,
+            cutoff_date="2025-12-01",
+            asof_start="2025-12-15",
+            asof_end="2025-12-15",
+            history_months=12,
+            scoreable_only=True,
+        )
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        payload = {
+            "payload": {
+                "household_actions": [
+                    {
+                        "type_id": str(row["type_id"]),
+                        "consumption_change_pct": 0.0,
+                        "liquid_saving_change_pct": 0.0,
+                        "debt_balance_change_pct": 0.0,
+                        "confidence": 0.5,
+                        **{spec.target_name: 0.0 for spec in TARGET_SPECS},
+                    }
+                    for _, row in type_cells.iloc[:-1].iterrows()
+                ]
+            }
+        }
+
+        with self.assertRaises(LLMUnavailable):
+            normalize_postcutoff_behavior_payload(cards[0], type_cells, payload)
 
 
 if __name__ == "__main__":

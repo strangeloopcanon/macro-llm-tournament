@@ -25,6 +25,7 @@ macro-llm-download-data = "macro_llm_tournament.download_data:main"
 macro-llm-postcutoff-tournament = "macro_llm_tournament.postcutoff_tournament:main"
 macro-llm-agent-economy = "macro_llm_tournament.agent_economy:main"
 macro-llm-behavior-gate = "macro_llm_tournament.behavior_gate:main"
+macro-llm-postcutoff-behavior-gate = "macro_llm_tournament.postcutoff_behavior_gate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
