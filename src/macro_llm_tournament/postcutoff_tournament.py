@@ -95,6 +95,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cutoff-date", default=POSTCUTOFF_DEFAULT)
     parser.add_argument("--history-quarters", type=int, default=24)
     parser.add_argument("--scoreable-only", action="store_true")
+    parser.add_argument("--replay-cache-miss-policy", choices=["fail", "freeze"], default="fail")
+    parser.add_argument("--previous-run-dir", default=None)
     parser.add_argument("--vintage-context", choices=["off", "best_effort", "require"], default="require")
     parser.add_argument("--refresh-fred-vintage", action="store_true")
     parser.add_argument("--belief-targets", choices=["off", "best_effort", "require"], default="best_effort")
@@ -129,6 +131,8 @@ def main() -> int:
         "belief_targets_mode": args.belief_targets,
         "typed_agent_panel": bool(args.typed_agent_panel),
         "scoreable_only": bool(args.scoreable_only),
+        "replay_cache_miss_policy": args.replay_cache_miss_policy,
+        "previous_run_dir": args.previous_run_dir,
         "status": "running",
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -177,8 +181,28 @@ def main() -> int:
             survey_by_card["card_id"] = survey_by_card["card_id"].map(id_map).fillna(survey_by_card["card_id"])
         assert_no_prompt_target_leakage(cards)
 
+        candidate_cards = list(cards)
+        client = ForecastLLMClient(
+            args.provider,
+            args.model,
+            LLM_CACHE_ROOT,
+            mode=args.llm_mode,
+            max_live_calls=args.max_live_calls,
+        )
+        replay_cache_miss_rows = pd.DataFrame()
+        if args.llm_mode == "replay" and args.replay_cache_miss_policy == "freeze":
+            cards, replay_cache_miss_cards = split_cards_by_replay_cache(candidate_cards, client)
+            replay_cache_miss_rows = cards_to_frame(replay_cache_miss_cards)
+            if not replay_cache_miss_rows.empty:
+                replay_cache_miss_rows["freeze_reason"] = "replay_cache_miss"
+            if not cards:
+                raise ValueError("Replay freeze policy found no cached post-cutoff cards to forecast.")
+
+        candidate_cards_frame = cards_to_frame(candidate_cards)
         cards_frame = cards_to_frame(cards)
+        candidate_cards_frame.to_csv(output_dir / "postcutoff_candidate_cards.csv", index=False)
         cards_frame.to_csv(output_dir / "postcutoff_forecast_cards.csv", index=False)
+        replay_cache_miss_rows.to_csv(output_dir / "postcutoff_replay_cache_freeze_cards.csv", index=False)
         selected_rows.to_csv(output_dir / "postcutoff_selected_rows.csv", index=False)
         freeze_rows.to_csv(output_dir / "postcutoff_freeze_rows.csv", index=False)
         spf_data.to_csv(output_dir / "postcutoff_spf_input_rows.csv", index=False)
@@ -191,15 +215,14 @@ def main() -> int:
         control_forecasts = build_control_forecasts(spf_data, cards, tune_end_year=2024)
         control_forecasts.to_csv(output_dir / "control_forecasts.csv", index=False)
 
-        client = ForecastLLMClient(
-            args.provider,
-            args.model,
-            LLM_CACHE_ROOT,
-            mode=args.llm_mode,
-            max_live_calls=args.max_live_calls,
-        )
         llm_forecasts, raw_records = run_llm_forecasts(client, cards)
-        recall_probe = client.recall_probe()
+        try:
+            recall_probe = client.recall_probe()
+        except LLMUnavailable as exc:
+            if args.llm_mode == "replay" and args.replay_cache_miss_policy == "freeze":
+                recall_probe = {"status": "skipped_replay_cache_miss", "error": str(exc)}
+            else:
+                raise
         llm_forecasts.to_json(output_dir / "llm_forecasts.jsonl", orient="records", lines=True)
         (output_dir / "llm_raw_records.json").write_text(json.dumps(raw_records, indent=2, sort_keys=True))
         (output_dir / "recall_probe.json").write_text(json.dumps(recall_probe, indent=2, sort_keys=True))
@@ -235,8 +258,13 @@ def main() -> int:
             {
                 "status": "ok",
                 "card_count": int(len(cards)),
+                "candidate_card_count": int(len(candidate_cards)),
+                "forecasted_card_count": int(len(cards)),
                 "scoreable_card_count": int(scored_cards.shape[0]),
-                "frozen_unscored_card_count": int(cards_frame.shape[0] - scored_cards.shape[0]),
+                "frozen_unscored_card_count": int(cards_frame.shape[0] - scored_cards.shape[0] + replay_cache_miss_rows.shape[0]),
+                "replayed_card_count": int(len(cards)) if args.llm_mode == "replay" else 0,
+                "uncached_frozen_card_count": int(replay_cache_miss_rows.shape[0]),
+                "newly_scoreable_card_count": int(count_newly_scoreable_rows(selected_rows, args.previous_run_dir)),
                 "card_regime_counts": cards_frame["regime_label"].value_counts().sort_index().to_dict(),
                 "card_contamination_counts": cards_frame["contamination_label"].value_counts().sort_index().to_dict(),
                 "vintage_context_status": vintage_status,
@@ -250,6 +278,7 @@ def main() -> int:
                 "cache_hit_count": int(client.cache_hit_count),
                 "verdict": verdict,
                 "data_status": data_status,
+                "replay_cache_miss_freeze_rows": int(replay_cache_miss_rows.shape[0]),
             }
         )
         report = build_postcutoff_report(manifest, scores=scores, slice_scores=slice_scores)
@@ -309,6 +338,40 @@ def build_postcutoff_selection(
         "realization_note": "FRED proxy realizations are not official Philadelphia Fed SPF error-stat rows.",
     }
     return spf_data, selected, freeze_rows, status
+
+
+def split_cards_by_replay_cache(
+    cards: Iterable[Any],
+    client: ForecastLLMClient,
+) -> tuple[list[Any], list[Any]]:
+    cached: list[Any] = []
+    missing: list[Any] = []
+    for card in cards:
+        path = client.cache_path(client.forecast_cache_name(card))
+        if path.exists():
+            cached.append(card)
+        else:
+            missing.append(card)
+    return cached, missing
+
+
+def count_newly_scoreable_rows(selected_rows: pd.DataFrame, previous_run_dir: str | None) -> int:
+    if not previous_run_dir:
+        return 0
+    previous_path = Path(previous_run_dir) / "postcutoff_freeze_rows.csv"
+    if not previous_path.exists() or selected_rows.empty:
+        return 0
+    previous = pd.read_csv(previous_path)
+    if previous.empty:
+        return 0
+    key_columns = ["variable", "origin_index", "horizon"]
+    if any(column not in previous for column in key_columns) or any(column not in selected_rows for column in key_columns):
+        return 0
+    if "scoreable" not in selected_rows:
+        return 0
+    scoreable = selected_rows[selected_rows["scoreable"].fillna(False).astype(bool)].copy()
+    previous_keys = set(tuple(row) for row in previous[key_columns].to_numpy())
+    return int(sum(tuple(row) in previous_keys for row in scoreable[key_columns].to_numpy()))
 
 
 def combine_official_and_detail_rows(official_h1: pd.DataFrame, detail_extra: pd.DataFrame) -> pd.DataFrame:
@@ -485,8 +548,11 @@ def build_postcutoff_report(manifest: dict[str, Any], *, scores: pd.DataFrame, s
         f"- Live calls used: `{manifest.get('live_call_count')}` of cap `{manifest.get('max_live_calls')}`",
         f"- Cache hits: `{manifest.get('cache_hit_count')}`",
         f"- Forecast cards: `{manifest.get('card_count')}`",
+        f"- Candidate cards before replay freeze: `{manifest.get('candidate_card_count', manifest.get('card_count'))}`",
         f"- Scoreable cards now: `{manifest.get('scoreable_card_count')}`",
         f"- Frozen unscored cards: `{manifest.get('frozen_unscored_card_count')}`",
+        f"- Uncached replay-frozen cards: `{manifest.get('uncached_frozen_card_count', 0)}`",
+        f"- Newly scoreable from previous run: `{manifest.get('newly_scoreable_card_count', 0)}`",
         f"- Cutoff date: `{manifest.get('cutoff_date')}`",
         f"- Variables: `{', '.join(manifest.get('variables', []))}`",
         f"- Vintage macro context: `{status_label(manifest.get('vintage_context_status'))}`",

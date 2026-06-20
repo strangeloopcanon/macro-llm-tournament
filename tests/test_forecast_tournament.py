@@ -24,14 +24,18 @@ from macro_llm_tournament.behavior_gate import (
     BEHAVIOR_SCENARIOS,
     BehaviorLLMClient,
     aggregate_behavior_actions,
+    behavior_target_catalog,
     behavior_targets_frame,
     fixture_behavior_payload,
+    join_cell_behavior_target_errors,
     normalize_behavior_payload,
     run_behavior_controls,
     run_behavior_gate,
+    score_cell_behavior_targets,
     score_behavior_targets,
 )
 from macro_llm_tournament.forecast_audit import (
+    build_belief_structure_audit,
     build_source_scores,
     build_surprise_audit,
     build_theil_u,
@@ -62,8 +66,10 @@ from macro_llm_tournament.postcutoff_tournament import (
     DETAIL_FORECAST_SPECS,
     annualized_pct_change,
     combine_official_and_detail_rows,
+    count_newly_scoreable_rows,
     read_simple_xlsx,
     realize_variable,
+    split_cards_by_replay_cache,
 )
 from macro_llm_tournament.postcutoff_behavior_gate import (
     PostcutoffBehaviorLLMClient,
@@ -261,6 +267,37 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn("event_bucket", set(surprise["bucket_type"]))
         no_change = theil[(theil["source"] == "no_change") & (theil["variable"] == "ALL")].iloc[0]
         self.assertAlmostEqual(float(no_change["theils_u_vs_no_change"]), 1.0)
+
+    def test_belief_structure_audit_emits_dynamics_calibration_and_surprise_metrics(self):
+        data = spf_fixture()
+        cards = build_forecast_cards(
+            data,
+            variables=["CPI", "RGDP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=6,
+        )
+        card_frame = cards_to_frame(cards)
+        controls = build_control_forecasts(data, cards, tune_end_year=2017)
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        _scores, _behavior, joined = score_forecasts(card_frame, pd.concat([controls, llm_forecasts], ignore_index=True))
+
+        detail, summary = build_belief_structure_audit(joined)
+
+        self.assertFalse(detail.empty)
+        self.assertFalse(summary.empty)
+        self.assertIn("ALL", set(summary["variable"]))
+        self.assertIn("underreaction", set(detail["metric_family"]))
+        self.assertIn("extrapolation", set(detail["metric_family"]))
+        self.assertIn("disagreement_dispersion", set(detail["metric_family"]))
+        self.assertIn("interval_calibration", set(detail["metric_family"]))
+        self.assertIn("confidence_calibration", set(detail["metric_family"]))
+        self.assertIn("surprise_response", set(detail["metric_family"]))
+        llm_overall = summary[(summary["variable"] == "ALL") & (summary["source"].str.startswith("llm_"))].iloc[0]
+        self.assertGreater(int(llm_overall["interval_n"]), 0)
+        self.assertTrue(np.isfinite(float(llm_overall["interval_coverage_p10_p90"])))
 
     def test_direct_recall_probe_is_card_specific_and_fails_closed(self):
         cards = build_forecast_cards(
@@ -545,6 +582,9 @@ class ForecastTournamentTests(unittest.TestCase):
         all_actions = pd.concat([actions, controls], ignore_index=True)
         aggregates = aggregate_behavior_actions(all_actions)
         scores = score_behavior_targets(aggregates, behavior_targets_frame())
+        cell_targets = behavior_targets_frame(target_scope="cell")
+        cell_joined = join_cell_behavior_target_errors(all_actions, cell_targets)
+        cell_scores = score_cell_behavior_targets(all_actions, cell_targets)
 
         self.assertEqual(actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
         self.assertEqual(len(client.raw_records), len(BEHAVIOR_SCENARIOS))
@@ -554,6 +594,11 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertFalse(scores.empty)
         self.assertIn("debt_saving", set(scores["target_family"]))
         self.assertIn("liquidity_gradient", set(scores["target_family"]))
+        self.assertFalse(cell_targets.empty)
+        self.assertFalse(cell_joined.empty)
+        self.assertFalse(cell_scores.empty)
+        self.assertIn("cell_mpc_by_liquidity", set(cell_scores["target_family"]))
+        self.assertEqual(set(cell_joined["target_scope"]), {"cell"})
 
     def test_household_behavior_target_range_scoring_rewards_inside_interval(self):
         targets = behavior_targets_frame()
@@ -572,6 +617,45 @@ class ForecastTournamentTests(unittest.TestCase):
             bad[column] = 0.0
 
         scores = score_behavior_targets(pd.concat([exact, bad], ignore_index=True), targets)
+
+        exact_all = scores[(scores["source"] == "exact") & (scores["target_family"] == "ALL")].iloc[0]
+        bad_all = scores[(scores["source"] == "bad") & (scores["target_family"] == "ALL")].iloc[0]
+        self.assertAlmostEqual(float(exact_all["rmse_range"]), 0.0)
+        self.assertGreater(float(bad_all["rmse_range"]), 0.0)
+
+    def test_behavior_target_catalog_scores_only_verified_public_targets(self):
+        catalog = behavior_target_catalog(include_unscored=True)
+        scored = behavior_targets_frame()
+        cell_scored = behavior_targets_frame(target_scope="cell")
+
+        self.assertGreater(catalog.shape[0], scored.shape[0])
+        self.assertEqual(set(scored["source_status"]), {"verified_public"})
+        self.assertTrue(scored["scored"].all())
+        self.assertEqual(set(scored["target_scope"]), {"aggregate"})
+        self.assertEqual(set(cell_scored["target_scope"]), {"cell"})
+        self.assertTrue(cell_scored["type_id"].astype(str).str.len().gt(0).all())
+        self.assertIn("unscored_gap", set(catalog["source_status"]))
+        self.assertIn("response_variable", scored.columns)
+
+    def test_cell_behavior_target_scoring_rewards_inside_interval(self):
+        targets = behavior_targets_frame(target_scope="cell")
+        actions = pd.DataFrame(
+            [
+                {
+                    "scenario_id": row["scenario_id"],
+                    "source": "exact",
+                    "type_id": row["type_id"],
+                    "population_weight": 1.0,
+                    "total_spending_share": float(row["target_value"]),
+                }
+                for _, row in targets.iterrows()
+            ]
+        )
+        bad = actions.copy()
+        bad["source"] = "bad"
+        bad["total_spending_share"] = 0.0
+
+        scores = score_cell_behavior_targets(pd.concat([actions, bad], ignore_index=True), targets)
 
         exact_all = scores[(scores["source"] == "exact") & (scores["target_family"] == "ALL")].iloc[0]
         bad_all = scores[(scores["source"] == "bad") & (scores["target_family"] == "ALL")].iloc[0]
@@ -894,6 +978,48 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(combined.shape[0], 1)
         self.assertAlmostEqual(combined.iloc[0]["spf_forecast"], 2.538)
         self.assertEqual(combined.iloc[0]["source_url"], "detail")
+
+    def test_postcutoff_replay_cache_freeze_helpers_keep_zero_live_calls(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=2,
+        )
+        with TemporaryDirectory() as tmp:
+            client = ForecastLLMClient("codex_cli", "gpt-5.5", Path(tmp), mode="replay", max_live_calls=0)
+            cached_path = client.cache_path(client.forecast_cache_name(cards[0]))
+            cached_path.parent.mkdir(parents=True, exist_ok=True)
+            cached_path.write_text("{}", encoding="utf-8")
+
+            cached, missing = split_cards_by_replay_cache(cards, client)
+
+        self.assertEqual(len(cached), 1)
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(client.live_call_count, 0)
+
+    def test_newly_scoreable_count_uses_previous_freeze_rows(self):
+        selected = pd.DataFrame(
+            [
+                {"variable": "RGDP", "origin_index": 8105, "horizon": 1, "scoreable": True},
+                {"variable": "CPI", "origin_index": 8105, "horizon": 1, "scoreable": False},
+                {"variable": "UNEMP", "origin_index": 8105, "horizon": 1, "scoreable": True},
+            ]
+        )
+        with TemporaryDirectory() as tmp:
+            previous = Path(tmp)
+            pd.DataFrame(
+                [
+                    {"variable": "RGDP", "origin_index": 8105, "horizon": 1},
+                    {"variable": "CPI", "origin_index": 8105, "horizon": 1},
+                ]
+            ).to_csv(previous / "postcutoff_freeze_rows.csv", index=False)
+
+            count = count_newly_scoreable_rows(selected, str(previous))
+
+        self.assertEqual(count, 1)
 
     def test_postcutoff_behavior_proxy_cards_hide_target_dates_and_values(self):
         frames = fixture_fred_proxy_frames()

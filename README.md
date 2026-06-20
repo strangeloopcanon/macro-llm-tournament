@@ -7,7 +7,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 ## What is in the repo
 
 - `src/macro_llm_tournament/forecast_tournament.py` builds and scores SPF-style forecast tournaments.
-- `src/macro_llm_tournament/forecast_audit.py` audits completed tournament runs for reviewer checks: direct realized-value recall, surprise splits, Theil's U, and paired loss gaps.
+- `src/macro_llm_tournament/forecast_audit.py` audits completed tournament runs for reviewer checks: direct realized-value recall, surprise splits, Theil's U, paired loss gaps, and belief-structure diagnostics.
 - `src/macro_llm_tournament/forecast_cards.py` creates as-of prompt cards with hidden realized outcomes and hidden same-card SPF consensus.
 - `src/macro_llm_tournament/forecast_controls.py` implements no-change, rolling mean, AR, recursive least-squares, constant-gain, extrapolative, diagnostic, and official SPF benchmark controls.
 - `src/macro_llm_tournament/fred_vintage.py` adds FRED/ALFRED real-time macro context when `FRED_API_KEY` is available.
@@ -15,7 +15,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/forecast_agent_panel.py` maps forecasts into a typed household-panel scaffold without spending extra LLM calls.
 - `src/macro_llm_tournament/agent_economy.py` runs the forecast-first typed agent economy CLI.
 - `src/macro_llm_tournament/agent_llm.py`, `agent_runtime.py`, `agent_types.py`, `agent_targets.py`, and `agent_report.py` hold the LLM-agent schema, accounting runtime, SCF-style type cells, origin-level household-belief scoring, and report rendering.
-- `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against public stimulus-response targets for MPC, liquidity gradients, debt repayment, and liquid saving.
+- `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against a packaged public stimulus-response target catalog for aggregate MPC, liquidity gradients, debt repayment, liquid saving, and cell-level MPC-by-liquidity targets; unverified direct-target gaps stay unscored.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
 
 ## Quick start
@@ -80,7 +80,7 @@ Run the zero-cost household behavior target fixture:
 make behavior-fixture
 ```
 
-This scores SCF-style household types against public stimulus-response targets from the tax-rebate, 2008 stimulus, and 2020 EIP literature. The target gate covers aggregate MPC/spending, liquidity gradients, debt repayment, and liquid saving.
+This scores SCF-style household types against public stimulus-response targets from the tax-rebate, 2008 stimulus, and 2020 EIP literature. The target gate covers aggregate MPC/spending, liquidity gradients, debt repayment, liquid saving, and a separate cell-level MPC-by-liquidity bridge.
 
 Run the zero-cost post-cutoff household behavior proxy fixture:
 
@@ -124,11 +124,15 @@ PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
   --model gpt-5.5 \
   --llm-mode replay \
   --max-live-calls 0 \
+  --replay-cache-miss-policy freeze \
+  --previous-run-dir outputs/spf_postcutoff_gpt55_2026q1q2 \
   --vintage-context require \
   --belief-targets best_effort \
   --typed-agent-panel \
   --output-dir outputs/spf_postcutoff_gpt55_replay
 ```
+
+With `--replay-cache-miss-policy freeze`, newly discovered uncached cards are written as frozen replay misses instead of spending live calls. Existing cached cards are rescored normally, and the manifest records replayed, uncached-frozen, and newly scoreable counts.
 
 The historical tournament remains useful for scale, controls, and debugging, but its holdout is pre-cutoff:
 
@@ -166,6 +170,8 @@ PYTHONPATH=src python3 -m macro_llm_tournament.forecast_audit \
 
 The direct recall probe is deliberately separate from the forecast call. It asks the model, without tools or files, whether it remembers the realized value for each card. Use `--recall-mode fixture` for zero-cost CI and `--recall-mode replay` when a prior recall cache should be reused.
 
+Every audit also emits `audit_belief_structure.csv` and `audit_belief_structure_summary.csv`. These files summarize underreaction, extrapolation, disagreement/dispersion, interval calibration, confidence calibration, and surprise response from the existing forecast outputs, without additional model calls.
+
 Run a fresh-cache typed agent economy pilot after the fixture passes:
 
 ```bash
@@ -201,7 +207,9 @@ PYTHONPATH=src python3 -m macro_llm_tournament.behavior_gate \
   --output-dir outputs/behavior_gate_gpt55_fresh
 ```
 
-The behavior gate uses one packed LLM call per event scenario. The deterministic layer then aggregates household-type allocations and scores them against published spending, debt-repayment, saving, and liquidity-gradient moments.
+The behavior gate uses one packed LLM call per event scenario. The deterministic layer then aggregates household-type allocations and scores them against published spending, debt-repayment, saving, and liquidity-gradient moments. It also writes a separate cell-level score surface that applies public low- and high-liquidity spending-response ranges to matching SCF household types, weighted by population share.
+
+The scored behavior targets are loaded from `src/macro_llm_tournament/data/public_behavior_targets.csv`. Aggregate and cell-level rows are separated by `target_scope`, so the aggregate scoreboard is not inflated by repeated household-cell rows. Rows marked as unscored gaps document direct targets the project still needs, such as labor response and portfolio/liquidity shifts, without letting proxy data count as evidence for them.
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 

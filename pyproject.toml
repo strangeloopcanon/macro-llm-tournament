@@ -30,3 +30,6 @@ macro-llm-forecast-audit = "macro_llm_tournament.forecast_audit:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+macro_llm_tournament = ["data/*.csv"]
