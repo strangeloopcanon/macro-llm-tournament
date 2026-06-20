@@ -31,6 +31,15 @@ from macro_llm_tournament.behavior_gate import (
     run_behavior_gate,
     score_behavior_targets,
 )
+from macro_llm_tournament.forecast_audit import (
+    build_source_scores,
+    build_surprise_audit,
+    build_theil_u,
+    direct_recall_prompt,
+    fixture_recall_payload,
+    normalize_direct_recall_payload,
+    score_direct_recall,
+)
 from macro_llm_tournament.forecast_cards import (
     assert_no_prompt_target_leakage,
     build_forecast_cards,
@@ -225,6 +234,71 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(verdict["status"], "ok")
         non_variable = slice_scores[slice_scores["slice"].isin(["regime", "evaluation_split", "contamination"])]
         self.assertEqual(set(non_variable["variable"]), {"ALL"})
+
+    def test_forecast_audit_reports_surprise_theil_and_source_scores(self):
+        data = spf_fixture()
+        cards = build_forecast_cards(
+            data,
+            variables=["CPI", "RGDP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=6,
+        )
+        card_frame = cards_to_frame(cards)
+        controls = build_control_forecasts(data, cards, tune_end_year=2017)
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        _scores, _behavior, joined = score_forecasts(card_frame, pd.concat([controls, llm_forecasts], ignore_index=True))
+
+        source_scores = build_source_scores(joined)
+        surprise = build_surprise_audit(joined, card_frame)
+        theil = build_theil_u(joined)
+
+        self.assertIn("ALL", set(source_scores["variable"]))
+        self.assertIn("llm_minus_spf_gap", set(surprise["source"]))
+        self.assertIn("surprise_bucket", set(surprise["bucket_type"]))
+        self.assertIn("event_bucket", set(surprise["bucket_type"]))
+        no_change = theil[(theil["source"] == "no_change") & (theil["variable"] == "ALL")].iloc[0]
+        self.assertAlmostEqual(float(no_change["theils_u_vs_no_change"]), 1.0)
+
+    def test_direct_recall_probe_is_card_specific_and_fails_closed(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI", "RGDP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2018,
+            card_count=2,
+        )
+        card_frame = cards_to_frame(cards)
+        prompt = direct_recall_prompt(card_frame)
+
+        self.assertIn(cards[0].card_id, prompt)
+        self.assertNotIn("target_realized", prompt)
+        self.assertNotIn(str(cards[0].target_realized), prompt)
+
+        fixture = {"payload": fixture_recall_payload(card_frame)}
+        normalized = normalize_direct_recall_payload(card_frame, fixture)
+        self.assertEqual(len(normalized), len(cards))
+        self.assertTrue(all(np.isnan(row["recalled_realized"]) for row in normalized))
+
+        exact = card_frame[["card_id"]].copy()
+        exact["recalled_realized"] = card_frame["target_realized"]
+        exact["confidence"] = 1.0
+        exact["reason"] = "test oracle"
+        exact["cache_hit"] = True
+        exact["cache_path"] = ""
+        scores = score_direct_recall(card_frame, exact)
+        overall = scores[scores["variable"] == "ALL"].iloc[0]
+        self.assertEqual(int(overall["n"]), len(cards))
+        self.assertAlmostEqual(float(overall["coverage"]), 1.0)
+        self.assertAlmostEqual(float(overall["rmse"]), 0.0)
+
+        broken = fixture_recall_payload(card_frame)
+        broken["items"] = broken["items"][:-1]
+        with self.assertRaises(LLMUnavailable):
+            normalize_direct_recall_payload(card_frame, {"payload": broken})
 
     def test_invalid_llm_payload_fails_closed_instead_of_falling_back(self):
         card = build_forecast_cards(

@@ -7,6 +7,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 ## What is in the repo
 
 - `src/macro_llm_tournament/forecast_tournament.py` builds and scores SPF-style forecast tournaments.
+- `src/macro_llm_tournament/forecast_audit.py` audits completed tournament runs for reviewer checks: direct realized-value recall, surprise splits, Theil's U, and paired loss gaps.
 - `src/macro_llm_tournament/forecast_cards.py` creates as-of prompt cards with hidden realized outcomes and hidden same-card SPF consensus.
 - `src/macro_llm_tournament/forecast_controls.py` implements no-change, rolling mean, AR, recursive least-squares, constant-gain, extrapolative, diagnostic, and official SPF benchmark controls.
 - `src/macro_llm_tournament/fred_vintage.py` adds FRED/ALFRED real-time macro context when `FRED_API_KEY` is available.
@@ -89,6 +90,14 @@ make postcutoff-behavior-fixture
 
 This exercises the contamination-clean behavior runner without using live data or LLM calls.
 
+Run the zero-cost forecast audit fixture:
+
+```bash
+make audit-fixture
+```
+
+This reruns the SPF fixture if needed, then emits reviewer-style audit files under `outputs/forecast_audit_fixture`.
+
 ## Live LLM runs
 
 Live runs are deliberately capped. A live run fails unless `--max-live-calls` is positive.
@@ -142,6 +151,20 @@ Requirements for that run:
 - `FRED_API_KEY` set in `.env` or the process environment.
 
 Copy `.env.example` to `.env` and fill in only the keys you need.
+
+Audit any completed forecast tournament:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.forecast_audit \
+  --run-dir outputs/spf_vintage_survey_agent_gpt55 \
+  --recall-mode live \
+  --max-live-calls 1 \
+  --recall-batch-size 64 \
+  --fresh-cache \
+  --output-dir outputs/spf_vintage_survey_agent_gpt55_audit
+```
+
+The direct recall probe is deliberately separate from the forecast call. It asks the model, without tools or files, whether it remembers the realized value for each card. Use `--recall-mode fixture` for zero-cost CI and `--recall-mode replay` when a prior recall cache should be reused.
 
 Run a fresh-cache typed agent economy pilot after the fixture passes:
 

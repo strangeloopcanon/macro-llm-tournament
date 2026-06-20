@@ -1,4 +1,4 @@
-.PHONY: test fixture data postcutoff-fixture agent-fixture behavior-fixture postcutoff-behavior-fixture
+.PHONY: test fixture data postcutoff-fixture agent-fixture behavior-fixture postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -47,3 +47,9 @@ postcutoff-behavior-fixture:
 		--agent-mode fixture \
 		--max-live-calls 0 \
 		--output-dir outputs/postcutoff_behavior_gate_fixture
+
+audit-fixture: fixture
+	PYTHONPATH=src python3 -m macro_llm_tournament.forecast_audit \
+		--run-dir outputs/spf_fixture \
+		--recall-mode fixture \
+		--output-dir outputs/forecast_audit_fixture
