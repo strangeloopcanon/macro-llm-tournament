@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "As-of macro forecast tournaments for testing LLM belief engines."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "Rohit"}]
 dependencies = [
   "numpy",
@@ -23,6 +23,7 @@ dependencies = [
 macro-llm-forecast-tournament = "macro_llm_tournament.forecast_tournament:main"
 macro-llm-download-data = "macro_llm_tournament.download_data:main"
 macro-llm-postcutoff-tournament = "macro_llm_tournament.postcutoff_tournament:main"
+macro-llm-agent-economy = "macro_llm_tournament.agent_economy:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

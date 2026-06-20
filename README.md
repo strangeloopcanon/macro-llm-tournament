@@ -12,6 +12,8 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/fred_vintage.py` adds FRED/ALFRED real-time macro context when `FRED_API_KEY` is available.
 - `src/macro_llm_tournament/survey_beliefs.py` loads household belief context from NY Fed SCE chart data and Michigan/FRED inflation expectations.
 - `src/macro_llm_tournament/forecast_agent_panel.py` maps forecasts into a typed household-panel scaffold without spending extra LLM calls.
+- `src/macro_llm_tournament/agent_economy.py` runs the forecast-first typed agent economy CLI.
+- `src/macro_llm_tournament/agent_llm.py`, `agent_runtime.py`, `agent_types.py`, `agent_targets.py`, and `agent_report.py` hold the LLM-agent schema, accounting runtime, SCF-style type cells, origin-level household-belief scoring, and report rendering.
 
 ## Quick start
 
@@ -60,6 +62,14 @@ make postcutoff-fixture
 ```
 
 This builds post-cutoff SPF cards from official SPF mean forecast files. Rows with complete FRED proxy realizations are scored immediately; incomplete rows are frozen for later rescoring.
+
+Run the zero-cost typed agent economy fixture:
+
+```bash
+make agent-fixture
+```
+
+This derives household type cells from the local public SCF extract when available, runs the packed typed-agent fixture schema for households/firms/banks, and emits persistent agent state, desired actions, feasible actions, aggregate outcomes, accounting diagnostics, origin-level household-belief target scores, and a report under `outputs/`.
 
 ## Live LLM runs
 
@@ -115,9 +125,32 @@ Requirements for that run:
 
 Copy `.env.example` to `.env` and fill in only the keys you need.
 
+Run a fresh-cache typed agent economy pilot after the fixture passes:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
+  --provider codex_cli \
+  --model gpt-5.5 \
+  --llm-mode live \
+  --max-live-calls 9 \
+  --fresh-forecast-cache \
+  --agent-mode live \
+  --max-agent-live-calls 8 \
+  --fresh-agent-cache \
+  --belief-sources llm \
+  --card-count 8 \
+  --vintage-context require \
+  --belief-targets best_effort \
+  --output-dir outputs/agent_economy_gpt55_fresh
+```
+
+`--fresh-forecast-cache` and `--fresh-agent-cache` write model responses under the run output directory instead of the shared local cache, so a live pilot does not accidentally replay prior calls. `--llm-mode` controls the macro forecast calls. `--agent-mode` controls whether typed households, firms, and banks are rule-based, fixture, replayed, or live LLM agents. Even when agents are live LLMs, code still enforces budgets, credit limits, portfolio conservation, and aggregation.
+
+Agent state advances once per SPF origin, not once per variable card. That prevents CPI, GDP, and rate cards from the same survey date from becoming artificial time steps. Household belief target scores are also origin-level, so a single future SCE or Michigan observation is counted once per origin.
+
 ## Scope
 
-This is an experimental research harness. Public source files are limited to the runner, controls, tests, and setup instructions. Research interpretations and generated summaries should be kept outside the public repository until they are ready for release.
+This is an experimental research harness. The working hypothesis is that LLMs are most useful as structured belief engines, then household/firm/bank behavior should be constrained by accounting rather than left to free-form simulation. Public source files are limited to runners, controls, tests, and setup instructions. Research interpretations and generated summaries should be kept outside the public repository until they are ready for release.
 
 ## Data sources
 

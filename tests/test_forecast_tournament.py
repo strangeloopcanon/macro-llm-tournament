@@ -10,6 +10,16 @@ import numpy as np
 import pandas as pd
 
 from macro_llm_tournament.forecast_agent_panel import build_forecast_agent_panel
+from macro_llm_tournament.agent_economy import (
+    AgentLLMClient,
+    agent_prompt,
+    build_agent_belief_target_rows,
+    build_household_type_cells,
+    fixture_agent_payload,
+    normalize_agent_payload,
+    run_agent_economy,
+    score_agent_belief_targets,
+)
 from macro_llm_tournament.forecast_cards import (
     assert_no_prompt_target_leakage,
     build_forecast_cards,
@@ -224,6 +234,350 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(aggregate.shape[0], len(cards))
         self.assertIn("consumption_change_pct", panel.columns)
         self.assertIn("desired_liquid_buffer_change_pct", aggregate.columns)
+
+    def test_agent_economy_derives_weighted_scf_type_cells_from_public_extract(self):
+        with TemporaryDirectory() as tmp:
+            scf_dir = Path(tmp) / "scf" / "2022"
+            scf_dir.mkdir(parents=True)
+            path = scf_dir / "scfp2022excel.zip"
+            frame = pd.DataFrame(
+                [
+                    {
+                        "WGT": 1.0,
+                        "INCOME": 45000,
+                        "LIQ": 500,
+                        "ASSET": 8000,
+                        "DEBT": 3000,
+                        "NETWORTH": 5000,
+                        "HOUSES": 0,
+                        "BUS": 0,
+                        "AGE": 35,
+                        "WAGEINC": 40000,
+                        "FOODHOME": 6000,
+                        "FOODAWAY": 2000,
+                        "FOODDELV": 500,
+                        "RENT": 12000,
+                    },
+                    {
+                        "WGT": 2.0,
+                        "INCOME": 120000,
+                        "LIQ": 3000,
+                        "ASSET": 650000,
+                        "DEBT": 320000,
+                        "NETWORTH": 330000,
+                        "HOUSES": 550000,
+                        "BUS": 0,
+                        "AGE": 42,
+                        "WAGEINC": 110000,
+                    },
+                    {
+                        "WGT": 1.0,
+                        "INCOME": 300000,
+                        "LIQ": 90000,
+                        "ASSET": 2500000,
+                        "DEBT": 350000,
+                        "NETWORTH": 2150000,
+                        "HOUSES": 900000,
+                        "BUS": 800000,
+                        "AGE": 55,
+                        "WAGEINC": 100000,
+                    },
+                ]
+            )
+            with ZipFile(path, "w") as archive:
+                archive.writestr("SCFP2022.csv", frame.to_csv(index=False))
+
+            cells, status = build_household_type_cells(work_dir=Path(tmp) / "scf", wave=2022)
+
+        self.assertEqual(status["status"], "ok")
+        self.assertEqual(cells["type_id"].nunique(), 8)
+        self.assertAlmostEqual(float(cells["population_weight"].sum()), 1.0)
+        self.assertTrue((cells["credit_limit_proxy"] >= 0).all())
+        self.assertIn("scf_2022_public_extract", set(cells["source"]))
+
+    def test_agent_economy_persistent_actions_pass_accounting_and_emit_aggregates(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI", "RGDP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=4,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        controls = build_control_forecasts(spf_fixture(), cards, tune_end_year=2017)
+        forecasts = pd.concat([controls, llm_forecasts], ignore_index=True)
+
+        state, desired, feasible, aggregates, diagnostics, scores = run_agent_economy(
+            cards,
+            forecasts,
+            build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0],
+            source_filters=["llm", "constant_gain"],
+        )
+
+        self.assertFalse(state.empty)
+        self.assertFalse(desired.empty)
+        self.assertFalse(feasible.empty)
+        self.assertFalse(aggregates.empty)
+        self.assertFalse(scores.empty)
+        self.assertTrue(diagnostics["passes_accounting"].all())
+        self.assertLessEqual(float(diagnostics["max_abs_cash_residual"].max()), 1e-6)
+        self.assertLessEqual(float(diagnostics["max_abs_networth_residual"].max()), 1e-6)
+        self.assertIn("firm_hiring_index", aggregates.columns)
+        self.assertIn("credit_rationing_ratio", feasible.columns)
+
+    def test_agent_economy_fixture_llm_agents_drive_household_firm_and_bank_rows(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI", "RGDP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=4,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        agent_client = AgentLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+
+        _state, desired, feasible, aggregates, diagnostics, _scores = run_agent_economy(
+            cards,
+            llm_forecasts,
+            type_cells,
+            source_filters=["llm"],
+            agent_client=agent_client,
+        )
+
+        self.assertEqual(len(agent_client.raw_records), len(cards))
+        self.assertEqual(set(desired["agent_behavior_mode"]), {"llm_agent"})
+        self.assertTrue(diagnostics["passes_accounting"].all())
+        self.assertTrue(feasible["agent_bank_credit_multiplier"].map(np.isfinite).all())
+        self.assertTrue(aggregates["firm_hiring_index"].map(np.isfinite).all())
+        self.assertEqual(desired.groupby("card_id")["type_id"].nunique().min(), type_cells.shape[0])
+
+    def test_agent_belief_target_scoring_uses_future_survey_observations(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2018,
+            card_count=1,
+        )
+        survey_targets = pd.DataFrame(
+            [
+                {
+                    "survey_source": "michigan_survey_of_consumers",
+                    "target_name": "median_expected_price_change_next_12_months",
+                    "date": pd.Timestamp("2018-02-01"),
+                    "horizon_months": 12,
+                    "value": 2.9,
+                    "units": "percent",
+                    "source_url": "https://example.test/mich",
+                },
+                {
+                    "survey_source": "michigan_survey_of_consumers",
+                    "target_name": "median_expected_price_change_next_12_months",
+                    "date": pd.Timestamp("2018-04-01"),
+                    "horizon_months": 12,
+                    "value": 3.1,
+                    "units": "percent",
+                    "source_url": "https://example.test/mich",
+                },
+            ]
+        )
+        targets = build_agent_belief_target_rows(cards, survey_targets)
+        aggregates = pd.DataFrame(
+            [
+                {
+                    "card_id": cards[0].card_id,
+                    "source": "llm_codex_cli_gpt-5.5",
+                    "origin": cards[0].origin,
+                    "horizon": cards[0].horizon,
+                    "variable": cards[0].variable,
+                    "aggregate_expected_inflation_1y": 3.4,
+                    "aggregate_confidence": 0.7,
+                    "aggregate_uncertainty": 0.4,
+                }
+            ]
+        )
+
+        scores = score_agent_belief_targets(aggregates, targets)
+
+        self.assertFalse(targets.empty)
+        self.assertEqual(targets.iloc[0]["target_date"], "2018-04-01")
+        self.assertEqual(scores.iloc[0]["n"], 1)
+        self.assertAlmostEqual(scores.iloc[0]["mae"], 0.3)
+
+    def test_agent_belief_targets_are_origin_level_not_repeated_per_variable(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI", "RGDP", "TBILL"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2018,
+            card_count=3,
+        )
+        survey_targets = pd.DataFrame(
+            [
+                {
+                    "survey_source": "ny_fed_sce",
+                    "target_name": "median_expected_inflation",
+                    "date": pd.Timestamp("2018-04-01"),
+                    "horizon_months": 12,
+                    "value": 3.1,
+                    "units": "percent",
+                    "source_url": "https://example.test/sce",
+                }
+            ]
+        )
+
+        targets = build_agent_belief_target_rows(cards, survey_targets)
+
+        self.assertEqual(targets.shape[0], 1)
+        self.assertEqual(targets.iloc[0]["card_count"], 3)
+        self.assertEqual(targets.iloc[0]["variables"], "CPI,RGDP,TBILL")
+
+    def test_agent_economy_same_origin_cards_share_prior_state(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI", "RGDP", "TBILL"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2019,
+            card_count=6,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+
+        _state, desired, _feasible, _aggregates, _diagnostics, _scores = run_agent_economy(
+            cards,
+            llm_forecasts,
+            type_cells,
+            source_filters=["llm"],
+        )
+
+        first_origin = desired["origin"].iloc[0]
+        same_origin = desired[
+            (desired["origin"] == first_origin)
+            & (desired["type_id"] == "liquid_poor_renter")
+        ]
+        self.assertGreaterEqual(same_origin["variable"].nunique(), 2)
+        self.assertEqual(same_origin["prior_liquid_assets"].nunique(), 1)
+        self.assertEqual(same_origin["prior_debt"].nunique(), 1)
+
+    def test_agent_prompt_does_not_expose_realized_forecast_error_state(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2018,
+            card_count=1,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        prior_states = [
+            {
+                "type_id": str(row["type_id"]),
+                "expected_inflation_1y": 2.5,
+                "expected_real_income_growth": 1.5,
+                "expected_unemployment_rate": 4.5,
+                "expected_short_rate": 3.0,
+                "confidence": 0.5,
+                "uncertainty": 0.5,
+                "desired_liquid_buffer_months": 2.0,
+                "credit_access": "normal",
+                "recent_forecast_error": 999.0,
+            }
+            for _, row in type_cells.iterrows()
+        ]
+
+        prompt = agent_prompt(cards[0], llm_forecasts.iloc[0], type_cells, prior_states)
+
+        self.assertNotIn("recent_forecast_error", prompt)
+        self.assertNotIn("999", prompt)
+
+    def test_agent_payload_requires_firm_and_bank_sections(self):
+        card = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2018,
+            card_count=1,
+        )[0]
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, [card])
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        actions = [
+            {
+                "type_id": str(row["type_id"]),
+                "consumption_change_pct": 0.0,
+                "liquid_buffer_change_pct": 0.0,
+                "borrowing_desire_index": 0.0,
+                "portfolio_rebalance_to_liquid_pct": 0.0,
+                "job_search_intensity_index": 0.0,
+                "expected_inflation_1y": 2.5,
+                "expected_real_income_growth": 1.5,
+                "expected_unemployment_rate": 4.5,
+                "expected_short_rate": 3.0,
+                "confidence": 0.5,
+                "uncertainty": 0.5,
+            }
+            for _, row in type_cells.iterrows()
+        ]
+
+        with self.assertRaises(LLMUnavailable):
+            normalize_agent_payload(card, llm_forecasts.iloc[0], type_cells, {"payload": {"household_actions": actions}})
+
+    def test_agent_live_cap_blocks_uncached_second_packed_agent_call(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=2,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        prior_states = [
+            {
+                "type_id": str(row["type_id"]),
+                "expected_inflation_1y": 2.5,
+                "expected_real_income_growth": 1.5,
+                "expected_unemployment_rate": 4.5,
+                "expected_short_rate": 3.0,
+                "confidence": 0.5,
+                "uncertainty": 0.5,
+                "desired_liquid_buffer_months": 2.0,
+                "credit_access": "normal",
+                "recent_forecast_error": 0.0,
+                "liquid_assets": float(row["liquid_assets"]),
+                "debt": float(row["debt"]),
+            }
+            for _, row in type_cells.iterrows()
+        ]
+
+        with TemporaryDirectory() as tmp, patch.dict("os.environ", {"CODEX_CLI_BIN": "/tmp/codex"}):
+            agent_client = AgentLLMClient("codex_cli", "gpt-5.5", Path(tmp), mode="live", max_live_calls=1)
+
+            def fake_run(command, input, text, capture_output, cwd, timeout, check):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(json.dumps(fixture_agent_payload(cards[0], llm_forecasts.iloc[0], type_cells, prior_states)))
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with patch("macro_llm_tournament.agent_llm.subprocess.run", side_effect=fake_run):
+                agent_client.agent_panel(cards[0], llm_forecasts.iloc[0], type_cells, prior_states)
+                with self.assertRaises(LLMUnavailable):
+                    agent_client.agent_panel(cards[1], llm_forecasts.iloc[1], type_cells, prior_states)
+
+        self.assertEqual(agent_client.live_call_count, 1)
 
     def test_forecast_live_cap_blocks_uncached_second_call(self):
         cards = build_forecast_cards(
