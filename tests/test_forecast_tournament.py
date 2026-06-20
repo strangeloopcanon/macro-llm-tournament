@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,13 @@ from macro_llm_tournament.forecast_llm import ForecastLLMClient, normalize_forec
 from macro_llm_tournament.forecast_scoring import score_forecast_slices, score_forecasts, verdict_from_scores
 from macro_llm_tournament.fred_vintage import approximate_spf_as_of_date, build_vintage_context_for_cards
 from macro_llm_tournament.llm_common import LLMUnavailable
+from macro_llm_tournament.postcutoff_tournament import (
+    DETAIL_FORECAST_SPECS,
+    annualized_pct_change,
+    combine_official_and_detail_rows,
+    read_simple_xlsx,
+    realize_variable,
+)
 from macro_llm_tournament.survey_beliefs import survey_context_by_card
 
 
@@ -304,6 +312,86 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(summary["skipped"], 1)
         self.assertEqual(summary["groups"]["fred"], {"files": 1, "bytes": 10, "errors": 0, "skipped": 1})
         self.assertEqual(summary["groups"]["spf"], {"files": 0, "bytes": 0, "errors": 1, "skipped": 0})
+
+    def test_simple_xlsx_reader_handles_shared_strings_and_numeric_cells(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mini.xlsx"
+            with ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "xl/sharedStrings.xml",
+                    """<?xml version="1.0" encoding="UTF-8"?>
+                    <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                      <si><t>YEAR</t></si><si><t>QUARTER</t></si><si><t>CPI2</t></si>
+                    </sst>""",
+                )
+                archive.writestr(
+                    "xl/worksheets/sheet1.xml",
+                    """<?xml version="1.0" encoding="UTF-8"?>
+                    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                      <sheetData>
+                        <row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row>
+                        <row r="2"><c r="A2"><v>2026</v></c><c r="B2"><v>1</v></c><c r="C2"><v>2.5</v></c></row>
+                      </sheetData>
+                    </worksheet>""",
+                )
+
+            frame = read_simple_xlsx(path)
+
+        self.assertEqual(frame.loc[0, "YEAR"], 2026.0)
+        self.assertEqual(frame.loc[0, "QUARTER"], 1.0)
+        self.assertEqual(frame.loc[0, "CPI2"], 2.5)
+
+    def test_postcutoff_realization_requires_complete_monthly_quarter(self):
+        series = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2025-10-01", "2025-11-01", "2025-12-01", "2026-01-01", "2026-02-01"]),
+                "value": [100.0, 101.0, 102.0, 103.0, 104.0],
+            }
+        )
+        rows = pd.DataFrame(realize_variable("CPI", DETAIL_FORECAST_SPECS["CPI"], series))
+
+        q1 = rows[rows["origin"] == "2026:Q1"].iloc[0]
+        self.assertFalse(q1["realization_complete"])
+        self.assertTrue(np.isnan(q1["fred_realized"]))
+        self.assertAlmostEqual(annualized_pct_change(104.0, 100.0), 16.985856, places=6)
+
+    def test_postcutoff_combination_prefers_detail_forecast_over_blank_official_placeholder(self):
+        columns = [
+            "variable",
+            "variable_name",
+            "units",
+            "origin",
+            "origin_year",
+            "origin_quarter",
+            "origin_index",
+            "horizon",
+            "spf_forecast",
+            "official_iar_forecast",
+            "official_no_change_forecast",
+            "official_dar_forecast",
+            "official_darm_forecast",
+            "realized",
+            "source_url",
+            "variable_page_url",
+        ]
+        official = pd.DataFrame(
+            [
+                ["RGDP", "real GDP growth", "annualized percentage points", "2026:Q1", 2026, 1, 8105, 1, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, "official", "page"],
+            ],
+            columns=columns,
+        )
+        detail = pd.DataFrame(
+            [
+                ["RGDP", "real GDP growth", "annualized percentage points", "2026:Q1", 2026, 1, 8105, 1, 2.538, np.nan, np.nan, np.nan, np.nan, 1.621, "detail", "page"],
+            ],
+            columns=columns,
+        )
+
+        combined = combine_official_and_detail_rows(official, detail)
+
+        self.assertEqual(combined.shape[0], 1)
+        self.assertAlmostEqual(combined.iloc[0]["spf_forecast"], 2.538)
+        self.assertEqual(combined.iloc[0]["source_url"], "detail")
 
 
 if __name__ == "__main__":

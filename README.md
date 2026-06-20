@@ -53,6 +53,14 @@ make data
 
 This writes ignored files under `work/`, including SPF workbooks, survey-belief files, public FRED/ALFRED graph CSVs, and SCF public files.
 
+After the local data bundle exists, run a zero-cost post-cutoff fixture tournament:
+
+```bash
+make postcutoff-fixture
+```
+
+This builds post-cutoff SPF cards from official SPF mean forecast files. Rows with complete FRED proxy realizations are scored immediately; incomplete rows are frozen for later rescoring.
+
 ## Live LLM runs
 
 Live runs are deliberately capped. A live run fails unless `--max-live-calls` is positive.
@@ -78,6 +86,20 @@ Requirements for that run:
 - `FRED_API_KEY` set in `.env` or the process environment.
 
 Copy `.env.example` to `.env` and fill in only the keys you need.
+
+The post-cutoff live gate uses the same call cap discipline:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
+  --provider codex_cli \
+  --model gpt-5.5 \
+  --llm-mode live \
+  --max-live-calls 9 \
+  --vintage-context require \
+  --belief-targets best_effort \
+  --typed-agent-panel \
+  --output-dir outputs/spf_postcutoff_gpt55_2026q1q2
+```
 
 ## Scope
 

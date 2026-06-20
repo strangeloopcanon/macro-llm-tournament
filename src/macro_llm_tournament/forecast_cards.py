@@ -366,6 +366,38 @@ def build_forecast_cards(
     return cards
 
 
+def build_forecast_cards_from_rows(
+    spf_data: pd.DataFrame,
+    selected_rows: pd.DataFrame,
+    *,
+    variables: Iterable[str],
+    holdout_start_year: int,
+    holdout_end_year: int,
+    history_quarters: int = 24,
+) -> list[ForecastCard]:
+    cards: list[ForecastCard] = []
+    selected = selected_rows.sort_values(["origin_index", "variable", "horizon"])
+    for _, row in selected.iterrows():
+        history = spf_data[
+            (spf_data["variable"] == row["variable"])
+            & (spf_data["horizon"] == row["horizon"])
+            & (spf_data["origin_index"] < row["origin_index"])
+            & (spf_data["spf_forecast"].map(finite))
+        ].sort_values("origin_index")
+        card = _card_from_row(
+            row,
+            history,
+            spf_data=spf_data,
+            variables=variables,
+            holdout_start_year=holdout_start_year,
+            holdout_end_year=holdout_end_year,
+            history_quarters=history_quarters,
+        )
+        if card is not None:
+            cards.append(card)
+    return cards
+
+
 def cards_to_frame(cards: Iterable[ForecastCard]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for card in cards:
