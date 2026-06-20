@@ -360,6 +360,10 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
         high = group[group["liquidity_group"] == "high"]
         low_spend = _weighted_average(low, "total_spending_share")
         high_spend = _weighted_average(high, "total_spending_share")
+        low_debt = _weighted_average(low, "debt_repayment_share")
+        high_debt = _weighted_average(high, "debt_repayment_share")
+        low_liquid_saving = _weighted_average(low, "liquid_saving_share")
+        high_liquid_saving = _weighted_average(high, "liquid_saving_share")
         rows.append(
             {
                 "scenario_id": scenario_id,
@@ -373,6 +377,12 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
                 "low_liquidity_total_spending_share": low_spend,
                 "high_liquidity_total_spending_share": high_spend,
                 "low_high_liquidity_spending_ratio": low_spend / max(high_spend, 1e-9),
+                "low_liquidity_debt_repayment_share": low_debt,
+                "high_liquidity_debt_repayment_share": high_debt,
+                "low_minus_high_debt_repayment_share": low_debt - high_debt,
+                "low_liquidity_liquid_saving_share": low_liquid_saving,
+                "high_liquidity_liquid_saving_share": high_liquid_saving,
+                "high_minus_low_liquid_saving_share": high_liquid_saving - low_liquid_saving,
             }
         )
     return pd.DataFrame(rows)
@@ -580,9 +590,10 @@ def build_behavior_gate_report(
         "## What This Gate Means",
         (
             "This gate scores household behavior directly against public stimulus-response moments. "
-            "The aggregate surface preserves the original public target scoreboard. The cell-level surface applies "
-            "public low- and high-liquidity response ranges to matching SCF household types, weighted by population "
-            "share, so the bridge asks whether typed agents beat a liquidity baseline at the household-cell grain. "
+            "The aggregate surface covers spending, debt repayment, saving, and directional debt/saving gradients "
+            "by liquidity. The cell-level surface applies public low- and high-liquidity response ranges to matching "
+            "SCF household types, weighted by population share, so the bridge asks whether typed agents beat a "
+            "liquidity baseline at the household-cell grain. "
             "Rows in the unscored gap table are intentionally held out until a public direct target is verified."
         ),
         "",
