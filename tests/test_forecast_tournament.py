@@ -20,6 +20,17 @@ from macro_llm_tournament.agent_economy import (
     run_agent_economy,
     score_agent_belief_targets,
 )
+from macro_llm_tournament.behavior_gate import (
+    BEHAVIOR_SCENARIOS,
+    BehaviorLLMClient,
+    aggregate_behavior_actions,
+    behavior_targets_frame,
+    fixture_behavior_payload,
+    normalize_behavior_payload,
+    run_behavior_controls,
+    run_behavior_gate,
+    score_behavior_targets,
+)
 from macro_llm_tournament.forecast_cards import (
     assert_no_prompt_target_leakage,
     build_forecast_cards,
@@ -438,6 +449,57 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(targets.shape[0], 1)
         self.assertEqual(targets.iloc[0]["card_count"], 3)
         self.assertEqual(targets.iloc[0]["variables"], "CPI,RGDP,TBILL")
+
+    def test_household_behavior_gate_scores_spending_debt_and_liquidity_targets(self):
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        client = BehaviorLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0)
+
+        actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=client)
+        controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
+        all_actions = pd.concat([actions, controls], ignore_index=True)
+        aggregates = aggregate_behavior_actions(all_actions)
+        scores = score_behavior_targets(aggregates, behavior_targets_frame())
+
+        self.assertEqual(actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
+        self.assertEqual(len(client.raw_records), len(BEHAVIOR_SCENARIOS))
+        self.assertEqual(all_actions.groupby(["scenario_id", "source"])["type_id"].nunique().min(), type_cells.shape[0])
+        use_sum = all_actions["total_spending_share"] + all_actions["debt_repayment_share"] + all_actions["liquid_saving_share"]
+        self.assertLessEqual(float(use_sum.max()), 1.000001)
+        self.assertFalse(scores.empty)
+        self.assertIn("debt_saving", set(scores["target_family"]))
+        self.assertIn("liquidity_gradient", set(scores["target_family"]))
+
+    def test_household_behavior_target_range_scoring_rewards_inside_interval(self):
+        targets = behavior_targets_frame()
+        prediction_columns = sorted(set(targets["prediction_column"]))
+        rows = []
+        for scenario_id, group in targets.groupby("scenario_id"):
+            row = {"scenario_id": scenario_id, "source": "exact", "n_types": 8}
+            row.update({column: 0.0 for column in prediction_columns})
+            for _, target in group.iterrows():
+                row[str(target["prediction_column"])] = float(target["target_value"])
+            rows.append(row)
+        exact = pd.DataFrame(rows)
+        bad = exact.copy()
+        bad["source"] = "bad"
+        for column in prediction_columns:
+            bad[column] = 0.0
+
+        scores = score_behavior_targets(pd.concat([exact, bad], ignore_index=True), targets)
+
+        exact_all = scores[(scores["source"] == "exact") & (scores["target_family"] == "ALL")].iloc[0]
+        bad_all = scores[(scores["source"] == "bad") & (scores["target_family"] == "ALL")].iloc[0]
+        self.assertAlmostEqual(float(exact_all["rmse_range"]), 0.0)
+        self.assertGreater(float(bad_all["rmse_range"]), 0.0)
+
+    def test_household_behavior_payload_fails_closed_when_type_missing(self):
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        scenario = BEHAVIOR_SCENARIOS[0]
+        payload = fixture_behavior_payload(scenario, type_cells)
+        payload["household_actions"] = payload["household_actions"][:-1]
+
+        with self.assertRaises(LLMUnavailable):
+            normalize_behavior_payload(scenario, type_cells, {"payload": payload})
 
     def test_agent_economy_same_origin_cards_share_prior_state(self):
         cards = build_forecast_cards(

@@ -14,6 +14,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/forecast_agent_panel.py` maps forecasts into a typed household-panel scaffold without spending extra LLM calls.
 - `src/macro_llm_tournament/agent_economy.py` runs the forecast-first typed agent economy CLI.
 - `src/macro_llm_tournament/agent_llm.py`, `agent_runtime.py`, `agent_types.py`, `agent_targets.py`, and `agent_report.py` hold the LLM-agent schema, accounting runtime, SCF-style type cells, origin-level household-belief scoring, and report rendering.
+- `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against public stimulus-response targets for MPC, liquidity gradients, debt repayment, and liquid saving.
 
 ## Quick start
 
@@ -70,6 +71,14 @@ make agent-fixture
 ```
 
 This derives household type cells from the local public SCF extract when available, runs the packed typed-agent fixture schema for households/firms/banks, and emits persistent agent state, desired actions, feasible actions, aggregate outcomes, accounting diagnostics, origin-level household-belief target scores, and a report under `outputs/`.
+
+Run the zero-cost household behavior target fixture:
+
+```bash
+make behavior-fixture
+```
+
+This scores SCF-style household types against public stimulus-response targets from the tax-rebate, 2008 stimulus, and 2020 EIP literature. The target gate covers aggregate MPC/spending, liquidity gradients, debt repayment, and liquid saving.
 
 ## Live LLM runs
 
@@ -148,6 +157,20 @@ PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
 
 Agent state advances once per SPF origin, not once per variable card. That prevents CPI, GDP, and rate cards from the same survey date from becoming artificial time steps. Household belief target scores are also origin-level, so a single future SCE or Michigan observation is counted once per origin.
 
+Run a fresh-cache household behavior target pilot:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.behavior_gate \
+  --provider codex_cli \
+  --model gpt-5.5 \
+  --behavior-mode live \
+  --max-live-calls 3 \
+  --fresh-cache \
+  --output-dir outputs/behavior_gate_gpt55_fresh
+```
+
+The behavior gate uses one packed LLM call per event scenario. The deterministic layer then aggregates household-type allocations and scores them against published spending, debt-repayment, saving, and liquidity-gradient moments.
+
 ## Scope
 
 This is an experimental research harness. The working hypothesis is that LLMs are most useful as structured belief engines, then household/firm/bank behavior should be constrained by accounting rather than left to free-form simulation. Public source files are limited to runners, controls, tests, and setup instructions. Research interpretations and generated summaries should be kept outside the public repository until they are ready for release.
@@ -160,6 +183,9 @@ This is an experimental research harness. The working hypothesis is that LLMs ar
 - FRED real-time periods: https://fred.stlouisfed.org/docs/api/fred/realtime_period.html
 - NY Fed Survey of Consumer Expectations: https://www.newyorkfed.org/microeconomics/sce
 - Michigan inflation expectations on FRED: https://fred.stlouisfed.org/series/MICH
+- Parker, Souleles, Johnson, and McClelland 2008 ESP replication archive: https://www.openicpsr.org/openicpsr/project/116117/version/V1/view
+- CFPB/Pagel et al. liquidity and EIP response note: https://files.consumerfinance.gov/f/documents/cfpb_pagel_income-liquidity-and-the-consumption-response-to-the-2020-economic-_H7TYltp.pdf
+- NY Fed Liberty Street Economics EIP use summary: https://libertystreeteconomics.newyorkfed.org/2020/10/how-have-households-used-their-stimulus-payments-and-how-would-they-spend-the-next/
 
 ## License
 

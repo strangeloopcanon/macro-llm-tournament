@@ -1,4 +1,4 @@
-.PHONY: test fixture data postcutoff-fixture agent-fixture
+.PHONY: test fixture data postcutoff-fixture agent-fixture behavior-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -34,3 +34,9 @@ agent-fixture:
 		--vintage-context best_effort \
 		--belief-targets best_effort \
 		--output-dir outputs/agent_economy_fixture
+
+behavior-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.behavior_gate \
+		--behavior-mode fixture \
+		--max-live-calls 0 \
+		--output-dir outputs/behavior_gate_fixture
