@@ -20,7 +20,7 @@ from .forecast_cards import (
 from .forecast_controls import build_control_forecasts
 from .forecast_data import WORK_ROOT as SPF_WORK_ROOT
 from .forecast_data import load_spf_error_data, parse_variable_list
-from .forecast_llm import ForecastLLMClient, run_llm_forecasts
+from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS, run_llm_forecasts
 from .forecast_report import build_forecast_report
 from .forecast_scoring import score_forecast_slices, score_forecasts, verdict_from_scores
 from .fred_vintage import WORK_ROOT as FRED_VINTAGE_WORK_ROOT
@@ -37,7 +37,7 @@ LLM_CACHE_ROOT = PROJECT_ROOT / "work" / "llm_cache"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a direct SPF forecast tournament for LLM beliefs.")
-    parser.add_argument("--provider", choices=["codex_cli"], default="codex_cli")
+    parser.add_argument("--provider", choices=SUPPORTED_FORECAST_PROVIDERS, default="codex_cli")
     parser.add_argument("--model", default="gpt-5.5")
     parser.add_argument("--llm-mode", choices=["fixture", "replay", "live"], default="fixture")
     parser.add_argument("--max-live-calls", type=int, default=0)

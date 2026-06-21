@@ -3,9 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
-import shutil
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,14 +11,31 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .agent_common import PROJECT_ROOT, WORK_ROOT, cache_key, extract_json, markdown_table
+from .agent_common import PROJECT_ROOT, WORK_ROOT, cache_key, markdown_table
+from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
 from .llm_common import LLMUnavailable
 
 
 AUDIT_VERSION = "forecast_tournament_audit_v1"
 DIRECT_RECALL_VERSION = "direct_realization_recall_probe_v1"
-DEFAULT_RUN_DIR = PROJECT_ROOT / "outputs" / "current" / "historical_48card_gpt55" / "live"
+QUALITATIVE_RECALL_VERSION = "qualitative_path_recall_probe_v1"
+DEFAULT_RUN_DIR = PROJECT_ROOT / "outputs" / "current" / "evidence" / "historical_48card_gpt55" / "live"
 DEFAULT_CACHE_DIR = WORK_ROOT / "direct_recall_cache"
+DEFAULT_QUALITATIVE_CACHE_DIR = WORK_ROOT / "qualitative_recall_cache"
+QUALITATIVE_DIRECTIONS = {"rise", "fall", "flat"}
+QUALITATIVE_LEVELS = {"unusually high", "unusually low", "about normal"}
+QUALITATIVE_TURBULENCE = {"crisis", "calm"}
+CRISIS_REGIMES = {"covid_shock", "inflation_surge"}
+DIRECT_RECALL_INSTRUCTIONS = """
+Return only valid JSON. This is a direct recall contamination probe.
+Do not browse, inspect files, run commands, or infer using hidden outcome data. If you do not
+know a realized value from memory, return null for that item.
+""".strip()
+QUALITATIVE_RECALL_INSTRUCTIONS = """
+Return only valid JSON. This is a qualitative path-recall contamination probe.
+Do not browse, inspect files, run commands, or infer using hidden outcome data. Give one label
+per requested field for each card from memory of the public U.S. macro path.
+""".strip()
 
 
 @dataclass(frozen=True)
@@ -54,11 +68,13 @@ class DirectRecallClient:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit an existing SPF forecast tournament run.")
     parser.add_argument("--run-dir", default=str(DEFAULT_RUN_DIR))
-    parser.add_argument("--provider", choices=["codex_cli"], default="codex_cli")
+    parser.add_argument("--provider", choices=SUPPORTED_FORECAST_PROVIDERS, default="codex_cli")
     parser.add_argument("--model", default="gpt-5.5")
     parser.add_argument("--recall-mode", choices=["off", "fixture", "replay", "live"], default="off")
+    parser.add_argument("--qualitative-recall-mode", choices=["off", "fixture", "replay", "live"], default="off")
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--recall-batch-size", type=int, default=48)
+    parser.add_argument("--qualitative-recall-batch-size", type=int, default=48)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
@@ -68,11 +84,14 @@ def main() -> int:
     args = parse_args()
     if args.recall_mode == "live" and args.max_live_calls <= 0:
         raise SystemExit("--max-live-calls must be positive when --recall-mode live is used")
+    if args.qualitative_recall_mode == "live" and args.max_live_calls <= 0:
+        raise SystemExit("--max-live-calls must be positive when --qualitative-recall-mode live is used")
     run_dir = Path(args.run_dir)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(args.output_dir) if args.output_dir else run_dir / f"audit_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = output_dir / "fresh_direct_recall_cache" if args.fresh_cache else DEFAULT_CACHE_DIR
+    qualitative_cache_dir = output_dir / "fresh_qualitative_recall_cache" if args.fresh_cache else DEFAULT_QUALITATIVE_CACHE_DIR
     manifest: dict[str, Any] = {
         "schema_version": AUDIT_VERSION,
         "timestamp_utc": timestamp,
@@ -80,8 +99,10 @@ def main() -> int:
         "provider": args.provider,
         "model": args.model,
         "recall_mode": args.recall_mode,
+        "qualitative_recall_mode": args.qualitative_recall_mode,
         "max_live_calls": int(args.max_live_calls),
         "recall_batch_size": int(args.recall_batch_size),
+        "qualitative_recall_batch_size": int(args.qualitative_recall_batch_size),
         "fresh_cache": bool(args.fresh_cache),
         "status": "running",
     }
@@ -98,6 +119,10 @@ def main() -> int:
         recall_predictions = pd.DataFrame()
         recall_scores = pd.DataFrame()
         recall_raw: list[dict[str, Any]] = []
+        qualitative_targets = build_qualitative_recall_targets(cards, joined)
+        qualitative_predictions = pd.DataFrame()
+        qualitative_scores = pd.DataFrame()
+        qualitative_raw: list[dict[str, Any]] = []
         recall_client = DirectRecallClient(
             args.provider,
             args.model,
@@ -112,6 +137,20 @@ def main() -> int:
                 batch_size=args.recall_batch_size,
             )
             recall_scores = score_direct_recall(cards, recall_predictions)
+        qualitative_client = DirectRecallClient(
+            args.provider,
+            args.model,
+            qualitative_cache_dir,
+            mode=args.qualitative_recall_mode,
+            max_live_calls=args.max_live_calls,
+        )
+        if args.qualitative_recall_mode != "off":
+            qualitative_predictions, qualitative_raw, qualitative_client = run_qualitative_recall(
+                qualitative_targets,
+                qualitative_client,
+                batch_size=args.qualitative_recall_batch_size,
+            )
+            qualitative_scores = score_qualitative_recall(qualitative_targets, qualitative_predictions)
         source_scores.to_csv(output_dir / "audit_source_scores.csv", index=False)
         surprise.to_csv(output_dir / "audit_surprise_split.csv", index=False)
         theil.to_csv(output_dir / "audit_theils_u.csv", index=False)
@@ -120,7 +159,11 @@ def main() -> int:
         belief_summary.to_csv(output_dir / "audit_belief_structure_summary.csv", index=False)
         recall_predictions.to_csv(output_dir / "direct_recall_predictions.csv", index=False)
         recall_scores.to_csv(output_dir / "direct_recall_scores.csv", index=False)
+        qualitative_targets.to_csv(output_dir / "qualitative_recall_targets.csv", index=False)
+        qualitative_predictions.to_csv(output_dir / "qualitative_recall_predictions.csv", index=False)
+        qualitative_scores.to_csv(output_dir / "qualitative_recall_scores.csv", index=False)
         (output_dir / "direct_recall_raw_records.json").write_text(json.dumps(recall_raw, indent=2, sort_keys=True), encoding="utf-8")
+        (output_dir / "qualitative_recall_raw_records.json").write_text(json.dumps(qualitative_raw, indent=2, sort_keys=True), encoding="utf-8")
         manifest.update(
             {
                 "status": "ok",
@@ -137,6 +180,11 @@ def main() -> int:
                 "recall_score_rows": int(recall_scores.shape[0]),
                 "recall_live_call_count": int(recall_client.live_call_count),
                 "recall_cache_hit_count": int(recall_client.cache_hit_count),
+                "qualitative_recall_target_rows": int(qualitative_targets.shape[0]),
+                "qualitative_recall_prediction_rows": int(qualitative_predictions.shape[0]),
+                "qualitative_recall_score_rows": int(qualitative_scores.shape[0]),
+                "qualitative_recall_live_call_count": int(qualitative_client.live_call_count),
+                "qualitative_recall_cache_hit_count": int(qualitative_client.cache_hit_count),
                 "outputs": [
                     "audit_source_scores.csv",
                     "audit_surprise_split.csv",
@@ -147,11 +195,24 @@ def main() -> int:
                     "direct_recall_predictions.csv",
                     "direct_recall_scores.csv",
                     "direct_recall_raw_records.json",
+                    "qualitative_recall_targets.csv",
+                    "qualitative_recall_predictions.csv",
+                    "qualitative_recall_scores.csv",
+                    "qualitative_recall_raw_records.json",
                     "forecast_audit_report.md",
                 ],
             }
         )
-        report = build_audit_report(manifest, source_scores, surprise, theil, paired, recall_scores, belief_summary=belief_summary)
+        report = build_audit_report(
+            manifest,
+            source_scores,
+            surprise,
+            theil,
+            paired,
+            recall_scores,
+            belief_summary=belief_summary,
+            qualitative_scores=qualitative_scores,
+        )
         (output_dir / "forecast_audit_report.md").write_text(report, encoding="utf-8")
         (output_dir / "audit_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         print(output_dir)
@@ -550,6 +611,393 @@ def normal_p_value(t_value: float) -> float:
     return float(math.erfc(abs(t_value) / math.sqrt(2.0)))
 
 
+def build_qualitative_recall_targets(cards: pd.DataFrame, joined: pd.DataFrame) -> pd.DataFrame:
+    if cards.empty:
+        return pd.DataFrame()
+    frame = cards.copy()
+    if "asof_reference_value" not in frame and "asof_reference_value" in joined:
+        reference = joined[["card_id", "asof_reference_value"]].drop_duplicates("card_id")
+        frame = frame.merge(reference, on="card_id", how="left")
+    if "asof_reference_value" not in frame:
+        frame["asof_reference_value"] = np.nan
+    frame["truth_reference_value"] = pd.to_numeric(frame["asof_reference_value"], errors="coerce")
+    frame["target_realized"] = pd.to_numeric(frame["target_realized"], errors="coerce")
+    frame = frame[frame["target_realized"].map(np.isfinite) & frame["truth_reference_value"].map(np.isfinite)].copy()
+    if frame.empty:
+        return pd.DataFrame()
+
+    spf_errors = (
+        joined[joined["source"] == "spf_consensus"][["card_id", "abs_error"]]
+        .rename(columns={"abs_error": "spf_abs_err"})
+        .drop_duplicates("card_id")
+    )
+    llm_errors = (
+        joined[joined["source"].astype(str).str.startswith("llm_")][["card_id", "abs_error"]]
+        .rename(columns={"abs_error": "gpt_abs_err"})
+        .drop_duplicates("card_id")
+    )
+    frame = frame.merge(spf_errors, on="card_id", how="left").merge(llm_errors, on="card_id", how="left")
+    frame["target_change"] = frame["target_realized"] - frame["truth_reference_value"]
+    frame["truth_direction"] = "flat"
+    for variable, group in frame.groupby("variable", dropna=False):
+        realized = group["target_realized"].astype(float)
+        sd = float(realized.std(ddof=0)) if group.shape[0] > 1 else 0.0
+        tol = max(1e-9, 0.10 * sd)
+        changes = group["target_change"].astype(float)
+        direction = np.where(changes > tol, "rise", np.where(changes < -tol, "fall", "flat"))
+        frame.loc[group.index, "truth_direction"] = direction
+        if sd <= 1e-12 or not np.isfinite(sd):
+            frame.loc[group.index, "truth_level_vs_norm"] = "about normal"
+        else:
+            z = (realized - float(realized.mean())) / sd
+            level = np.where(z > 1.0, "unusually high", np.where(z < -1.0, "unusually low", "about normal"))
+            frame.loc[group.index, "truth_level_vs_norm"] = level
+
+    regime = frame["regime_label"].fillna("unknown").astype(str) if "regime_label" in frame else pd.Series("unknown", index=frame.index)
+    contamination = (
+        frame["contamination_label"].fillna("").astype(str)
+        if "contamination_label" in frame
+        else pd.Series("", index=frame.index)
+    )
+    frame["truth_turbulence"] = np.where(regime.isin(CRISIS_REGIMES), "crisis", "calm")
+    frame["event_bucket"] = np.where(regime.isin(CRISIS_REGIMES), "covid_or_inflation_surge", "other_regimes")
+    frame["cutoff_bucket"] = np.where(contamination.str.startswith("post_model_cutoff"), "post_cutoff", "pre_cutoff")
+    median_spf_error = float(frame["spf_abs_err"].median()) if "spf_abs_err" in frame and frame["spf_abs_err"].notna().any() else np.nan
+    frame["surprise_bucket"] = np.where(
+        frame["spf_abs_err"].astype(float) > median_spf_error,
+        "surprising_spf_error_gt_median",
+        "calm_spf_error_le_median",
+    )
+    frame["gpt_edge_bucket"] = "edge_unknown"
+    has_edge = frame["gpt_abs_err"].notna() & frame["spf_abs_err"].notna()
+    frame.loc[has_edge & (frame["gpt_abs_err"] < frame["spf_abs_err"]), "gpt_edge_bucket"] = "gpt_beats_spf"
+    frame.loc[has_edge & (frame["gpt_abs_err"] >= frame["spf_abs_err"]), "gpt_edge_bucket"] = "spf_beats_or_ties"
+    frame["target_quarter_label"] = frame.apply(_target_quarter_label, axis=1)
+
+    columns = [
+        "card_id",
+        "variable",
+        "variable_name",
+        "origin",
+        "horizon",
+        "target_quarter_label",
+        "regime_label",
+        "contamination_label",
+        "truth_direction",
+        "truth_level_vs_norm",
+        "truth_turbulence",
+        "truth_reference_value",
+        "target_realized",
+        "target_change",
+        "event_bucket",
+        "surprise_bucket",
+        "cutoff_bucket",
+        "gpt_edge_bucket",
+        "gpt_abs_err",
+        "spf_abs_err",
+    ]
+    for column in columns:
+        if column not in frame:
+            frame[column] = np.nan
+    return frame[columns].reset_index(drop=True)
+
+
+def _target_quarter_label(row: pd.Series) -> str:
+    origin_index = pd.to_numeric(row.get("origin_index", np.nan), errors="coerce")
+    horizon = int(row.get("horizon", 0) or 0)
+    if np.isfinite(origin_index):
+        target_index = int(origin_index) + max(horizon - 1, 0)
+    else:
+        target_index = _quarter_index_from_label(str(row.get("origin", ""))) + max(horizon - 1, 0)
+    if target_index <= 0:
+        return str(row.get("origin", "unknown"))
+    year = (target_index - 1) // 4
+    quarter = target_index - year * 4
+    return f"{year} Q{quarter}"
+
+
+def _quarter_index_from_label(label: str) -> int:
+    try:
+        year_text, quarter_text = label.replace(" ", "").split(":Q")
+        return int(year_text) * 4 + int(quarter_text)
+    except Exception:
+        return 0
+
+
+def run_qualitative_recall(
+    targets: pd.DataFrame,
+    client: DirectRecallClient,
+    *,
+    batch_size: int,
+) -> tuple[pd.DataFrame, list[dict[str, Any]], DirectRecallClient]:
+    rows: list[dict[str, Any]] = []
+    raw_records: list[dict[str, Any]] = []
+    for start in range(0, targets.shape[0], batch_size):
+        batch = targets.iloc[start : start + batch_size].copy()
+        if client.mode == "fixture":
+            payload = fixture_qualitative_recall_payload(batch)
+            data = {
+                "provider": client.provider,
+                "model": client.model,
+                "payload": payload,
+                "cache_hit": True,
+                "cache_path": None,
+            }
+        else:
+            prompt = qualitative_recall_prompt(batch)
+            data, client = qualitative_recall_call(client, prompt, qualitative_recall_cache_name(client, prompt))
+        normalized = normalize_qualitative_recall_payload(batch, data)
+        rows.extend(normalized)
+        raw_records.append(
+            {
+                "batch_start": start,
+                "batch_size": int(batch.shape[0]),
+                "provider": data.get("provider"),
+                "model": data.get("model"),
+                "cache_hit": bool(data.get("cache_hit", False)),
+                "cache_path": data.get("cache_path"),
+                "payload": data.get("payload", data),
+            }
+        )
+    return pd.DataFrame(rows), raw_records, client
+
+
+def qualitative_recall_prompt(targets: pd.DataFrame) -> str:
+    items = [
+        {
+            "card_id": row["card_id"],
+            "variable": row["variable"],
+            "variable_name": row.get("variable_name", row["variable"]),
+            "forecast_target_period": row["origin"],
+            "spf_step_ahead": int(row["horizon"]),
+            "target_quarter": row["target_quarter_label"],
+        }
+        for _, row in targets.iterrows()
+    ]
+    payload = {
+        "prompt_version": QUALITATIVE_RECALL_VERSION,
+        "task": (
+            "Using memory of U.S. macroeconomic history only, classify the actual realized qualitative path "
+            "for each SPF-style target. Do not use tools, browsing, files, calculations, or hidden outcome data."
+        ),
+        "classification_questions": {
+            "direction": "Did the realized value rise, fall, or stay flat versus the immediately previous realized/reference quarter?",
+            "level_vs_norm": "Was the realized value unusually high, unusually low, or about normal by 2015-2024 standards?",
+            "turbulence": "Was the target quarter a period of U.S. macroeconomic crisis/turbulence, or calm?",
+        },
+        "allowed_values": {
+            "direction": sorted(QUALITATIVE_DIRECTIONS),
+            "level_vs_norm": sorted(QUALITATIVE_LEVELS),
+            "turbulence": sorted(QUALITATIVE_TURBULENCE),
+        },
+        "required_response": {
+            "items": [
+                {
+                    "card_id": "matching id",
+                    "direction": "rise|fall|flat",
+                    "level_vs_norm": "unusually high|unusually low|about normal",
+                    "turbulence": "crisis|calm",
+                    "confidence": "0 to 1",
+                    "reason": "short memory-status reason",
+                }
+            ]
+        },
+        "items": items,
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def qualitative_recall_cache_name(client: DirectRecallClient, prompt: str) -> str:
+    return f"qualitative_recall_{cache_key({'provider': client.provider, 'model': client.model, 'prompt': prompt})}"
+
+
+def provider_json_call(
+    client: DirectRecallClient,
+    prompt: str,
+    cache_name: str,
+    *,
+    instructions: str,
+) -> tuple[dict[str, Any], DirectRecallClient]:
+    llm_client = ForecastLLMClient(
+        client.provider,
+        client.model,
+        client.cache_dir,
+        mode=client.mode,
+        max_live_calls=client.max_live_calls,
+    )
+    llm_client.live_call_count = client.live_call_count
+    llm_client.cache_hit_count = client.cache_hit_count
+    data = llm_client.json_call(prompt, cache_name, instructions=instructions)
+    return data, client.with_counts(
+        live_call_count=llm_client.live_call_count,
+        cache_hit_count=llm_client.cache_hit_count,
+    )
+
+
+def qualitative_recall_call(client: DirectRecallClient, prompt: str, cache_name: str) -> tuple[dict[str, Any], DirectRecallClient]:
+    return provider_json_call(
+        client,
+        prompt,
+        cache_name,
+        instructions=QUALITATIVE_RECALL_INSTRUCTIONS,
+    )
+
+
+def normalize_qualitative_recall_payload(targets: pd.DataFrame, data: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = data.get("payload", data)
+    items = payload.get("items")
+    expected = set(targets["card_id"].astype(str))
+    cache_metadata = {
+        "cache_hit": bool(data.get("cache_hit", False)),
+        "cache_path": data.get("cache_path"),
+    }
+    if not isinstance(items, list):
+        reason = str(payload.get("error") or payload.get("reason") or "qualitative recall payload missing items")[:300]
+        return [
+            {
+                "card_id": str(card_id),
+                "predicted_direction": "",
+                "predicted_level_vs_norm": "",
+                "predicted_turbulence": "",
+                "confidence": np.nan,
+                "reason": reason,
+                **cache_metadata,
+            }
+            for card_id in targets["card_id"].astype(str)
+        ]
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        card_id = str(item.get("card_id", ""))
+        if card_id not in expected:
+            continue
+        confidence = item.get("confidence", np.nan)
+        try:
+            confidence_value = float(confidence)
+        except (TypeError, ValueError):
+            confidence_value = np.nan
+        by_id[card_id] = {
+            "card_id": card_id,
+            "predicted_direction": _normalize_qualitative_label(item.get("direction"), QUALITATIVE_DIRECTIONS),
+            "predicted_level_vs_norm": _normalize_qualitative_label(item.get("level_vs_norm"), QUALITATIVE_LEVELS),
+            "predicted_turbulence": _normalize_qualitative_label(item.get("turbulence"), QUALITATIVE_TURBULENCE),
+            "confidence": confidence_value,
+            "reason": str(item.get("reason", ""))[:300],
+            **cache_metadata,
+        }
+    missing = sorted(expected - set(by_id))
+    if missing:
+        for card_id in missing:
+            by_id[card_id] = {
+                "card_id": card_id,
+                "predicted_direction": "",
+                "predicted_level_vs_norm": "",
+                "predicted_turbulence": "",
+                "confidence": np.nan,
+                "reason": "qualitative recall payload missing this card id",
+                **cache_metadata,
+            }
+    return [by_id[str(card_id)] for card_id in targets["card_id"].astype(str)]
+
+
+def _normalize_qualitative_label(value: Any, allowed: set[str]) -> str:
+    text = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    aliases = {
+        "increased": "rise",
+        "increase": "rise",
+        "rising": "rise",
+        "higher": "rise",
+        "decreased": "fall",
+        "decrease": "fall",
+        "falling": "fall",
+        "lower": "fall",
+        "same": "flat",
+        "unchanged": "flat",
+        "stable": "flat",
+        "normal": "about normal",
+        "about average": "about normal",
+        "average": "about normal",
+        "high": "unusually high",
+        "low": "unusually low",
+        "turbulent": "crisis",
+        "recession": "crisis",
+        "shock": "crisis",
+        "stable macro": "calm",
+    }
+    text = aliases.get(text, text)
+    return text if text in allowed else ""
+
+
+def fixture_qualitative_recall_payload(targets: pd.DataFrame) -> dict[str, Any]:
+    return {
+        "prompt_version": QUALITATIVE_RECALL_VERSION,
+        "items": [
+            {
+                "card_id": row["card_id"],
+                "direction": "flat",
+                "level_vs_norm": "about normal",
+                "turbulence": "calm",
+                "confidence": 0.0,
+                "reason": "fixture mode returns majority-class qualitative labels",
+            }
+            for _, row in targets.iterrows()
+        ],
+    }
+
+
+def score_qualitative_recall(targets: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
+    if targets.empty or predictions.empty:
+        return pd.DataFrame()
+    joined = targets.merge(predictions, on="card_id", how="inner")
+    if joined.empty:
+        return pd.DataFrame()
+    joined["direction_ok"] = (joined["predicted_direction"] == joined["truth_direction"]).astype(int)
+    joined["level_vs_norm_ok"] = (joined["predicted_level_vs_norm"] == joined["truth_level_vs_norm"]).astype(int)
+    joined["turbulence_ok"] = (joined["predicted_turbulence"] == joined["truth_turbulence"]).astype(int)
+    joined["card_mean_accuracy"] = joined[["direction_ok", "level_vs_norm_ok", "turbulence_ok"]].mean(axis=1)
+    base_rates = {
+        "direction_base_rate": _majority_rate(joined["truth_direction"]),
+        "level_vs_norm_base_rate": _majority_rate(joined["truth_level_vs_norm"]),
+        "turbulence_base_rate": _majority_rate(joined["truth_turbulence"]),
+    }
+    base_rates["card_mean_base_rate"] = float(np.mean(list(base_rates.values())))
+    rows: list[dict[str, Any]] = []
+    rows.append(_qualitative_score_row(joined, group_type="ALL", group_label="ALL", base_rates=base_rates))
+    for variable, group in joined.groupby("variable", dropna=False):
+        rows.append(_qualitative_score_row(group, group_type="variable", group_label=str(variable), base_rates=base_rates))
+    for column in ["event_bucket", "surprise_bucket", "cutoff_bucket", "gpt_edge_bucket"]:
+        if column in joined:
+            for group_name, group in joined.groupby(column, dropna=False):
+                rows.append(_qualitative_score_row(group, group_type=column, group_label=str(group_name), base_rates=base_rates))
+    return pd.DataFrame(rows).sort_values(["group_type", "group"]).reset_index(drop=True)
+
+
+def _majority_rate(values: pd.Series) -> float:
+    if values.empty:
+        return float("nan")
+    counts = values.astype(str).value_counts(dropna=False)
+    return float(counts.iloc[0] / values.shape[0]) if not counts.empty else float("nan")
+
+
+def _qualitative_score_row(group: pd.DataFrame, *, group_type: str, group_label: str, base_rates: dict[str, float]) -> dict[str, Any]:
+    return {
+        "source": "qualitative_recall",
+        "group_type": group_type,
+        "group": group_label,
+        "n": int(group.shape[0]),
+        "direction_accuracy": float(group["direction_ok"].mean()) if len(group) else np.nan,
+        "level_vs_norm_accuracy": float(group["level_vs_norm_ok"].mean()) if len(group) else np.nan,
+        "turbulence_accuracy": float(group["turbulence_ok"].mean()) if len(group) else np.nan,
+        "card_mean_accuracy": float(group["card_mean_accuracy"].mean()) if len(group) else np.nan,
+        "direction_base_rate": base_rates["direction_base_rate"],
+        "level_vs_norm_base_rate": base_rates["level_vs_norm_base_rate"],
+        "turbulence_base_rate": base_rates["turbulence_base_rate"],
+        "card_mean_base_rate": base_rates["card_mean_base_rate"],
+        "excess_card_mean_vs_base": float(group["card_mean_accuracy"].mean() - base_rates["card_mean_base_rate"]) if len(group) else np.nan,
+    }
+
+
 def run_direct_recall(
     cards: pd.DataFrame,
     client: DirectRecallClient,
@@ -594,8 +1042,8 @@ def direct_recall_prompt(cards: pd.DataFrame) -> str:
             "card_id": row["card_id"],
             "variable": row["variable"],
             "variable_name": row.get("variable_name", row["variable"]),
-            "origin": row["origin"],
-            "horizon": int(row["horizon"]),
+            "forecast_target_period": row["origin"],
+            "spf_step_ahead": int(row["horizon"]),
             "units": row.get("units", ""),
         }
         for _, row in cards.iterrows()
@@ -627,79 +1075,12 @@ def direct_recall_cache_name(client: DirectRecallClient, prompt: str) -> str:
 
 
 def direct_recall_call(client: DirectRecallClient, prompt: str, cache_name: str) -> tuple[dict[str, Any], DirectRecallClient]:
-    cache_dir = client.cache_dir / client.provider
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = cache_dir / f"{cache_name}.json"
-    if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data["cache_hit"] = True
-        data["cache_path"] = str(path)
-        return data, client.with_counts(cache_hit_count=client.cache_hit_count + 1)
-    if client.mode == "replay":
-        raise LLMUnavailable(f"Direct recall replay cache miss for {cache_name}")
-    if client.mode != "live":
-        raise LLMUnavailable(f"Direct recall mode {client.mode} cannot make live calls")
-    if client.live_call_count >= client.max_live_calls:
-        raise LLMUnavailable(f"Direct recall live-call cap reached ({client.max_live_calls}); cache miss for {cache_name}")
-    binary = os.getenv("CODEX_CLI_BIN") or shutil.which("codex")
-    if not binary:
-        raise LLMUnavailable("codex CLI binary not found; set CODEX_CLI_BIN or install codex")
-    last_message_path = path.with_name(f"{path.stem}.{os.getpid()}.last_message.txt")
-    command = [
-        binary,
-        "exec",
-        "--model",
-        client.model,
-        "--cd",
-        str(PROJECT_ROOT),
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "--ignore-rules",
-        "--sandbox",
-        "read-only",
-        "--color",
-        "never",
-        "--output-last-message",
-        str(last_message_path),
-        "-",
-    ]
-    system_prompt = f"""
-Return only valid JSON. This is a direct recall contamination probe.
-Do not browse, inspect files, run commands, or infer using hidden outcome data. If you do not
-know a realized value from memory, return null for that item.
-
-{prompt.strip()}
-""".strip()
-    try:
-        result = subprocess.run(
-            command,
-            input=system_prompt,
-            text=True,
-            capture_output=True,
-            cwd=str(PROJECT_ROOT),
-            timeout=float(os.getenv("CODEX_CLI_TIMEOUT_SECONDS", "240")),
-            check=False,
-        )
-        if result.returncode != 0:
-            stderr = (result.stderr or result.stdout or "").strip()
-            raise LLMUnavailable(f"Codex CLI failed with exit code {result.returncode}: {stderr[:700]}")
-        text = last_message_path.read_text(encoding="utf-8") if last_message_path.exists() else result.stdout
-        payload = extract_json(text or result.stdout or "")
-        data = {
-            "provider": client.provider,
-            "model": client.model,
-            "payload": payload,
-            "cache_hit": False,
-            "cache_path": str(path),
-            "response_created_utc": datetime.now(timezone.utc).isoformat(),
-        }
-        path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        return data, client.with_counts(live_call_count=client.live_call_count + 1)
-    except subprocess.TimeoutExpired as exc:
-        raise LLMUnavailable(f"Codex CLI timed out after {exc.timeout} seconds") from exc
-    finally:
-        if last_message_path.exists():
-            last_message_path.unlink()
+    return provider_json_call(
+        client,
+        prompt,
+        cache_name,
+        instructions=DIRECT_RECALL_INSTRUCTIONS,
+    )
 
 
 def normalize_direct_recall_payload(cards: pd.DataFrame, data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -812,9 +1193,11 @@ def build_audit_report(
     recall_scores: pd.DataFrame,
     *,
     belief_summary: pd.DataFrame | None = None,
+    qualitative_scores: pd.DataFrame | None = None,
 ) -> str:
     overall = filter_variable(source_scores, "ALL").sort_values("rmse") if "rmse" in source_scores else pd.DataFrame()
     belief_all = filter_variable(belief_summary if belief_summary is not None else pd.DataFrame(), "ALL")
+    qualitative_scores = qualitative_scores if qualitative_scores is not None else pd.DataFrame()
     surprise_gap = filter_variable(surprise, "ALL")
     if not surprise_gap.empty and "source" in surprise_gap:
         surprise_gap = surprise_gap[surprise_gap["source"] == "llm_minus_spf_gap"].copy()
@@ -828,7 +1211,7 @@ def build_audit_report(
         "# Forecast Tournament Audit",
         "",
         "## Bottom Line",
-        audit_bottom_line(overall, surprise_gap, theil_all, recall_scores),
+        audit_bottom_line(overall, surprise_gap, theil_all, recall_scores, qualitative_scores),
         "",
         "## Overall Leaderboard With RMSE CI",
         markdown_table(select_columns(overall, ["source", "n", "rmse", "rmse_ci_low", "rmse_ci_high", "mae", "direction_accuracy"])),
@@ -874,6 +1257,24 @@ def build_audit_report(
         "## Direct Recall Scores",
         markdown_table(recall_scores if not recall_scores.empty else pd.DataFrame()),
         "",
+        "## Qualitative Path-Recall Scores",
+        markdown_table(
+            select_columns(
+                qualitative_scores if not qualitative_scores.empty else pd.DataFrame(),
+                [
+                    "group_type",
+                    "group",
+                    "n",
+                    "direction_accuracy",
+                    "level_vs_norm_accuracy",
+                    "turbulence_accuracy",
+                    "card_mean_accuracy",
+                    "card_mean_base_rate",
+                    "excess_card_mean_vs_base",
+                ],
+            )
+        ),
+        "",
         "## Manifest",
         "```json",
         json.dumps(manifest, indent=2, sort_keys=True),
@@ -904,6 +1305,7 @@ def audit_bottom_line(
     surprise_gap: pd.DataFrame,
     theil_all: pd.DataFrame,
     recall_scores: pd.DataFrame,
+    qualitative_scores: pd.DataFrame,
 ) -> str:
     parts: list[str] = []
     if not overall.empty:
@@ -927,6 +1329,23 @@ def audit_bottom_line(
         if not overall_recall.empty:
             row = overall_recall.iloc[0]
             parts.append(f"Direct recall coverage is `{float(row['coverage']):.2%}` with MAE `{row['mae']}`.")
+    if qualitative_scores.empty:
+        parts.append("Qualitative path recall was not run.")
+    else:
+        qualitative_all = qualitative_scores[(qualitative_scores["group_type"] == "ALL") & (qualitative_scores["group"] == "ALL")]
+        qualitative_surprise = qualitative_scores[
+            (qualitative_scores["group_type"] == "event_bucket")
+            & (qualitative_scores["group"] == "covid_or_inflation_surge")
+        ]
+        if not qualitative_all.empty:
+            row = qualitative_all.iloc[0]
+            parts.append(
+                f"Qualitative path-recall card accuracy is `{float(row['card_mean_accuracy']):.2%}` "
+                f"versus base `{float(row['card_mean_base_rate']):.2%}`."
+            )
+        if not qualitative_surprise.empty:
+            row = qualitative_surprise.iloc[0]
+            parts.append(f"COVID/inflation qualitative recall is `{float(row['card_mean_accuracy']):.2%}`.")
     return " ".join(parts)
 
 

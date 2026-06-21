@@ -7,7 +7,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 ## What is in the repo
 
 - `src/macro_llm_tournament/forecast_tournament.py` builds and scores SPF-style forecast tournaments.
-- `src/macro_llm_tournament/forecast_audit.py` audits completed tournament runs for reviewer checks: direct realized-value recall, surprise splits, Theil's U, paired loss gaps, and belief-structure diagnostics.
+- `src/macro_llm_tournament/forecast_audit.py` audits completed tournament runs for reviewer checks: direct realized-value recall, qualitative path recall, surprise splits, Theil's U, paired loss gaps, and belief-structure diagnostics.
 - `src/macro_llm_tournament/forecast_cards.py` creates as-of prompt cards with hidden realized outcomes and hidden same-card SPF consensus.
 - `src/macro_llm_tournament/forecast_controls.py` implements no-change, rolling mean, AR, recursive least-squares, constant-gain, extrapolative, diagnostic, and official SPF benchmark controls.
 - `src/macro_llm_tournament/fred_vintage.py` adds FRED/ALFRED real-time macro context when `FRED_API_KEY` is available.
@@ -49,6 +49,10 @@ PYTHONPATH=src python3 -m macro_llm_tournament.forecast_tournament \
 This downloads public SPF/SCE/Michigan data as needed, writes local outputs under `outputs/`, and makes no live LLM calls.
 
 After installing the package, the same runner is available as `macro-llm-forecast-tournament`.
+
+### SPF target-period semantics
+
+Philadelphia Fed SPF error-stat rows are dated by the forecasted period, not by the date the forecast was made. Forecast cards therefore expose `forecast_target_period` and `spf_step_ahead`; Step 1 is the one-step-ahead projection for that dated target period. Generated caches from older prompt schemas should not be reused after this field changes because card IDs intentionally change with the prompt payload.
 
 Download the public local data bundle:
 
@@ -116,6 +120,36 @@ PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
   --output-dir outputs/spf_postcutoff_gpt55_2026q1q2
 ```
 
+Use the OpenAI Responses API directly when the model is available by API but unavailable through the local Codex CLI:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
+  --provider openai_responses \
+  --model gpt-5 \
+  --llm-mode live \
+  --max-live-calls 32 \
+  --cutoff-date 2024-09-30 \
+  --vintage-context require \
+  --belief-targets best_effort \
+  --typed-agent-panel \
+  --output-dir outputs/spf_postcutoff_gpt5_api
+```
+
+Use the Gemini CLI in API-key mode for Gemini cutoff sweeps:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
+  --provider gemini_cli \
+  --model gemini-3.1-pro-preview \
+  --llm-mode live \
+  --max-live-calls 28 \
+  --cutoff-date 2025-01-31 \
+  --vintage-context require \
+  --belief-targets best_effort \
+  --typed-agent-panel \
+  --output-dir outputs/spf_postcutoff_gemini31pro
+```
+
 Use replay mode to rescore frozen post-cutoff cards after new public data arrives without spending live calls:
 
 ```bash
@@ -152,6 +186,8 @@ PYTHONPATH=src python3 -m macro_llm_tournament.forecast_tournament \
 Requirements for that run:
 
 - `codex` CLI available on `PATH`, or set `CODEX_CLI_BIN`.
+- `OPENAI_API_KEY` set in `.env` or the process environment when using `--provider openai_responses`.
+- `gemini` CLI available on `PATH`, or set `GEMINI_CLI_BIN`, plus `GEMINI_API_KEY` when using `--provider gemini_cli`.
 - `FRED_API_KEY` set in `.env` or the process environment.
 
 Copy `.env.example` to `.env` and fill in only the keys you need.
@@ -162,13 +198,17 @@ Audit any completed forecast tournament:
 PYTHONPATH=src python3 -m macro_llm_tournament.forecast_audit \
   --run-dir outputs/spf_vintage_survey_agent_gpt55 \
   --recall-mode live \
+  --qualitative-recall-mode live \
   --max-live-calls 1 \
   --recall-batch-size 64 \
+  --qualitative-recall-batch-size 64 \
   --fresh-cache \
   --output-dir outputs/spf_vintage_survey_agent_gpt55_audit
 ```
 
 The direct recall probe is deliberately separate from the forecast call. It asks the model, without tools or files, whether it remembers the realized value for each card. Use `--recall-mode fixture` for zero-cost CI and `--recall-mode replay` when a prior recall cache should be reused.
+
+The qualitative path-recall probe is the stronger contamination check. It asks whether the model remembers the realized path direction, level versus normal, and crisis/calm status for each target quarter without showing realized values. Use `--qualitative-recall-mode fixture`, `replay`, or `live` with the same cache discipline as direct recall.
 
 Every audit also emits `audit_belief_structure.csv` and `audit_belief_structure_summary.csv`. These files summarize underreaction, extrapolation, disagreement/dispersion, interval calibration, confidence calibration, and surprise response from the existing forecast outputs, without additional model calls.
 

@@ -21,6 +21,13 @@ BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v2"
 BEHAVIOR_PROMPT_VERSION = "household_behavior_target_gate_v1"
 TARGET_CATALOG_PACKAGE = "macro_llm_tournament"
 TARGET_CATALOG_RESOURCE = "data/public_behavior_targets.csv"
+BEHAVIOR_SHARE_COLUMNS = [
+    "total_spending_share",
+    "nondurable_spending_share",
+    "durable_spending_share",
+    "debt_repayment_share",
+    "liquid_saving_share",
+]
 
 
 @dataclass(frozen=True)
@@ -116,7 +123,8 @@ def main() -> int:
         llm_client = BehaviorLLMClient(args.provider, args.model, cache_dir, mode=args.behavior_mode, max_live_calls=args.max_live_calls)
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=llm_client)
         controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
-        all_actions = pd.concat([actions, controls], ignore_index=True)
+        ablations = run_behavior_ablations(pd.concat([actions, controls], ignore_index=True))
+        all_actions = pd.concat([actions, controls, ablations], ignore_index=True)
         aggregates = aggregate_behavior_actions(all_actions)
         scores = score_behavior_targets(aggregates, targets)
         cell_joined_errors = join_cell_behavior_target_errors(all_actions, cell_targets)
@@ -126,6 +134,7 @@ def main() -> int:
         cell_targets.to_csv(output_dir / "behavior_cell_targets.csv", index=False)
         target_catalog.to_csv(output_dir / "behavior_target_catalog.csv", index=False)
         type_cells.to_csv(output_dir / "household_type_cells.csv", index=False)
+        ablations.to_csv(output_dir / "household_behavior_ablations.csv", index=False)
         all_actions.to_csv(output_dir / "household_behavior_actions.csv", index=False)
         aggregates.to_csv(output_dir / "behavior_aggregates.csv", index=False)
         scores.to_csv(output_dir / "behavior_target_scores.csv", index=False)
@@ -143,6 +152,8 @@ def main() -> int:
                 "household_type_status": type_status,
                 "household_type_count": int(type_cells.shape[0]),
                 "action_rows": int(all_actions.shape[0]),
+                "ablation_action_rows": int(ablations.shape[0]),
+                "ablation_sources": sorted(ablations["source"].unique().tolist()) if not ablations.empty else [],
                 "aggregate_rows": int(aggregates.shape[0]),
                 "score_rows": int(scores.shape[0]),
                 "cell_score_rows": int(cell_scores.shape[0]),
@@ -156,6 +167,7 @@ def main() -> int:
                     "behavior_cell_targets.csv",
                     "behavior_target_catalog.csv",
                     "household_type_cells.csv",
+                    "household_behavior_ablations.csv",
                     "household_behavior_actions.csv",
                     "behavior_aggregates.csv",
                     "behavior_target_scores.csv",
@@ -251,6 +263,145 @@ def run_behavior_controls(scenarios: Iterable[BehaviorScenario], type_cells: pd.
             for _, type_cell in type_cells.iterrows():
                 rows.append(_behavior_action_row(scenario, type_cell, fn(scenario, type_cell), source=source))
     return pd.DataFrame(rows)
+
+
+def run_behavior_ablations(actions: pd.DataFrame, *, baseline_source: str = "liquidity_rule") -> pd.DataFrame:
+    if actions.empty or baseline_source not in set(actions["source"]):
+        return pd.DataFrame(columns=actions.columns)
+    llm_sources = sorted(
+        source
+        for source in actions["source"].dropna().unique()
+        if str(source).startswith("llm_") and "__" not in str(source)
+    )
+    if not llm_sources:
+        return pd.DataFrame(columns=actions.columns)
+
+    baseline = actions[actions["source"] == baseline_source].copy()
+    rows: list[pd.DataFrame] = []
+    for llm_source in llm_sources:
+        llm = actions[actions["source"] == llm_source].copy()
+        merged = llm.merge(
+            baseline,
+            on=["scenario_id", "type_id"],
+            suffixes=("_llm", "_base"),
+            validate="one_to_one",
+        )
+        if merged.empty:
+            continue
+        rows.append(
+            _blend_behavior_sources(
+                merged,
+                source=f"{llm_source}__liquidity_prior_75",
+                llm_weight=0.25,
+                reason="75 percent liquidity rule, 25 percent LLM action",
+            )
+        )
+        rows.append(
+            _blend_behavior_sources(
+                merged,
+                source=f"{llm_source}__liquidity_prior_50",
+                llm_weight=0.50,
+                reason="50 percent liquidity rule, 50 percent LLM action",
+            )
+        )
+        rows.append(
+            _residual_behavior_sources(
+                merged,
+                source=f"{llm_source}__residual_over_liquidity",
+                reason="liquidity-rule group means plus LLM within-group residuals",
+            )
+        )
+    if not rows:
+        return pd.DataFrame(columns=actions.columns)
+    return pd.concat(rows, ignore_index=True)[list(actions.columns)]
+
+
+def _blend_behavior_sources(merged: pd.DataFrame, *, source: str, llm_weight: float, reason: str) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    base_weight = 1.0 - llm_weight
+    for _, row in merged.iterrows():
+        output = _base_action_from_merged(row, source=source, reason=reason)
+        for column in BEHAVIOR_SHARE_COLUMNS:
+            output[column] = base_weight * float(row[f"{column}_base"]) + llm_weight * float(
+                row[f"{column}_llm"]
+            )
+        output["confidence"] = base_weight * float(row.get("confidence_base", 0.5)) + llm_weight * float(
+            row.get("confidence_llm", 0.5)
+        )
+        rows.append(_normalize_action_row(output))
+    return pd.DataFrame(rows)
+
+
+def _residual_behavior_sources(merged: pd.DataFrame, *, source: str, reason: str) -> pd.DataFrame:
+    frame = merged.copy()
+    rows: list[dict[str, Any]] = []
+    for column in BEHAVIOR_SHARE_COLUMNS:
+        frame[f"{column}_residual"] = frame[f"{column}_llm"].astype(float) - frame[f"{column}_base"].astype(
+            float
+        )
+        frame[f"{column}_centered_residual"] = frame[f"{column}_residual"] - frame.groupby(
+            ["scenario_id", "liquidity_group_llm"]
+        )[f"{column}_residual"].transform(
+            lambda values: _weighted_mean(values, frame.loc[values.index, "population_weight_llm"])
+        )
+    for _, row in frame.iterrows():
+        output = _base_action_from_merged(row, source=source, reason=reason)
+        for column in BEHAVIOR_SHARE_COLUMNS:
+            output[column] = float(row[f"{column}_base"]) + float(row[f"{column}_centered_residual"])
+        output["confidence"] = min(float(row.get("confidence_base", 0.5)), float(row.get("confidence_llm", 0.5)))
+        rows.append(_normalize_action_row(output))
+    return pd.DataFrame(rows)
+
+
+def _base_action_from_merged(row: pd.Series, *, source: str, reason: str) -> dict[str, Any]:
+    return {
+        "schema_version": row["schema_version_llm"],
+        "scenario_id": row["scenario_id"],
+        "source": source,
+        "type_id": row["type_id"],
+        "population_weight": float(row["population_weight_llm"]),
+        "liquidity_group": row["liquidity_group_llm"],
+        "transfer_amount": float(row["transfer_amount_llm"]),
+        "confidence": 0.5,
+        "reason": reason,
+    }
+
+
+def _normalize_action_row(row: dict[str, Any]) -> dict[str, Any]:
+    total = float(np.clip(row["total_spending_share"], 0.0, 1.0))
+    debt = float(np.clip(row["debt_repayment_share"], 0.0, 1.0))
+    liquid = float(np.clip(row["liquid_saving_share"], 0.0, 1.0))
+    if total + debt + liquid > 1.0:
+        remainder = max(0.0, 1.0 - total)
+        non_spending = debt + liquid
+        if non_spending > 0:
+            debt = remainder * debt / non_spending
+            liquid = remainder * liquid / non_spending
+        else:
+            debt = 0.0
+            liquid = remainder
+
+    nondurable = float(np.clip(row["nondurable_spending_share"], 0.0, total))
+    durable = float(np.clip(row["durable_spending_share"], 0.0, total))
+    if nondurable + durable > total and nondurable + durable > 0:
+        scale = total / (nondurable + durable)
+        nondurable *= scale
+        durable *= scale
+    if total > 0 and nondurable + durable == 0:
+        nondurable = 0.8 * total
+        durable = 0.2 * total
+
+    row.update(
+        {
+            "total_spending_share": total,
+            "nondurable_spending_share": nondurable,
+            "durable_spending_share": durable,
+            "debt_repayment_share": debt,
+            "liquid_saving_share": liquid,
+            "confidence": float(np.clip(row.get("confidence", 0.5), 0.0, 1.0)),
+        }
+    )
+    return row
 
 
 def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
@@ -514,7 +665,11 @@ def build_behavior_gate_report(
         f"- Aggregate target count: `{manifest.get('target_count')}`",
         f"- Cell-level target count: `{manifest.get('cell_target_count')}`",
         f"- Unscored target gaps: `{manifest.get('unscored_target_gap_count', 0)}`",
+        f"- Ablation sources: `{len(manifest.get('ablation_sources', []))}`",
         f"- SCF type source: `{manifest.get('household_type_status', {}).get('status', 'unknown')}`",
+        "",
+        "## Behavior Ablation Tournament",
+        markdown_table(_ablation_summary_table(scores, cell_scores)),
         "",
         "## Aggregate Scoreboard",
         markdown_table(scores.sort_values(["target_family", "rmse_range", "source"])),
@@ -698,6 +853,14 @@ def _weighted_average(group: pd.DataFrame, column: str) -> float:
     return float((group[column].astype(float) * weights).sum() / total)
 
 
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    clean_weights = weights.astype(float).clip(lower=0.0)
+    total = float(clean_weights.sum())
+    if total <= 0:
+        return float(values.astype(float).mean())
+    return float((values.astype(float) * clean_weights).sum() / total)
+
+
 def _range_error(row: pd.Series) -> float:
     prediction = float(row["prediction"])
     low = float(row["target_low"])
@@ -760,6 +923,41 @@ def _behavior_bottom_line(scores: pd.DataFrame, cell_scores: pd.DataFrame | None
         f"across `{int(best['n'])}` behavior targets."
         f"{cell_line}"
     )
+
+
+def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | None = None) -> pd.DataFrame:
+    if scores.empty:
+        return pd.DataFrame()
+    aggregate = scores[scores["target_family"] == "ALL"][
+        ["source", "n", "rmse_range", "mae_range", "rmse_point", "mae_point"]
+    ].copy()
+    aggregate = aggregate.rename(
+        columns={
+            "n": "aggregate_n",
+            "rmse_range": "aggregate_rmse_range",
+            "mae_range": "aggregate_mae_range",
+            "rmse_point": "aggregate_rmse_point",
+            "mae_point": "aggregate_mae_point",
+        }
+    )
+    if cell_scores is not None and not cell_scores.empty:
+        cell = cell_scores[cell_scores["target_family"] == "ALL"][["source", "n", "rmse_range", "mae_range"]].copy()
+        cell = cell.rename(
+            columns={
+                "n": "cell_n",
+                "rmse_range": "cell_rmse_range",
+                "mae_range": "cell_mae_range",
+            }
+        )
+        aggregate = aggregate.merge(cell, on="source", how="left")
+    interesting = aggregate[
+        aggregate["source"].eq("liquidity_rule")
+        | aggregate["source"].str.startswith("llm_")
+        | aggregate["source"].str.contains("__liquidity_prior|__residual_over_liquidity", regex=True)
+    ].copy()
+    if interesting.empty:
+        interesting = aggregate
+    return interesting.sort_values(["aggregate_rmse_range", "source"]).reset_index(drop=True)
 
 
 if __name__ == "__main__":

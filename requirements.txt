@@ -1,6 +1,7 @@
 numpy
 pandas
 requests
+openai
 xlrd
 openpyxl
 python-dotenv

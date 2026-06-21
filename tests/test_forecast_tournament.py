@@ -29,24 +29,33 @@ from macro_llm_tournament.behavior_gate import (
     fixture_behavior_payload,
     join_cell_behavior_target_errors,
     normalize_behavior_payload,
+    run_behavior_ablations,
     run_behavior_controls,
     run_behavior_gate,
     score_cell_behavior_targets,
     score_behavior_targets,
 )
 from macro_llm_tournament.forecast_audit import (
+    DirectRecallClient,
     build_belief_structure_audit,
+    build_qualitative_recall_targets,
     build_source_scores,
     build_surprise_audit,
     build_theil_u,
+    direct_recall_call,
+    direct_recall_cache_name,
     direct_recall_prompt,
     fixture_recall_payload,
     normalize_direct_recall_payload,
+    normalize_qualitative_recall_payload,
+    qualitative_recall_prompt,
     score_direct_recall,
+    score_qualitative_recall,
 )
 from macro_llm_tournament.forecast_cards import (
     assert_no_prompt_target_leakage,
     build_forecast_cards,
+    build_forecast_cards_from_rows,
     cards_to_frame,
     enrich_forecast_cards,
 )
@@ -147,6 +156,11 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertTrue(prompt["as_of_design"]["outcome_hidden"])
             self.assertTrue(prompt["as_of_design"]["history_uses_lagged_forecasts_only"])
             self.assertIn("historical_forecast_signal_summary", prompt)
+            self.assertEqual(prompt["forecast_target_period"], card.origin)
+            self.assertEqual(prompt["spf_step_ahead"], card.horizon)
+            self.assertIn("dated by the forecasted period", prompt["target_period_note"])
+            self.assertNotIn("survey_origin", prompt)
+            self.assertNotIn("forecast_horizon_quarters_ahead", prompt)
             self.assertNotIn("historical_benchmark_performance", prompt)
             for row in prompt["available_history"]:
                 self.assertNotIn("realized", row)
@@ -314,6 +328,9 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn(cards[0].card_id, prompt)
         self.assertNotIn("target_realized", prompt)
         self.assertNotIn(str(cards[0].target_realized), prompt)
+        self.assertIn("forecast_target_period", prompt)
+        self.assertIn("spf_step_ahead", prompt)
+        self.assertNotIn("forecast_horizon_quarters_ahead", prompt)
 
         fixture = {"payload": fixture_recall_payload(card_frame)}
         normalized = normalize_direct_recall_payload(card_frame, fixture)
@@ -336,6 +353,68 @@ class ForecastTournamentTests(unittest.TestCase):
         broken["items"] = broken["items"][:-1]
         with self.assertRaises(LLMUnavailable):
             normalize_direct_recall_payload(card_frame, {"payload": broken})
+
+    def test_qualitative_recall_probe_scores_path_memory_without_leaking_values(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI", "RGDP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=6,
+        )
+        card_frame = cards_to_frame(cards)
+        controls = build_control_forecasts(spf_fixture(), cards, tune_end_year=2017)
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        _scores, _behavior, joined = score_forecasts(card_frame, pd.concat([controls, llm_forecasts], ignore_index=True))
+        targets = build_qualitative_recall_targets(card_frame, joined)
+        prompt = qualitative_recall_prompt(targets)
+
+        self.assertIn(cards[0].card_id, prompt)
+        self.assertNotIn("target_realized", prompt)
+        self.assertNotIn("truth_direction", prompt)
+        self.assertNotIn(str(cards[0].target_realized), prompt)
+        self.assertIn("forecast_target_period", prompt)
+        self.assertIn("spf_step_ahead", prompt)
+        self.assertNotIn("forecast_horizon_quarters_ahead", prompt)
+        self.assertIn("gpt_edge_bucket", targets.columns)
+        first_target = targets[targets["card_id"] == cards[0].card_id].iloc[0]
+        expected_target_label = cards[0].origin.replace(":", " ")
+        self.assertEqual(first_target["target_quarter_label"], expected_target_label)
+
+        oracle = {
+            "payload": {
+                "items": [
+                    {
+                        "card_id": row["card_id"],
+                        "direction": row["truth_direction"],
+                        "level_vs_norm": row["truth_level_vs_norm"],
+                        "turbulence": row["truth_turbulence"],
+                        "confidence": 1.0,
+                        "reason": "test oracle",
+                    }
+                    for _, row in targets.iterrows()
+                ]
+            }
+        }
+        predictions = pd.DataFrame(normalize_qualitative_recall_payload(targets, oracle))
+        scores = score_qualitative_recall(targets, predictions)
+
+        overall = scores[(scores["group_type"] == "ALL") & (scores["group"] == "ALL")].iloc[0]
+        self.assertAlmostEqual(float(overall["card_mean_accuracy"]), 1.0)
+        self.assertGreaterEqual(float(overall["card_mean_accuracy"]), float(overall["card_mean_base_rate"]))
+        self.assertIn("event_bucket", set(scores["group_type"]))
+
+        refusal = {"payload": {"error": "No reliable memory of these post-cutoff outcomes."}}
+        refused = pd.DataFrame(normalize_qualitative_recall_payload(targets, refusal))
+        self.assertEqual(len(refused), len(targets))
+        self.assertEqual(set(refused["predicted_direction"]), {""})
+        refused_scores = score_qualitative_recall(targets, refused)
+        refused_overall = refused_scores[
+            (refused_scores["group_type"] == "ALL") & (refused_scores["group"] == "ALL")
+        ].iloc[0]
+        self.assertAlmostEqual(float(refused_overall["card_mean_accuracy"]), 0.0)
 
     def test_invalid_llm_payload_fails_closed_instead_of_falling_back(self):
         card = build_forecast_cards(
@@ -579,7 +658,8 @@ class ForecastTournamentTests(unittest.TestCase):
 
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=client)
         controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
-        all_actions = pd.concat([actions, controls], ignore_index=True)
+        ablations = run_behavior_ablations(pd.concat([actions, controls], ignore_index=True))
+        all_actions = pd.concat([actions, controls, ablations], ignore_index=True)
         aggregates = aggregate_behavior_actions(all_actions)
         scores = score_behavior_targets(aggregates, behavior_targets_frame())
         cell_targets = behavior_targets_frame(target_scope="cell")
@@ -591,6 +671,10 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(all_actions.groupby(["scenario_id", "source"])["type_id"].nunique().min(), type_cells.shape[0])
         use_sum = all_actions["total_spending_share"] + all_actions["debt_repayment_share"] + all_actions["liquid_saving_share"]
         self.assertLessEqual(float(use_sum.max()), 1.000001)
+        self.assertIn("llm_codex_cli_gpt-5.5__liquidity_prior_75", set(ablations["source"]))
+        self.assertIn("llm_codex_cli_gpt-5.5__liquidity_prior_50", set(ablations["source"]))
+        self.assertIn("llm_codex_cli_gpt-5.5__residual_over_liquidity", set(ablations["source"]))
+        self.assertEqual(ablations.groupby(["scenario_id", "source"])["type_id"].nunique().min(), type_cells.shape[0])
         self.assertFalse(scores.empty)
         self.assertIn("debt_saving", set(scores["target_family"]))
         self.assertIn("directional_debt_saving", set(scores["target_family"]))
@@ -854,6 +938,171 @@ class ForecastTournamentTests(unittest.TestCase):
 
         self.assertEqual(client.live_call_count, 1)
 
+    def test_openai_responses_forecast_provider_uses_cache_and_live_cap(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=2,
+        )
+
+        class FakeResponse:
+            id = "resp_test"
+            status = "completed"
+            model = "gpt-5"
+            output_text = json.dumps(
+                {
+                    "point_forecast": 2.0,
+                    "p10": 1.0,
+                    "p50": 2.0,
+                    "p90": 3.0,
+                    "confidence": 0.5,
+                    "forecaster_draws": [
+                        {"forecaster_id": f"x{idx}", "forecast": 2.0 + idx * 0.01}
+                        for idx in range(8)
+                    ],
+                }
+            )
+            usage = {"total_tokens": 123}
+
+        class FakeResponses:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                self.last_kwargs = kwargs
+                return FakeResponse()
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.responses = fake_responses
+
+        fake_responses = FakeResponses()
+        with TemporaryDirectory() as tmp, patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=False):
+            client = ForecastLLMClient("openai_responses", "gpt-5", Path(tmp), mode="live", max_live_calls=1)
+            with patch("macro_llm_tournament.forecast_llm.OpenAI", FakeOpenAI):
+                first = client.forecast_card(cards[0])
+                cached = client.forecast_card(cards[0])
+                with self.assertRaises(LLMUnavailable):
+                    client.forecast_card(cards[1])
+
+        self.assertEqual(client.live_call_count, 1)
+        self.assertEqual(client.cache_hit_count, 1)
+        self.assertEqual(fake_responses.calls, 1)
+        self.assertEqual(first["payload"]["point_forecast"], 2.0)
+        self.assertTrue(cached["cache_hit"])
+        self.assertEqual(fake_responses.last_kwargs["model"], "gpt-5")
+        self.assertEqual(fake_responses.last_kwargs["reasoning"], {"effort": "low"})
+
+    def test_openai_responses_direct_recall_provider_uses_shared_router(self):
+        prompt = json.dumps(
+            {
+                "prompt_version": "direct_realization_recall_probe_v1",
+                "items": [{"card_id": "card_a", "forecast_target_period": "2026:Q1", "spf_step_ahead": 1}],
+            }
+        )
+        payload = {
+            "items": [
+                {
+                    "card_id": "card_a",
+                    "recalled_realized": None,
+                    "confidence": 0.0,
+                    "reason": "not recalled",
+                }
+            ]
+        }
+
+        class FakeResponse:
+            id = "resp_recall"
+            status = "completed"
+            model = "gpt-5"
+            output_text = json.dumps(payload)
+            usage = {"total_tokens": 42}
+
+        class FakeResponses:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                self.last_kwargs = kwargs
+                return FakeResponse()
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.responses = fake_responses
+
+        fake_responses = FakeResponses()
+        with TemporaryDirectory() as tmp, patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=False):
+            client = DirectRecallClient("openai_responses", "gpt-5", Path(tmp), mode="live", max_live_calls=1)
+            cache_name = direct_recall_cache_name(client, prompt)
+            with patch("macro_llm_tournament.forecast_llm.OpenAI", FakeOpenAI):
+                first, client = direct_recall_call(client, prompt, cache_name)
+                cached, client = direct_recall_call(client, prompt, cache_name)
+
+        self.assertEqual(client.live_call_count, 1)
+        self.assertEqual(client.cache_hit_count, 1)
+        self.assertEqual(fake_responses.calls, 1)
+        self.assertEqual(first["payload"]["items"][0]["card_id"], "card_a")
+        self.assertTrue(cached["cache_hit"])
+        self.assertIn("direct recall contamination probe", fake_responses.last_kwargs["instructions"])
+
+    def test_gemini_cli_forecast_provider_parses_wrapper_and_uses_api_key_auth(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=2,
+        )
+        response_payload = {
+            "point_forecast": 2.0,
+            "p10": 1.0,
+            "p50": 2.0,
+            "p90": 3.0,
+            "confidence": 0.5,
+            "forecaster_draws": [
+                {"forecaster_id": f"x{idx}", "forecast": 2.0 + idx * 0.01}
+                for idx in range(8)
+            ],
+        }
+        wrapper = {
+            "session_id": "gemini_session",
+            "response": json.dumps(response_payload),
+            "stats": {"models": {"gemini-3.1-pro-preview": {"api": {"totalRequests": 1}}}},
+        }
+        calls = []
+
+        def fake_run(command, input, text, capture_output, cwd, timeout, check, env):
+            calls.append({"command": command, "input": input, "env": env})
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=json.dumps(wrapper), stderr="")
+
+        with TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"GEMINI_API_KEY": "gemini-test-key", "GEMINI_CLI_BIN": "/tmp/gemini"},
+            clear=False,
+        ):
+            client = ForecastLLMClient("gemini_cli", "gemini-3.1-pro-preview", Path(tmp), mode="live", max_live_calls=1)
+            with patch("macro_llm_tournament.forecast_llm.subprocess.run", side_effect=fake_run):
+                first = client.forecast_card(cards[0])
+                cached = client.forecast_card(cards[0])
+                with self.assertRaises(LLMUnavailable):
+                    client.forecast_card(cards[1])
+
+        self.assertEqual(client.live_call_count, 1)
+        self.assertEqual(client.cache_hit_count, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first["payload"]["point_forecast"], 2.0)
+        self.assertTrue(cached["cache_hit"])
+        self.assertEqual(calls[0]["command"][calls[0]["command"].index("--model") + 1], "gemini-3.1-pro-preview")
+        self.assertEqual(calls[0]["env"]["GEMINI_DEFAULT_AUTH_TYPE"], "gemini-api-key")
+        self.assertTrue(calls[0]["env"]["GEMINI_CLI_SYSTEM_SETTINGS_PATH"].endswith("system_settings.json"))
+        self.assertIn("Return only valid JSON", calls[0]["input"])
+
     def test_spf_download_link_extractor_preserves_xlsx_urls(self):
         page_url = "https://www.philadelphiafed.org/surveys-and-data/data-files/cpi"
         html = """
@@ -1004,6 +1253,28 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(len(cached), 1)
         self.assertEqual(len(missing), 1)
         self.assertEqual(client.live_call_count, 0)
+
+    def test_postcutoff_cards_use_exact_cutoff_contamination_label(self):
+        spf_data = spf_fixture()
+        selected = spf_data[
+            (spf_data["variable"] == "CPI")
+            & (spf_data["origin"] == "2020:Q1")
+            & (spf_data["horizon"] == 1)
+        ].copy()
+        selected["contamination_label"] = "post_model_cutoff_candidate"
+
+        cards = build_forecast_cards_from_rows(
+            spf_data,
+            selected,
+            variables=["CPI"],
+            holdout_start_year=2020,
+            holdout_end_year=2020,
+            history_quarters=8,
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0].contamination_label, "post_model_cutoff_candidate")
+        self.assertEqual(cards[0].prompt_payload["as_of_design"]["contamination_label"], "post_model_cutoff_candidate")
 
     def test_newly_scoreable_count_uses_previous_freeze_rows(self):
         selected = pd.DataFrame(
