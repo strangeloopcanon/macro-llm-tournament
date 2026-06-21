@@ -570,6 +570,59 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertTrue(aggregates["firm_hiring_index"].map(np.isfinite).all())
         self.assertEqual(desired.groupby("card_id")["type_id"].nunique().min(), type_cells.shape[0])
 
+    def test_agent_feasibility_keeps_liquid_assets_nonnegative_under_aggressive_payload(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["TBILL"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2018,
+            card_count=1,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+
+        class AggressiveAgent:
+            raw_records: list[dict] = []
+
+            def agent_panel(self, _card, _forecast, cells, _prior_states):
+                return {
+                    "household_by_type": {
+                        str(row["type_id"]): {
+                            "consumption_change_pct": 20.0,
+                            "liquid_buffer_change_pct": 0.0,
+                            "borrowing_desire_index": -5.0,
+                            "portfolio_rebalance_to_liquid_pct": -15.0,
+                            "job_search_intensity_index": 0.0,
+                            "expected_inflation_1y": 2.5,
+                            "expected_real_income_growth": 1.5,
+                            "expected_unemployment_rate": 4.5,
+                            "expected_short_rate": 4.0,
+                            "confidence": 0.7,
+                            "uncertainty": 0.4,
+                        }
+                        for _, row in cells.iterrows()
+                    },
+                    "firm": {"hiring_index": 0.0, "price_pressure_index": 0.0, "confidence": 0.6},
+                    "bank": {"credit_supply_multiplier": 1.0, "credit_tightening_index": 0.0, "confidence": 0.6},
+                }
+
+        _state, _desired, feasible, _aggregates, diagnostics, _scores = run_agent_economy(
+            cards,
+            llm_forecasts,
+            type_cells,
+            source_filters=["llm"],
+            agent_client=AggressiveAgent(),
+        )
+
+        self.assertGreaterEqual(float(feasible["liquid_assets_after"].min()), -1e-6)
+        self.assertGreaterEqual(float(feasible["illiquid_assets_after"].min()), -1e-6)
+        self.assertGreaterEqual(float(feasible["debt_after"].min()), -1e-6)
+        self.assertTrue(feasible["passes_balance_sheet_floors"].all())
+        self.assertTrue(diagnostics["passes_accounting"].all())
+        self.assertGreaterEqual(float(diagnostics["min_liquid_assets_after"].min()), -1e-6)
+
     def test_agent_residual_policy_preserves_liquidity_group_means(self):
         cards = build_forecast_cards(
             spf_fixture(),
@@ -683,6 +736,12 @@ class ForecastTournamentTests(unittest.TestCase):
             float((closed_desired.loc[later_origin, "annual_income"] - none_desired.loc[later_origin, "annual_income"]).abs().max()),
             0.0,
         )
+        state_history = pd.DataFrame(closed_desired.attrs["state_history_records"])
+        state_final = pd.DataFrame(closed_desired.attrs["state_final_records"])
+        self.assertFalse(state_history.empty)
+        self.assertFalse(state_final.empty)
+        self.assertIn("mean_income_feedback_pct", state_history.columns)
+        self.assertIn("mean_credit_limit_feedback_multiplier", state_final.columns)
         self.assertEqual(set(none_feasible["feedback_mode"]), {"none"})
         self.assertEqual(set(closed_feasible["feedback_mode"]), {"closed_loop"})
 

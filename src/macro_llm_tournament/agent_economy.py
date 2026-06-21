@@ -19,6 +19,7 @@ from .agent_common import (
 from .agent_llm import AgentLLMClient, agent_prompt, fixture_agent_payload, normalize_agent_payload
 from .agent_report import build_agent_economy_report
 from .agent_runtime import FEEDBACK_MODE_CHOICES, HOUSEHOLD_POLICY_CHOICES, run_agent_economy
+from .agent_runtime import _select_belief_forecasts as select_agent_belief_forecasts
 from .agent_targets import build_agent_belief_target_rows, score_agent_belief_targets
 from .agent_types import AgentTypeDefinition, build_household_type_cells
 from .forecast_cards import (
@@ -172,6 +173,13 @@ def main() -> int:
         agent_forecasts, counterfactual_rows = add_counterfactual_forecasts(all_forecasts, counterfactual_shocks)
         agent_forecasts.to_csv(output_dir / "agent_forecasts.csv", index=False)
         counterfactual_rows.to_csv(output_dir / "counterfactual_scenarios.csv", index=False)
+        required_agent_events = _selected_agent_event_count(cards, agent_forecasts, source_filters)
+        manifest["required_agent_event_count"] = required_agent_events
+        if args.agent_mode == "live" and args.fresh_agent_cache and args.max_agent_live_calls < required_agent_events:
+            raise ValueError(
+                "--max-agent-live-calls must be at least "
+                f"{required_agent_events} for a fresh live actor run with the selected cards, sources, and shocks"
+            )
 
         type_cells, type_status = build_household_type_cells(work_dir=WORK_ROOT / "scf", wave=args.scf_wave)
         type_cells.to_csv(output_dir / "household_type_cells.csv", index=False)
@@ -220,8 +228,13 @@ def main() -> int:
                 "agent_desired_action_rows": int(desired_actions.shape[0]),
                 "agent_feasible_action_rows": int(feasible_actions.shape[0]),
                 "agent_aggregate_rows": int(aggregates.shape[0]),
+                "agent_state_history_rows": _frame_attr_rows(desired_actions, "state_history_records"),
+                "agent_state_final_rows": _frame_attr_rows(desired_actions, "state_final_records"),
                 "accounting_max_abs_cash_residual": max_abs(diagnostics, "max_abs_cash_residual"),
                 "accounting_max_abs_networth_residual": max_abs(diagnostics, "max_abs_networth_residual"),
+                "minimum_liquid_assets_after": _min_value(diagnostics, "min_liquid_assets_after"),
+                "minimum_illiquid_assets_after": _min_value(diagnostics, "min_illiquid_assets_after"),
+                "minimum_debt_after": _min_value(diagnostics, "min_debt_after"),
                 "agent_score_rows": int(agent_scores.shape[0]),
                 "agent_belief_target_rows": int(agent_belief_targets.shape[0]),
                 "agent_belief_target_score_rows": int(agent_belief_target_scores.shape[0]),
@@ -284,6 +297,17 @@ def add_counterfactual_forecasts(
             )
         rows.append(frame)
     return pd.concat([forecasts, *rows], ignore_index=True), pd.DataFrame(scenario_rows)
+
+
+def _selected_agent_event_count(
+    cards: Iterable[ForecastCard],
+    forecasts: pd.DataFrame,
+    source_filters: Iterable[str],
+) -> int:
+    selected = select_agent_belief_forecasts(forecasts, source_filters=source_filters)
+    card_ids = {card.card_id for card in cards}
+    selected = selected[selected["card_id"].astype(str).isin(card_ids)]
+    return int(selected[["card_id", "source"]].drop_duplicates().shape[0])
 
 
 def build_agent_forecast_inputs(
@@ -371,6 +395,20 @@ def _safe_relative(path: Path) -> str:
     return str(path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path)
 
 
+def _min_value(frame: pd.DataFrame, column: str) -> float | None:
+    if frame.empty or column not in frame:
+        return None
+    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+    return float(values.min()) if not values.empty else None
+
+
+def _frame_attr_rows(frame: pd.DataFrame, attr_name: str) -> int:
+    value = frame.attrs.get(attr_name)
+    if isinstance(value, list):
+        return len(value)
+    return int(value.shape[0]) if isinstance(value, pd.DataFrame) else 0
+
+
 def _write_input_frames(output_dir: Path, data_frames: dict[str, pd.DataFrame], context_status: dict[str, Any]) -> None:
     for name, frame in data_frames.items():
         frame.to_csv(output_dir / f"{name}.csv", index=False)
@@ -388,6 +426,16 @@ def _write_agent_outputs(
     agent_scores: pd.DataFrame,
 ) -> None:
     state_initial.to_json(output_dir / "agent_state_initial.jsonl", orient="records", lines=True)
+    state_history_records = desired_actions.attrs.get("state_history_records")
+    state_final_records = desired_actions.attrs.get("state_final_records")
+    if isinstance(state_history_records, list):
+        pd.DataFrame(state_history_records).to_json(output_dir / "agent_state_history.jsonl", orient="records", lines=True)
+    else:
+        pd.DataFrame().to_json(output_dir / "agent_state_history.jsonl", orient="records", lines=True)
+    if isinstance(state_final_records, list):
+        pd.DataFrame(state_final_records).to_json(output_dir / "agent_state_final.jsonl", orient="records", lines=True)
+    else:
+        pd.DataFrame().to_json(output_dir / "agent_state_final.jsonl", orient="records", lines=True)
     desired_actions.to_json(output_dir / "agent_desired_actions.jsonl", orient="records", lines=True)
     feasible_actions.to_csv(output_dir / "agent_feasible_actions.csv", index=False)
     aggregates.to_csv(output_dir / "agent_aggregate_outcomes.csv", index=False)
@@ -405,6 +453,8 @@ def _output_names() -> list[str]:
         "forecast_scores.csv",
         "household_type_cells.csv",
         "agent_state_initial.jsonl",
+        "agent_state_history.jsonl",
+        "agent_state_final.jsonl",
         "agent_desired_actions.jsonl",
         "agent_feasible_actions.csv",
         "agent_aggregate_outcomes.csv",

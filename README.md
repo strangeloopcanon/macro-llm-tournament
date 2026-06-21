@@ -230,7 +230,7 @@ PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
   --max-live-calls 9 \
   --fresh-forecast-cache \
   --agent-mode live \
-  --max-agent-live-calls 8 \
+  --max-agent-live-calls 32 \
   --fresh-agent-cache \
   --belief-sources llm \
   --household-policy residual_over_liquidity \
@@ -242,7 +242,7 @@ PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
   --output-dir outputs/agent_economy_gpt55_fresh
 ```
 
-`--fresh-forecast-cache` and `--fresh-agent-cache` write model responses under the run output directory instead of the shared local cache, so a live pilot does not accidentally replay prior calls. `--llm-mode` controls the macro forecast calls. `--agent-mode` controls whether typed households, firms, and banks are rule-based, fixture, replayed, or live LLM agents. `--household-policy residual_over_liquidity` keeps rule-based low/high liquidity response means and adds the LLM's within-group residuals. `--feedback-mode closed_loop` feeds firm hiring, price pressure, and bank credit supply back into next-origin household income and credit state. `--counterfactual-shocks` appends named forecast-shock sources for counterfactual agent runs. Even when agents are live LLMs, code still enforces budgets, credit limits, portfolio conservation, and aggregation.
+`--fresh-forecast-cache` and `--fresh-agent-cache` write model responses under the run output directory instead of the shared local cache, so a live pilot does not accidentally replay prior calls. `--llm-mode` controls the macro forecast calls. `--agent-mode` controls whether typed households, firms, and banks are rule-based, fixture, replayed, or live LLM agents. A fresh live counterfactual actor run needs one packed actor call per selected card and belief source, so the minimum agent cap for `8` cards with three shocks is `8 * (1 + 3) = 32`. `--household-policy residual_over_liquidity` keeps rule-based low/high liquidity response means and adds the LLM's within-group residuals. `--feedback-mode closed_loop` feeds firm hiring, price pressure, and bank credit supply back into next-origin household income and credit state. `--counterfactual-shocks` appends named forecast-shock sources for counterfactual agent runs. Even when agents are live LLMs, code still enforces budgets, credit limits, portfolio conservation, and aggregation.
 
 Agent state advances once per SPF origin, not once per variable card. That prevents CPI, GDP, and rate cards from the same survey date from becoming artificial time steps. Household belief target scores are also origin-level, so a single future SCE or Michigan observation is counted once per origin.
 
