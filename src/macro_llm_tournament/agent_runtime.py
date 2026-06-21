@@ -27,6 +27,16 @@ from .agent_common import (
 from .agent_llm import AgentLLMClient
 from .forecast_cards import ForecastCard
 
+AGENT_BEHAVIOR_COLUMNS = (
+    "consumption_change_pct",
+    "desired_liquid_buffer_change_pct",
+    "borrowing_desire_index",
+    "portfolio_rebalance_to_liquid_pct",
+    "job_search_intensity_index",
+)
+HOUSEHOLD_POLICY_CHOICES = ("direct", "rule", "residual_over_liquidity")
+FEEDBACK_MODE_CHOICES = ("none", "closed_loop")
+
 
 def run_agent_economy(
     cards: Iterable[ForecastCard],
@@ -35,7 +45,13 @@ def run_agent_economy(
     *,
     source_filters: Iterable[str] | None = None,
     agent_client: AgentLLMClient | None = None,
+    household_policy: str = "direct",
+    feedback_mode: str = "closed_loop",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if household_policy not in HOUSEHOLD_POLICY_CHOICES:
+        raise ValueError(f"Unsupported household policy: {household_policy}")
+    if feedback_mode not in FEEDBACK_MODE_CHOICES:
+        raise ValueError(f"Unsupported feedback mode: {feedback_mode}")
     ordered_cards = sorted(list(cards), key=lambda card: (card.origin_index, card.variable, card.horizon))
     forecasts = forecasts.copy()
     forecasts["source"] = forecasts["source"].astype(str)
@@ -56,6 +72,7 @@ def run_agent_economy(
             for source, source_forecasts in card_forecasts.groupby("source", sort=True):
                 forecast = source_forecasts.iloc[0]
                 event_desired = []
+                policy_inputs = []
                 prior_states = [dict(state_by_key[(source, str(type_cell["type_id"]))]) for _, type_cell in type_cells.iterrows()]
                 agent_payload = (
                     agent_client.agent_panel(card, forecast, type_cells, prior_states)
@@ -70,19 +87,36 @@ def run_agent_economy(
                         if agent_payload is not None
                         else None
                     )
+                    policy_inputs.append(
+                        {
+                            "type_cell": type_cell,
+                            "prior_state": prior_state,
+                            "agent_response": agent_response,
+                            "direct_response": _direct_behavior_response(card, forecast, type_cell, agent_response),
+                            "rule_response": _rule_behavior_response(card, forecast, type_cell),
+                            "liquidity_group": _liquidity_group(type_cell),
+                            "population_weight": float(type_cell["population_weight"]),
+                        }
+                    )
+                policy_inputs = _apply_household_policy(policy_inputs, household_policy)
+                for item in policy_inputs:
                     desired = _desired_action(
                         card,
                         forecast,
-                        type_cell,
-                        prior_state,
-                        agent_response=agent_response,
+                        item["type_cell"],
+                        item["prior_state"],
+                        agent_response=item["agent_response"],
+                        behavior_response=item["policy_response"],
+                        household_policy=household_policy,
+                        liquidity_group=item["liquidity_group"],
                         sector_response=agent_payload if agent_payload is not None else None,
                     )
                     event_desired.append(desired)
                     desired_rows.append(desired)
                 feasible = _reconcile_event(card, str(source), event_desired)
-                feasible_rows.extend(feasible)
                 aggregate = _aggregate_event(card, str(source), feasible)
+                feasible = _attach_event_feedback(feasible, aggregate, feedback_mode=feedback_mode)
+                feasible_rows.extend(feasible)
                 aggregate_rows.append(aggregate)
                 diagnostic_rows.append(_diagnose_event(card, str(source), feasible, aggregate))
                 for row in feasible:
@@ -109,7 +143,8 @@ def _select_belief_forecasts(forecasts: pd.DataFrame, *, source_filters: Iterabl
         if item == "llm":
             mask |= forecasts["source"].astype(str).str.startswith("llm_")
         else:
-            mask |= forecasts["source"].astype(str).eq(item)
+            source_text = forecasts["source"].astype(str)
+            mask |= source_text.eq(item) | source_text.str.startswith(f"{item}__cf_")
     selected = forecasts[mask].copy()
     if selected.empty:
         raise ValueError(f"No forecasts match belief source filters: {filters}")
@@ -147,27 +182,30 @@ def _initial_state_by_source_type(forecasts: pd.DataFrame, type_cells: pd.DataFr
     return states
 
 
-def _desired_action(
+def _direct_behavior_response(
     card: ForecastCard,
     forecast: pd.Series,
     type_cell: pd.Series,
-    prior_state: dict[str, Any],
-    *,
-    agent_response: dict[str, Any] | None = None,
-    sector_response: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    agent_response: dict[str, Any] | None,
+) -> dict[str, float]:
+    if agent_response is not None:
+        return _bounded_behavior_response(
+            {
+                "consumption_change_pct": float(agent_response["consumption_change_pct"]),
+                "desired_liquid_buffer_change_pct": float(agent_response["liquid_buffer_change_pct"]),
+                "borrowing_desire_index": float(agent_response["borrowing_desire_index"]),
+                "portfolio_rebalance_to_liquid_pct": float(agent_response["portfolio_rebalance_to_liquid_pct"]),
+                "job_search_intensity_index": float(agent_response["job_search_intensity_index"]),
+            }
+        )
+    return _rule_behavior_response(card, forecast, type_cell)
+
+
+def _rule_behavior_response(card: ForecastCard, forecast: pd.Series, type_cell: pd.Series) -> dict[str, float]:
     signal = standardized_signal(card, float(forecast["point_forecast"]))
     uncertainty = forecast_uncertainty(forecast, signal)
-    response = (
-        {
-            "consumption_change_pct": float(agent_response["consumption_change_pct"]),
-            "desired_liquid_buffer_change_pct": float(agent_response["liquid_buffer_change_pct"]),
-            "borrowing_desire_index": float(agent_response["borrowing_desire_index"]),
-            "portfolio_rebalance_to_liquid_pct": float(agent_response["portfolio_rebalance_to_liquid_pct"]),
-            "job_search_intensity_index": float(agent_response["job_search_intensity_index"]),
-        }
-        if agent_response is not None
-        else response_by_variable(
+    return _bounded_behavior_response(
+        response_by_variable(
             card.variable,
             signal,
             liquidity=float(type_cell["liquidity_sensitivity"]),
@@ -177,6 +215,110 @@ def _desired_action(
             uncertainty=uncertainty,
         )
     )
+
+
+def _apply_household_policy(policy_inputs: list[dict[str, Any]], household_policy: str) -> list[dict[str, Any]]:
+    if household_policy == "direct":
+        for item in policy_inputs:
+            item["policy_response"] = dict(item["direct_response"])
+        return policy_inputs
+    if household_policy == "rule":
+        for item in policy_inputs:
+            item["policy_response"] = dict(item["rule_response"])
+        return policy_inputs
+    if household_policy != "residual_over_liquidity":
+        raise ValueError(f"Unsupported household policy: {household_policy}")
+
+    frame = pd.DataFrame(
+        [
+            {
+                "idx": idx,
+                "liquidity_group": item["liquidity_group"],
+                "population_weight": item["population_weight"],
+                **{f"{column}_direct": item["direct_response"][column] for column in AGENT_BEHAVIOR_COLUMNS},
+                **{f"{column}_rule": item["rule_response"][column] for column in AGENT_BEHAVIOR_COLUMNS},
+            }
+            for idx, item in enumerate(policy_inputs)
+        ]
+    )
+    if frame.empty:
+        return policy_inputs
+    for column in AGENT_BEHAVIOR_COLUMNS:
+        residual = frame[f"{column}_direct"].astype(float) - frame[f"{column}_rule"].astype(float)
+        centered = residual - residual.groupby(frame["liquidity_group"]).transform(
+            lambda values: _weighted_mean(values, frame.loc[values.index, "population_weight"])
+        )
+        frame[f"{column}_policy"] = frame[f"{column}_rule"].astype(float) + centered
+
+    for idx, item in enumerate(policy_inputs):
+        item["policy_response"] = _bounded_behavior_response(
+            {column: float(frame.loc[idx, f"{column}_policy"]) for column in AGENT_BEHAVIOR_COLUMNS}
+        )
+    return policy_inputs
+
+
+def _bounded_behavior_response(response: dict[str, float]) -> dict[str, float]:
+    bounds = {
+        "consumption_change_pct": (-20.0, 20.0),
+        "desired_liquid_buffer_change_pct": (-25.0, 25.0),
+        "borrowing_desire_index": (-5.0, 5.0),
+        "portfolio_rebalance_to_liquid_pct": (-15.0, 15.0),
+        "job_search_intensity_index": (-3.0, 6.0),
+    }
+    return {column: float(np.clip(float(response[column]), low, high)) for column, (low, high) in bounds.items()}
+
+
+def _liquidity_group(type_cell: pd.Series) -> str:
+    type_id = str(type_cell["type_id"])
+    if type_id in {"liquid_poor_renter", "wealthy_htm_homeowner", "unemployed_low_liquid"}:
+        return "low"
+    if type_id in {"retiree_liquid_assets", "high_income_illiquid_rich", "business_owner_top_wealth"}:
+        return "high"
+    return "middle"
+
+
+def _agent_behavior_mode(agent_response: dict[str, Any] | None, household_policy: str) -> str:
+    if household_policy == "residual_over_liquidity":
+        return "llm_residual_over_liquidity" if agent_response is not None else "rule_residual_over_liquidity"
+    if household_policy == "rule":
+        return "policy_rule"
+    return "llm_agent" if agent_response is not None else "rules"
+
+
+def _desired_action(
+    card: ForecastCard,
+    forecast: pd.Series,
+    type_cell: pd.Series,
+    prior_state: dict[str, Any],
+    *,
+    agent_response: dict[str, Any] | None = None,
+    behavior_response: dict[str, float] | None = None,
+    household_policy: str = "direct",
+    liquidity_group: str | None = None,
+    sector_response: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    signal = standardized_signal(card, float(forecast["point_forecast"]))
+    uncertainty = forecast_uncertainty(forecast, signal)
+    if behavior_response is not None:
+        response = behavior_response
+    elif agent_response is not None:
+        response = {
+            "consumption_change_pct": float(agent_response["consumption_change_pct"]),
+            "desired_liquid_buffer_change_pct": float(agent_response["liquid_buffer_change_pct"]),
+            "borrowing_desire_index": float(agent_response["borrowing_desire_index"]),
+            "portfolio_rebalance_to_liquid_pct": float(agent_response["portfolio_rebalance_to_liquid_pct"]),
+            "job_search_intensity_index": float(agent_response["job_search_intensity_index"]),
+        }
+    else:
+        response = response_by_variable(
+            card.variable,
+            signal,
+            liquidity=float(type_cell["liquidity_sensitivity"]),
+            rate=float(type_cell["rate_sensitivity"]),
+            unemployment=float(type_cell["unemployment_sensitivity"]),
+            portfolio=float(type_cell["portfolio_sensitivity"]),
+            uncertainty=uncertainty,
+        )
     baseline_consumption = max(0.0, float(prior_state["consumption_proxy_annual"]) / 4.0)
     liquid_assets = max(0.0, float(prior_state["liquid_assets"]))
     illiquid_assets = max(0.0, float(prior_state["illiquid_assets"]))
@@ -191,6 +333,8 @@ def _desired_action(
         "horizon": card.horizon,
         "type_id": str(type_cell["type_id"]),
         "population_weight": float(type_cell["population_weight"]),
+        "liquidity_group": liquidity_group or _liquidity_group(type_cell),
+        "household_policy": household_policy,
         "belief_point_forecast": float(forecast["point_forecast"]),
         "belief_signal_vs_history": signal,
         "prior_liquid_assets": liquid_assets,
@@ -213,7 +357,7 @@ def _desired_action(
         "updated_expected_short_rate": _agent_or_rule_belief(agent_response, "expected_short_rate", prior_state, card, "TBILL", forecast),
         "updated_confidence": float(agent_response["confidence"]) if agent_response is not None else float(np.clip(1.0 - uncertainty / 8.0, 0.05, 0.95)),
         "updated_uncertainty": float(agent_response["uncertainty"]) if agent_response is not None else float(np.clip(uncertainty / 4.0, 0.05, 1.50)),
-        "agent_behavior_mode": "llm_agent" if agent_response is not None else "rules",
+        "agent_behavior_mode": _agent_behavior_mode(agent_response, household_policy),
         "agent_firm_hiring_index": sector_value(sector_response, "firm", "hiring_index"),
         "agent_firm_price_pressure_index": sector_value(sector_response, "firm", "price_pressure_index"),
         "agent_bank_credit_multiplier": sector_value(sector_response, "bank", "credit_supply_multiplier"),
@@ -336,6 +480,44 @@ def _aggregate_event(card: ForecastCard, source: str, feasible_rows: list[dict[s
     }
 
 
+def _attach_event_feedback(
+    feasible_rows: list[dict[str, Any]],
+    aggregate: dict[str, Any],
+    *,
+    feedback_mode: str,
+) -> list[dict[str, Any]]:
+    if feedback_mode == "none":
+        income_feedback_pct = 0.0
+        credit_feedback_multiplier = 1.0
+    else:
+        firm_hiring = float(aggregate.get("firm_hiring_index", 0.0))
+        price_pressure = float(aggregate.get("firm_price_pressure_index", 0.0))
+        credit_shortfall = 1.0 - float(np.clip(aggregate.get("credit_rationing_ratio", 1.0), 0.0, 1.0))
+        bank_multiplier = first_finite(feasible_rows, "bank_credit_multiplier")
+        if not np.isfinite(bank_multiplier):
+            bank_multiplier = 1.0
+        income_feedback_pct = float(
+            np.clip(0.20 * firm_hiring - 0.08 * max(price_pressure, 0.0) - 0.60 * credit_shortfall, -2.0, 2.0)
+        )
+        credit_feedback_multiplier = float(
+            np.clip(1.0 + 0.08 * (bank_multiplier - 1.0) + 0.01 * firm_hiring - 0.05 * credit_shortfall, 0.90, 1.08)
+        )
+    out: list[dict[str, Any]] = []
+    for row in feasible_rows:
+        enriched = dict(row)
+        enriched.update(
+            {
+                "feedback_mode": feedback_mode,
+                "event_firm_hiring_index": float(aggregate.get("firm_hiring_index", np.nan)),
+                "event_firm_price_pressure_index": float(aggregate.get("firm_price_pressure_index", np.nan)),
+                "event_income_feedback_pct": income_feedback_pct,
+                "event_credit_limit_feedback_multiplier": credit_feedback_multiplier,
+            }
+        )
+        out.append(enriched)
+    return out
+
+
 def _diagnose_event(card: ForecastCard, source: str, feasible_rows: list[dict[str, Any]], aggregate: dict[str, Any]) -> dict[str, Any]:
     desired_borrowing = weighted_sum(feasible_rows, "desired_borrowing")
     feasible_borrowing = weighted_sum(feasible_rows, "feasible_borrowing")
@@ -356,28 +538,36 @@ def _diagnose_event(card: ForecastCard, source: str, feasible_rows: list[dict[st
 
 def _next_state_from_origin_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     first = rows[0]
+    annual_income = float(first["annual_income"]) * (1.0 + _mean_if_present(rows, "event_income_feedback_pct", default=0.0) / 100.0)
+    credit_limit_proxy = float(first["credit_limit_proxy"]) * _mean_if_present(
+        rows, "event_credit_limit_feedback_multiplier", default=1.0
+    )
     return {
         "schema_version": AGENT_ECONOMY_VERSION,
         "belief_source": str(first["source"]),
         "type_id": str(first["type_id"]),
         "population_weight": float(first["population_weight"]),
-        "annual_income": float(first["annual_income"]),
+        "annual_income": max(0.0, annual_income),
         "liquid_assets": _mean(rows, "liquid_assets_after"),
         "illiquid_assets": _mean(rows, "illiquid_assets_after"),
         "debt": _mean(rows, "debt_after"),
         "consumption_proxy_annual": max(0.0, _mean(rows, "feasible_consumption") * 4.0),
-        "credit_limit_proxy": float(first["credit_limit_proxy"]),
+        "credit_limit_proxy": max(0.0, credit_limit_proxy),
         "expected_inflation_1y": _field_from_variable(rows, {"CPI"}, "updated_expected_inflation_1y"),
         "expected_real_income_growth": _field_from_variable(rows, {"RGDP"}, "updated_expected_real_income_growth"),
         "expected_unemployment_rate": _field_from_variable(rows, {"UNEMP"}, "updated_expected_unemployment_rate"),
         "expected_short_rate": _field_from_variable(rows, {"TBILL", "TBOND"}, "updated_expected_short_rate"),
         "confidence": _mean(rows, "updated_confidence"),
         "uncertainty": _mean(rows, "updated_uncertainty"),
-        "desired_liquid_buffer_months": 12.0 * _mean(rows, "liquid_assets_after") / max(float(first["annual_income"]), 1.0),
+        "desired_liquid_buffer_months": 12.0 * _mean(rows, "liquid_assets_after") / max(annual_income, 1.0),
         "credit_access": "tight" if _mean(rows, "credit_rationing_ratio") < 0.85 else "normal",
         "recent_forecast_error": 0.0,
         "last_origin": str(first["origin"]),
         "state_update_card_count": len(rows),
+        "mean_income_feedback_pct": _mean_if_present(rows, "event_income_feedback_pct", default=0.0),
+        "mean_credit_limit_feedback_multiplier": _mean_if_present(
+            rows, "event_credit_limit_feedback_multiplier", default=1.0
+        ),
     }
 
 
@@ -391,6 +581,19 @@ def _field_from_variable(rows: list[dict[str, Any]], variables: set[str], column
 def _mean(rows: list[dict[str, Any]], column: str) -> float:
     values = [float(row[column]) for row in rows if np.isfinite(float(row[column]))]
     return float(np.mean(values)) if values else 0.0
+
+
+def _mean_if_present(rows: list[dict[str, Any]], column: str, *, default: float) -> float:
+    values = [float(row[column]) for row in rows if column in row and np.isfinite(float(row[column]))]
+    return float(np.mean(values)) if values else float(default)
+
+
+def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+    clean_weights = weights.astype(float).clip(lower=0.0)
+    total = float(clean_weights.sum())
+    if total <= 0:
+        return float(values.astype(float).mean())
+    return float((values.astype(float) * clean_weights).sum() / total)
 
 
 def _score_agent_aggregates(aggregates: pd.DataFrame) -> pd.DataFrame:

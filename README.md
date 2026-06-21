@@ -78,6 +78,14 @@ make agent-fixture
 
 This derives household type cells from the local public SCF extract when available, runs the packed typed-agent fixture schema for households/firms/banks, and emits persistent agent state, desired actions, feasible actions, aggregate outcomes, accounting diagnostics, origin-level household-belief target scores, and a report under `outputs/`.
 
+Run the zero-cost closed-loop counterfactual fixture:
+
+```bash
+make agent-counterfactual-fixture
+```
+
+This uses the residual-over-liquidity household policy, closed-loop firm/bank feedback, and named forecast shocks (`rate_hike`, `growth_slump`, `credit_crunch`) without live model calls.
+
 Run the zero-cost household behavior target fixture:
 
 ```bash
@@ -225,13 +233,16 @@ PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
   --max-agent-live-calls 8 \
   --fresh-agent-cache \
   --belief-sources llm \
+  --household-policy residual_over_liquidity \
+  --feedback-mode closed_loop \
+  --counterfactual-shocks rate_hike,growth_slump,credit_crunch \
   --card-count 8 \
   --vintage-context require \
   --belief-targets best_effort \
   --output-dir outputs/agent_economy_gpt55_fresh
 ```
 
-`--fresh-forecast-cache` and `--fresh-agent-cache` write model responses under the run output directory instead of the shared local cache, so a live pilot does not accidentally replay prior calls. `--llm-mode` controls the macro forecast calls. `--agent-mode` controls whether typed households, firms, and banks are rule-based, fixture, replayed, or live LLM agents. Even when agents are live LLMs, code still enforces budgets, credit limits, portfolio conservation, and aggregation.
+`--fresh-forecast-cache` and `--fresh-agent-cache` write model responses under the run output directory instead of the shared local cache, so a live pilot does not accidentally replay prior calls. `--llm-mode` controls the macro forecast calls. `--agent-mode` controls whether typed households, firms, and banks are rule-based, fixture, replayed, or live LLM agents. `--household-policy residual_over_liquidity` keeps rule-based low/high liquidity response means and adds the LLM's within-group residuals. `--feedback-mode closed_loop` feeds firm hiring, price pressure, and bank credit supply back into next-origin household income and credit state. `--counterfactual-shocks` appends named forecast-shock sources for counterfactual agent runs. Even when agents are live LLMs, code still enforces budgets, credit limits, portfolio conservation, and aggregation.
 
 Agent state advances once per SPF origin, not once per variable card. That prevents CPI, GDP, and rate cards from the same survey date from becoming artificial time steps. Household belief target scores are also origin-level, so a single future SCE or Michigan observation is counted once per origin.
 

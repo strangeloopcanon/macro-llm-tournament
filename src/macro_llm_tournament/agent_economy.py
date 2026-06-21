@@ -18,7 +18,7 @@ from .agent_common import (
 )
 from .agent_llm import AgentLLMClient, agent_prompt, fixture_agent_payload, normalize_agent_payload
 from .agent_report import build_agent_economy_report
-from .agent_runtime import run_agent_economy
+from .agent_runtime import FEEDBACK_MODE_CHOICES, HOUSEHOLD_POLICY_CHOICES, run_agent_economy
 from .agent_targets import build_agent_belief_target_rows, score_agent_belief_targets
 from .agent_types import AgentTypeDefinition, build_household_type_cells
 from .forecast_cards import (
@@ -44,6 +44,7 @@ from .survey_beliefs import load_survey_belief_targets, survey_context_by_card
 __all__ = [
     "AgentLLMClient",
     "AgentTypeDefinition",
+    "add_counterfactual_forecasts",
     "agent_prompt",
     "build_agent_belief_target_rows",
     "build_agent_economy_report",
@@ -54,6 +55,14 @@ __all__ = [
     "run_agent_economy",
     "score_agent_belief_targets",
 ]
+
+
+COUNTERFACTUAL_SHOCKS: dict[str, dict[str, float]] = {
+    "rate_hike": {"TBILL": 1.00, "TBOND": 0.70, "RGDP": -0.40, "UNEMP": 0.25, "CPI": -0.15},
+    "inflation_spike": {"CPI": 1.50, "TBILL": 0.80, "TBOND": 0.55, "RGDP": -0.30, "UNEMP": 0.20},
+    "growth_slump": {"RGDP": -1.50, "UNEMP": 1.00, "CPI": -0.35, "TBILL": -0.40, "TBOND": -0.30},
+    "credit_crunch": {"RGDP": -0.90, "UNEMP": 0.65, "CPI": -0.20, "TBILL": 0.20, "TBOND": 0.35},
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +88,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh-belief-targets", action="store_true")
     parser.add_argument("--scf-wave", type=int, default=2022)
     parser.add_argument("--belief-sources", default="llm,spf_consensus,constant_gain,recursive_least_squares")
+    parser.add_argument("--household-policy", choices=HOUSEHOLD_POLICY_CHOICES, default="direct")
+    parser.add_argument("--feedback-mode", choices=FEEDBACK_MODE_CHOICES, default="closed_loop")
+    parser.add_argument("--counterfactual-shocks", default="")
     parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
 
@@ -96,6 +108,7 @@ def main() -> int:
     variables = parse_variable_list(args.variables)
     horizons = [int(part.strip()) for part in args.horizons.split(",") if part.strip()]
     source_filters = [part.strip() for part in args.belief_sources.split(",") if part.strip()]
+    counterfactual_shocks = [part.strip() for part in args.counterfactual_shocks.split(",") if part.strip()]
     manifest: dict[str, Any] = {
         "schema_version": AGENT_ECONOMY_VERSION,
         "timestamp_utc": timestamp,
@@ -118,6 +131,9 @@ def main() -> int:
         "belief_targets_mode": args.belief_targets,
         "scf_wave": int(args.scf_wave),
         "belief_source_filters": source_filters,
+        "household_policy": args.household_policy,
+        "feedback_mode": args.feedback_mode,
+        "counterfactual_shocks": counterfactual_shocks,
         "status": "running",
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -153,16 +169,21 @@ def main() -> int:
         scores, _behavior, _joined = score_forecasts(cards_frame, all_forecasts)
         verdict = verdict_from_scores(scores)
         scores.to_csv(output_dir / "forecast_scores.csv", index=False)
+        agent_forecasts, counterfactual_rows = add_counterfactual_forecasts(all_forecasts, counterfactual_shocks)
+        agent_forecasts.to_csv(output_dir / "agent_forecasts.csv", index=False)
+        counterfactual_rows.to_csv(output_dir / "counterfactual_scenarios.csv", index=False)
 
         type_cells, type_status = build_household_type_cells(work_dir=WORK_ROOT / "scf", wave=args.scf_wave)
         type_cells.to_csv(output_dir / "household_type_cells.csv", index=False)
         agent_client = _build_agent_client(args, output_dir)
         state_initial, desired_actions, feasible_actions, aggregates, diagnostics, agent_scores = run_agent_economy(
             cards,
-            all_forecasts,
+            agent_forecasts,
             type_cells,
             source_filters=source_filters,
             agent_client=agent_client,
+            household_policy=args.household_policy,
+            feedback_mode=args.feedback_mode,
         )
         _write_agent_outputs(output_dir, state_initial, desired_actions, feasible_actions, aggregates, diagnostics, agent_scores)
         agent_belief_targets = build_agent_belief_target_rows(cards, data_frames["survey_belief_targets"])
@@ -183,6 +204,9 @@ def main() -> int:
                 "survey_belief_target_rows": int(data_frames["survey_belief_targets"].shape[0]),
                 "survey_belief_card_rows": int(data_frames["survey_belief_targets_by_card"].shape[0]),
                 "forecast_rows": int(all_forecasts.shape[0]),
+                "agent_forecast_rows": int(agent_forecasts.shape[0]),
+                "counterfactual_added_forecast_rows": int(agent_forecasts.shape[0] - all_forecasts.shape[0]),
+                "counterfactual_scenario_rows": int(counterfactual_rows.shape[0]),
                 "live_call_count": int(client.live_call_count),
                 "cache_hit_count": int(client.cache_hit_count),
                 "llm_cache_dir": _safe_relative(cache_dir),
@@ -222,6 +246,44 @@ def main() -> int:
         manifest.update({"status": "failed", "error": str(exc)})
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         raise
+
+
+def add_counterfactual_forecasts(
+    forecasts: pd.DataFrame,
+    shocks: Iterable[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    shock_names = [str(shock).strip() for shock in shocks if str(shock).strip()]
+    unknown = sorted(set(shock_names) - set(COUNTERFACTUAL_SHOCKS))
+    if unknown:
+        raise ValueError(f"Unknown counterfactual shocks: {', '.join(unknown)}")
+    if forecasts.empty or not shock_names:
+        return forecasts.copy(), pd.DataFrame()
+
+    rows: list[pd.DataFrame] = []
+    scenario_rows: list[dict[str, Any]] = []
+    adjustable_columns = ["point_forecast", "p10", "p50", "p90", "panel_mean"]
+    for shock in shock_names:
+        adjustments = COUNTERFACTUAL_SHOCKS[shock]
+        frame = forecasts.copy()
+        frame["base_source"] = frame["source"].astype(str)
+        frame["source"] = frame["base_source"].map(lambda source: f"{source}__cf_{shock}")
+        frame["counterfactual_shock"] = shock
+        for variable, delta in adjustments.items():
+            mask = frame["variable"].astype(str).eq(variable)
+            for column in adjustable_columns:
+                if column in frame:
+                    frame.loc[mask, column] = pd.to_numeric(frame.loc[mask, column], errors="coerce") + float(delta)
+            scenario_rows.append(
+                {
+                    "counterfactual_shock": shock,
+                    "variable": variable,
+                    "forecast_delta": float(delta),
+                    "source_count": int(forecasts["source"].nunique()),
+                    "row_count": int(mask.sum()),
+                }
+            )
+        rows.append(frame)
+    return pd.concat([forecasts, *rows], ignore_index=True), pd.DataFrame(scenario_rows)
 
 
 def build_agent_forecast_inputs(
@@ -338,6 +400,8 @@ def _output_names() -> list[str]:
         "forecast_cards.csv",
         "llm_forecasts.jsonl",
         "control_forecasts.csv",
+        "agent_forecasts.csv",
+        "counterfactual_scenarios.csv",
         "forecast_scores.csv",
         "household_type_cells.csv",
         "agent_state_initial.jsonl",

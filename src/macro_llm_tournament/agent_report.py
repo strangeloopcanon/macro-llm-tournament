@@ -39,6 +39,9 @@ def build_agent_economy_report(
         f"- Agent live calls used: `{manifest.get('agent_live_call_count', 0)}` of cap `{manifest.get('max_agent_live_calls', 0)}`",
         f"- Agent cache hits: `{manifest.get('agent_cache_hit_count', 0)}`",
         f"- Fresh agent cache: `{manifest.get('fresh_agent_cache')}`",
+        f"- Household policy: `{manifest.get('household_policy', 'direct')}`",
+        f"- Feedback mode: `{manifest.get('feedback_mode', 'closed_loop')}`",
+        f"- Counterfactual shocks: `{', '.join(manifest.get('counterfactual_shocks', [])) or 'none'}`",
         f"- Forecast cards: `{manifest.get('card_count')}`",
         f"- Holdout: `{manifest.get('holdout_start_year')}`-`{manifest.get('holdout_end_year')}`",
         f"- Variables: `{', '.join(manifest.get('variables', []))}`",
@@ -127,8 +130,9 @@ def build_agent_economy_report(
             "This run uses LLM or control macro beliefs as inputs to typed household, firm, and bank agents, "
             "then lets deterministic accounting decide feasible spending, borrowing, portfolio movement, and "
             "aggregation. Agent state advances once per SPF origin, so multiple variable cards from the same "
-            "survey date do not become artificial time steps. Household belief targets are scored once per "
-            "origin rather than once per variable card."
+            "survey date do not become artificial time steps. In closed-loop feedback mode, firm hiring, price "
+            "pressure, and bank credit supply from each event update the next-origin household income and credit "
+            "state. Household belief targets are scored once per origin rather than once per variable card."
         ),
         "",
         "## Manifest",
