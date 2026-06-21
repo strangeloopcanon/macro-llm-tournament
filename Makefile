@@ -1,4 +1,4 @@
-.PHONY: test fixture data postcutoff-fixture agent-fixture behavior-fixture postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -34,6 +34,21 @@ agent-fixture:
 		--vintage-context best_effort \
 		--belief-targets best_effort \
 		--output-dir outputs/agent_economy_fixture
+
+agent-counterfactual-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
+		--llm-mode fixture \
+		--max-live-calls 0 \
+		--agent-mode fixture \
+		--max-agent-live-calls 0 \
+		--card-count 8 \
+		--vintage-context best_effort \
+		--belief-targets best_effort \
+		--belief-sources llm \
+		--household-policy residual_over_liquidity \
+		--feedback-mode closed_loop \
+		--counterfactual-shocks rate_hike,growth_slump,credit_crunch \
+		--output-dir outputs/agent_economy_counterfactual_fixture
 
 behavior-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.behavior_gate \

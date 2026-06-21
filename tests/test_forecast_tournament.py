@@ -12,6 +12,7 @@ import pandas as pd
 from macro_llm_tournament.forecast_agent_panel import build_forecast_agent_panel
 from macro_llm_tournament.agent_economy import (
     AgentLLMClient,
+    add_counterfactual_forecasts,
     agent_prompt,
     build_agent_belief_target_rows,
     build_household_type_cells,
@@ -568,6 +569,140 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertTrue(feasible["agent_bank_credit_multiplier"].map(np.isfinite).all())
         self.assertTrue(aggregates["firm_hiring_index"].map(np.isfinite).all())
         self.assertEqual(desired.groupby("card_id")["type_id"].nunique().min(), type_cells.shape[0])
+
+    def test_agent_residual_policy_preserves_liquidity_group_means(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["RGDP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2018,
+            card_count=1,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+
+        class SkewedAgent:
+            raw_records: list[dict] = []
+
+            def agent_panel(self, _card, _forecast, cells, _prior_states):
+                offsets = {
+                    "liquid_poor_renter": 8.0,
+                    "wealthy_htm_homeowner": -2.0,
+                    "unemployed_low_liquid": 5.0,
+                    "retiree_liquid_assets": -4.0,
+                    "high_income_illiquid_rich": 3.0,
+                    "business_owner_top_wealth": -1.0,
+                }
+                return {
+                    "household_by_type": {
+                        str(row["type_id"]): {
+                            "consumption_change_pct": offsets.get(str(row["type_id"]), 1.5),
+                            "liquid_buffer_change_pct": -0.5 * offsets.get(str(row["type_id"]), 1.5),
+                            "borrowing_desire_index": 0.10 * offsets.get(str(row["type_id"]), 1.5),
+                            "portfolio_rebalance_to_liquid_pct": 0.20 * offsets.get(str(row["type_id"]), 1.5),
+                            "job_search_intensity_index": 0.05 * offsets.get(str(row["type_id"]), 1.5),
+                            "expected_inflation_1y": 2.5,
+                            "expected_real_income_growth": 2.0,
+                            "expected_unemployment_rate": 4.0,
+                            "expected_short_rate": 3.5,
+                            "confidence": 0.7,
+                            "uncertainty": 0.4,
+                        }
+                        for _, row in cells.iterrows()
+                    },
+                    "firm": {"hiring_index": 1.0, "price_pressure_index": 0.5, "confidence": 0.6},
+                    "bank": {"credit_supply_multiplier": 1.0, "credit_tightening_index": 0.0, "confidence": 0.6},
+                }
+
+        _state, rule_desired, _rule_feasible, _rule_aggregates, _rule_diagnostics, _rule_scores = run_agent_economy(
+            cards,
+            llm_forecasts,
+            type_cells,
+            source_filters=["llm"],
+            household_policy="rule",
+        )
+        _state, hybrid_desired, _hybrid_feasible, _hybrid_aggregates, _hybrid_diagnostics, _hybrid_scores = run_agent_economy(
+            cards,
+            llm_forecasts,
+            type_cells,
+            source_filters=["llm"],
+            agent_client=SkewedAgent(),
+            household_policy="residual_over_liquidity",
+        )
+
+        for group_name, rule_group in rule_desired.groupby("liquidity_group"):
+            hybrid_group = hybrid_desired[hybrid_desired["liquidity_group"] == group_name]
+            rule_mean = np.average(rule_group["desired_consumption_change_pct"], weights=rule_group["population_weight"])
+            hybrid_mean = np.average(hybrid_group["desired_consumption_change_pct"], weights=hybrid_group["population_weight"])
+            self.assertAlmostEqual(float(rule_mean), float(hybrid_mean), places=6)
+        merged = rule_desired.merge(
+            hybrid_desired,
+            on=["card_id", "source", "type_id"],
+            suffixes=("_rule", "_hybrid"),
+        )
+        self.assertGreater(
+            float((merged["desired_consumption_change_pct_rule"] - merged["desired_consumption_change_pct_hybrid"]).abs().max()),
+            0.01,
+        )
+        self.assertEqual(set(hybrid_desired["agent_behavior_mode"]), {"llm_residual_over_liquidity"})
+
+    def test_agent_closed_loop_feedback_changes_next_origin_state(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["RGDP", "UNEMP"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2019,
+            card_count=4,
+        )
+        llm_client = ForecastLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture")
+        llm_forecasts, _raw = run_llm_forecasts(llm_client, cards)
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+
+        _state, none_desired, none_feasible, _none_aggregates, _none_diagnostics, _none_scores = run_agent_economy(
+            cards,
+            llm_forecasts,
+            type_cells,
+            source_filters=["llm"],
+            feedback_mode="none",
+        )
+        _state, closed_desired, closed_feasible, _closed_aggregates, _closed_diagnostics, _closed_scores = run_agent_economy(
+            cards,
+            llm_forecasts,
+            type_cells,
+            source_filters=["llm"],
+            feedback_mode="closed_loop",
+        )
+
+        self.assertIn("event_income_feedback_pct", closed_feasible.columns)
+        self.assertTrue(closed_feasible["event_income_feedback_pct"].abs().gt(0).any())
+        later_origin = closed_desired["origin_index"] > closed_desired["origin_index"].min()
+        self.assertGreater(
+            float((closed_desired.loc[later_origin, "annual_income"] - none_desired.loc[later_origin, "annual_income"]).abs().max()),
+            0.0,
+        )
+        self.assertEqual(set(none_feasible["feedback_mode"]), {"none"})
+        self.assertEqual(set(closed_feasible["feedback_mode"]), {"closed_loop"})
+
+    def test_counterfactual_forecasts_append_named_shock_sources(self):
+        forecasts = pd.DataFrame(
+            [
+                {"source": "llm_codex_cli_gpt-5.5", "variable": "TBILL", "point_forecast": 3.0, "p10": 2.5, "p50": 3.0, "p90": 3.5},
+                {"source": "llm_codex_cli_gpt-5.5", "variable": "RGDP", "point_forecast": 2.0, "p10": 1.5, "p50": 2.0, "p90": 2.5},
+            ]
+        )
+
+        expanded, scenarios = add_counterfactual_forecasts(forecasts, ["rate_hike"])
+
+        self.assertEqual(expanded.shape[0], 4)
+        self.assertIn("llm_codex_cli_gpt-5.5__cf_rate_hike", set(expanded["source"]))
+        tbill = expanded[(expanded["source"].str.endswith("__cf_rate_hike")) & (expanded["variable"] == "TBILL")].iloc[0]
+        rgdp = expanded[(expanded["source"].str.endswith("__cf_rate_hike")) & (expanded["variable"] == "RGDP")].iloc[0]
+        self.assertAlmostEqual(float(tbill["point_forecast"]), 4.0)
+        self.assertAlmostEqual(float(rgdp["point_forecast"]), 1.6)
+        self.assertEqual(set(scenarios["counterfactual_shock"]), {"rate_hike"})
 
     def test_agent_belief_target_scoring_uses_future_survey_observations(self):
         cards = build_forecast_cards(
