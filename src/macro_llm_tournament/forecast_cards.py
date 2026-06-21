@@ -151,6 +151,16 @@ def _contamination_label(origin_year: int, *, model_cutoff_year: int = 2025) -> 
     return "post_model_cutoff_candidate"
 
 
+def _row_text(row: pd.Series, column: str, default: str) -> str:
+    value = row.get(column, default)
+    if value is None:
+        return default
+    if isinstance(value, float) and math.isnan(value):
+        return default
+    text = str(value)
+    return text if text else default
+
+
 def _cross_variable_context(
     spf_data: pd.DataFrame,
     *,
@@ -199,15 +209,16 @@ def _card_from_row(
     if summary["asof_reference_value"] is None:
         return None
     visible_history = history.tail(history_quarters)
-    regime_label = _regime_label(int(row["origin_year"]))
+    regime_label = _row_text(row, "regime_label", _regime_label(int(row["origin_year"])))
+    contamination_label = _row_text(row, "contamination_label", _contamination_label(int(row["origin_year"])))
     evaluation_split = _evaluation_split(int(row["origin_year"]), holdout_start_year, holdout_end_year)
     prompt_payload = {
         "prompt_version": FORECAST_CARD_PROMPT_VERSION,
-        "task": "Forecast the requested U.S. macroeconomic variable from information available before this SPF survey origin.",
+        "task": "Forecast the requested U.S. macroeconomic variable for the listed SPF target period.",
         "as_of_design": {
             "evaluation_split": evaluation_split,
             "regime_label": regime_label,
-            "contamination_label": _contamination_label(int(row["origin_year"])),
+            "contamination_label": contamination_label,
             "current_origin_spf_consensus_hidden": True,
             "outcome_hidden": True,
             "history_uses_lagged_forecasts_only": True,
@@ -217,8 +228,12 @@ def _card_from_row(
         "variable": row["variable"],
         "variable_name": row["variable_name"],
         "units": row["units"],
-        "survey_origin": row["origin"],
-        "forecast_horizon_quarters_ahead": int(row["horizon"]),
+        "forecast_target_period": row["origin"],
+        "spf_step_ahead": int(row["horizon"]),
+        "target_period_note": (
+            "Philadelphia Fed SPF error-stat rows are dated by the forecasted period, not by the "
+            "forecast-making date. Step 1 is the one-step-ahead projection for this dated target period."
+        ),
         "available_history": _history_rows(visible_history),
         "asof_forecast_signal_summary": summary,
         "historical_forecast_signal_summary": _forecast_signal_summary(history),
@@ -258,7 +273,7 @@ def _card_from_row(
         recent_signal_volatility_8=float(summary["recent_spf_consensus_volatility_8"] or 0.0),
         evaluation_split=evaluation_split,
         regime_label=regime_label,
-        contamination_label=_contamination_label(int(row["origin_year"])),
+        contamination_label=contamination_label,
         source_url=str(row["source_url"]),
         variable_page_url=str(row["variable_page_url"]),
         prompt_payload=prompt_payload,

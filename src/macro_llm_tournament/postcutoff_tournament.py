@@ -23,7 +23,7 @@ from .forecast_cards import (
 )
 from .forecast_controls import build_control_forecasts
 from .forecast_data import PROJECT_ROOT, SPF_VARIABLES, load_spf_error_data, parse_variable_list, quarter_index
-from .forecast_llm import ForecastLLMClient, run_llm_forecasts
+from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS, run_llm_forecasts
 from .forecast_scoring import score_forecast_slices, score_forecasts, verdict_from_scores
 from .fred_vintage import WORK_ROOT as FRED_VINTAGE_WORK_ROOT
 from .fred_vintage import approximate_spf_as_of_date, build_vintage_context_for_cards
@@ -87,7 +87,7 @@ DETAIL_FORECAST_SPECS: dict[str, DetailForecastSpec] = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run post-cutoff SPF forecasts with FRED proxy scoring where possible.")
-    parser.add_argument("--provider", choices=["codex_cli"], default="codex_cli")
+    parser.add_argument("--provider", choices=SUPPORTED_FORECAST_PROVIDERS, default="codex_cli")
     parser.add_argument("--model", default="gpt-5.5")
     parser.add_argument("--llm-mode", choices=["fixture", "replay", "live"], default="fixture")
     parser.add_argument("--max-live-calls", type=int, default=0)
@@ -323,6 +323,7 @@ def build_postcutoff_selection(
 
     cutoff = date.fromisoformat(cutoff_date)
     selected = detail[detail["as_of_date"].map(lambda value: date.fromisoformat(value) > cutoff)].copy()
+    selected["contamination_label"] = "post_model_cutoff_candidate"
     selected["scoreable"] = selected["realization_complete"].fillna(False).astype(bool) & selected["realized"].map(is_finite)
     freeze_rows = selected[~selected["scoreable"]].copy()
     if scoreable_only:
@@ -571,7 +572,7 @@ def build_postcutoff_report(manifest: dict[str, Any], *, scores: pd.DataFrame, s
         regime_breakdown(slice_scores),
         "",
         "## Caveats",
-        "- These cards are post-cutoff relative to the supplied GPT-5.5 cutoff date.",
+        "- These cards are post-cutoff relative to the supplied model cutoff date.",
         "- Current scoreable rows use FRED current-vintage proxy realizations, not official SPF forecast-error rows.",
         "- Frozen rows have forecasts saved now and should be rescored when official SPF/FRED realizations become complete.",
         "",

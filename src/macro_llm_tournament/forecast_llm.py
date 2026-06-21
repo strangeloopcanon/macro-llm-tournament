@@ -13,14 +13,21 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
+from .env import load_secret_env
 from .forecast_cards import ForecastCard
 from .llm_common import LLMUnavailable
+
+try:
+    from openai import OpenAI
+except ImportError:  # pragma: no cover - exercised when optional dependency is absent
+    OpenAI = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WORK_ROOT = PROJECT_ROOT / "work" / "llm_cache"
 FORECAST_LLM_PROMPT_VERSION = "spf_direct_forecast_v1"
 RECALL_PROMPT_VERSION = "spf_forecast_recall_probe_v1"
+SUPPORTED_FORECAST_PROVIDERS = ("codex_cli", "openai_responses", "gemini_cli")
 
 
 def _utc_now() -> str:
@@ -47,14 +54,44 @@ def _cache_key(kind: str, provider: str, model: str, payload: dict[str, Any]) ->
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def _system_prompt(prompt: str) -> str:
-    return f"""
+def _json_instructions() -> str:
+    return """
 Return only valid JSON. You are participating in a macroeconomic forecast tournament.
 Use only the information inside the prompt. Do not browse, inspect files, run commands,
 or cite realized outcomes. Produce numeric forecasts in the requested units.
+""".strip()
 
+
+def _system_prompt(prompt: str, *, instructions: str | None = None) -> str:
+    return f"""
+{instructions or _json_instructions()}
 {prompt.strip()}
 """.strip()
+
+
+def _response_output_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return str(output_text)
+    chunks: list[str] = []
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", None)
+            if text:
+                chunks.append(str(text))
+    return "\n".join(chunks)
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _jsonable(value.model_dump(mode="json"))
+    return str(value)
 
 
 class ForecastLLMClient:
@@ -117,7 +154,7 @@ class ForecastLLMClient:
         data["response_read_utc"] = _utc_now()
         return data
 
-    def _write_cache(self, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    def _write_cache(self, path: Path, payload: dict[str, Any], **metadata: Any) -> dict[str, Any]:
         data = {
             "provider": self.provider,
             "model": self.model,
@@ -126,6 +163,7 @@ class ForecastLLMClient:
             "cache_path": str(path),
             "response_created_utc": _utc_now(),
         }
+        data.update({key: _jsonable(value) for key, value in metadata.items()})
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
         return data
 
@@ -135,7 +173,50 @@ class ForecastLLMClient:
             raise LLMUnavailable("codex CLI binary not found; set CODEX_CLI_BIN or install codex")
         return binary
 
-    def _codex_call(self, prompt: str, cache_name: str) -> dict[str, Any]:
+    def _gemini_binary(self) -> str:
+        binary = os.getenv("GEMINI_CLI_BIN") or shutil.which("gemini")
+        if not binary:
+            raise LLMUnavailable("gemini CLI binary not found; set GEMINI_CLI_BIN or install gemini")
+        return binary
+
+    def _gemini_system_settings_path(self) -> Path:
+        configured = os.getenv("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
+        if configured:
+            return Path(configured)
+        path = self.cache_dir / "gemini_cli" / "system_settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(
+                json.dumps(
+                    {
+                        "security": {
+                            "auth": {
+                                "selectedType": "gemini-api-key",
+                                "enforcedType": "gemini-api-key",
+                            }
+                        }
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        return path
+
+    def _gemini_env(self) -> dict[str, str]:
+        load_secret_env()
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise LLMUnavailable("GEMINI_API_KEY is required for provider gemini_cli")
+        env = dict(os.environ)
+        env["GEMINI_API_KEY"] = api_key
+        env["GEMINI_DEFAULT_AUTH_TYPE"] = "gemini-api-key"
+        env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(self._gemini_system_settings_path())
+        env.setdefault("TERM", "xterm-256color")
+        return env
+
+    def _codex_call(self, prompt: str, cache_name: str, *, instructions: str | None = None) -> dict[str, Any]:
         cache_path = self.cache_path(cache_name)
         if cache_path.exists():
             return self._read_cache(cache_path)
@@ -166,7 +247,7 @@ class ForecastLLMClient:
         try:
             result = subprocess.run(
                 command,
-                input=_system_prompt(prompt),
+                input=_system_prompt(prompt, instructions=instructions),
                 text=True,
                 capture_output=True,
                 cwd=str(PROJECT_ROOT),
@@ -187,11 +268,127 @@ class ForecastLLMClient:
             if last_message_path.exists():
                 last_message_path.unlink()
 
+    def _openai_client(self) -> Any:
+        if OpenAI is None:
+            raise LLMUnavailable("openai package not installed; add `openai` or use provider codex_cli")
+        load_secret_env()
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise LLMUnavailable("OPENAI_API_KEY is required for provider openai_responses")
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if os.getenv("OPENAI_BASE_URL"):
+            kwargs["base_url"] = os.getenv("OPENAI_BASE_URL")
+        if os.getenv("OPENAI_ORG_ID"):
+            kwargs["organization"] = os.getenv("OPENAI_ORG_ID")
+        if os.getenv("OPENAI_PROJECT_ID"):
+            kwargs["project"] = os.getenv("OPENAI_PROJECT_ID")
+        return OpenAI(**kwargs)
+
+    def _openai_responses_call(self, prompt: str, cache_name: str, *, instructions: str | None = None) -> dict[str, Any]:
+        cache_path = self.cache_path(cache_name)
+        if cache_path.exists():
+            return self._read_cache(cache_path)
+        if self.mode == "replay":
+            raise LLMUnavailable(f"Replay mode cache miss for {cache_name}")
+        if self.mode != "live":
+            raise LLMUnavailable(f"LLM mode {self.mode} cannot make live forecast calls")
+        self._record_live_call(cache_name)
+        max_output_tokens = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "4096"))
+        reasoning_effort = os.getenv("OPENAI_REASONING_EFFORT", "low")
+        try:
+            response = self._openai_client().responses.create(
+                model=self.model,
+                instructions=instructions or _json_instructions(),
+                input=prompt.strip(),
+                max_output_tokens=max_output_tokens,
+                reasoning={"effort": reasoning_effort},
+                store=False,
+                timeout=float(os.getenv("OPENAI_API_TIMEOUT_SECONDS", "240")),
+            )
+            text = _response_output_text(response)
+            payload = _extract_json(text)
+            return self._write_cache(
+                cache_path,
+                payload,
+                provider_response_id=getattr(response, "id", None),
+                provider_response_status=getattr(response, "status", None),
+                provider_usage=getattr(response, "usage", None),
+                provider_model=getattr(response, "model", None),
+            )
+        except Exception as exc:
+            if isinstance(exc, (LLMUnavailable, ValueError, json.JSONDecodeError)):
+                raise
+            raise LLMUnavailable(f"OpenAI Responses API call failed: {type(exc).__name__}: {str(exc)[:700]}") from exc
+
+    def _gemini_cli_call(self, prompt: str, cache_name: str, *, instructions: str | None = None) -> dict[str, Any]:
+        cache_path = self.cache_path(cache_name)
+        if cache_path.exists():
+            return self._read_cache(cache_path)
+        if self.mode == "replay":
+            raise LLMUnavailable(f"Replay mode cache miss for {cache_name}")
+        if self.mode != "live":
+            raise LLMUnavailable(f"LLM mode {self.mode} cannot make live forecast calls")
+        self._record_live_call(cache_name)
+        command = [
+            self._gemini_binary(),
+            "--model",
+            self.model,
+            "--prompt",
+            "",
+            "--output-format",
+            "json",
+            "--skip-trust",
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                input=_system_prompt(prompt, instructions=instructions),
+                text=True,
+                capture_output=True,
+                cwd=str(PROJECT_ROOT),
+                timeout=float(os.getenv("GEMINI_CLI_TIMEOUT_SECONDS", "300")),
+                check=False,
+                env=self._gemini_env(),
+            )
+            if result.returncode != 0:
+                stderr = (result.stderr or result.stdout or "").strip()
+                raise LLMUnavailable(f"Gemini CLI failed with exit code {result.returncode}: {stderr[:700]}")
+            wrapper = _extract_json(result.stdout or "")
+            if not isinstance(wrapper, dict):
+                raise ValueError("Gemini CLI returned a non-object JSON wrapper")
+            text = str(wrapper.get("response") or "")
+            payload = _extract_json(text)
+            return self._write_cache(
+                cache_path,
+                payload,
+                provider_binary=command[0],
+                provider_session_id=wrapper.get("session_id"),
+                provider_stats=wrapper.get("stats"),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise LLMUnavailable(f"Gemini CLI timed out after {exc.timeout} seconds") from exc
+        except Exception as exc:
+            if isinstance(exc, (LLMUnavailable, ValueError, json.JSONDecodeError)):
+                raise
+            raise LLMUnavailable(f"Gemini CLI call failed: {type(exc).__name__}: {str(exc)[:700]}") from exc
+
+    def _call(self, prompt: str, cache_name: str, *, instructions: str | None = None) -> dict[str, Any]:
+        if self.provider == "codex_cli":
+            return self._codex_call(prompt, cache_name, instructions=instructions)
+        if self.provider == "openai_responses":
+            return self._openai_responses_call(prompt, cache_name, instructions=instructions)
+        if self.provider == "gemini_cli":
+            return self._gemini_cli_call(prompt, cache_name, instructions=instructions)
+        raise LLMUnavailable(f"Unsupported forecast provider: {self.provider}")
+
+    def json_call(self, prompt: str, cache_name: str, *, instructions: str) -> dict[str, Any]:
+        return self._call(prompt, cache_name, instructions=instructions)
+
     def forecast_card(self, card: ForecastCard) -> dict[str, Any]:
         if self.mode == "fixture":
             return fixture_forecast(card, self.provider, self.model)
         prompt = forecast_prompt(card)
-        return self._codex_call(prompt, self.forecast_cache_name(card))
+        return self._call(prompt, self.forecast_cache_name(card))
 
     def recall_probe(self) -> dict[str, Any]:
         if self.mode == "fixture":
@@ -222,7 +419,11 @@ Question: Without using tools, what do you know about the Philadelphia Fed Surve
 Professional Forecasters and behavioral-expectations forecast tests such as underreaction,
 overreaction, constant-gain learning, and diagnostic expectations?
 """
-        return self._codex_call(prompt, self.recall_cache_name())
+        instructions = """
+Return only valid JSON. This is a general contamination probe.
+Do not browse, inspect files, run commands, or cite hidden outcome data.
+""".strip()
+        return self._call(prompt, self.recall_cache_name(), instructions=instructions)
 
 
 def forecast_prompt(card: ForecastCard) -> str:

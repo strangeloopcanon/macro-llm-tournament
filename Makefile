@@ -52,4 +52,5 @@ audit-fixture: fixture
 	PYTHONPATH=src python3 -m macro_llm_tournament.forecast_audit \
 		--run-dir outputs/spf_fixture \
 		--recall-mode fixture \
+		--qualitative-recall-mode fixture \
 		--output-dir outputs/forecast_audit_fixture
