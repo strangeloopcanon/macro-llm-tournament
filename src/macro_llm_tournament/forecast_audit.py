@@ -94,6 +94,7 @@ def main() -> int:
         theil = build_theil_u(joined)
         source_scores = build_source_scores(joined)
         paired = build_paired_loss_tests(joined)
+        belief_detail, belief_summary = build_belief_structure_audit(joined)
         recall_predictions = pd.DataFrame()
         recall_scores = pd.DataFrame()
         recall_raw: list[dict[str, Any]] = []
@@ -115,6 +116,8 @@ def main() -> int:
         surprise.to_csv(output_dir / "audit_surprise_split.csv", index=False)
         theil.to_csv(output_dir / "audit_theils_u.csv", index=False)
         paired.to_csv(output_dir / "audit_paired_loss_tests.csv", index=False)
+        belief_detail.to_csv(output_dir / "audit_belief_structure.csv", index=False)
+        belief_summary.to_csv(output_dir / "audit_belief_structure_summary.csv", index=False)
         recall_predictions.to_csv(output_dir / "direct_recall_predictions.csv", index=False)
         recall_scores.to_csv(output_dir / "direct_recall_scores.csv", index=False)
         (output_dir / "direct_recall_raw_records.json").write_text(json.dumps(recall_raw, indent=2, sort_keys=True), encoding="utf-8")
@@ -128,6 +131,8 @@ def main() -> int:
                 "surprise_rows": int(surprise.shape[0]),
                 "theil_rows": int(theil.shape[0]),
                 "paired_test_rows": int(paired.shape[0]),
+                "belief_structure_rows": int(belief_detail.shape[0]),
+                "belief_structure_summary_rows": int(belief_summary.shape[0]),
                 "recall_prediction_rows": int(recall_predictions.shape[0]),
                 "recall_score_rows": int(recall_scores.shape[0]),
                 "recall_live_call_count": int(recall_client.live_call_count),
@@ -137,6 +142,8 @@ def main() -> int:
                     "audit_surprise_split.csv",
                     "audit_theils_u.csv",
                     "audit_paired_loss_tests.csv",
+                    "audit_belief_structure.csv",
+                    "audit_belief_structure_summary.csv",
                     "direct_recall_predictions.csv",
                     "direct_recall_scores.csv",
                     "direct_recall_raw_records.json",
@@ -144,7 +151,7 @@ def main() -> int:
                 ],
             }
         )
-        report = build_audit_report(manifest, source_scores, surprise, theil, paired, recall_scores)
+        report = build_audit_report(manifest, source_scores, surprise, theil, paired, recall_scores, belief_summary=belief_summary)
         (output_dir / "forecast_audit_report.md").write_text(report, encoding="utf-8")
         (output_dir / "audit_manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         print(output_dir)
@@ -180,18 +187,20 @@ def load_joined(run_dir: Path, cards: pd.DataFrame, forecasts: pd.DataFrame) -> 
     if path.exists():
         joined = pd.read_csv(path)
     else:
+        card_columns = [
+            "card_id",
+            "variable",
+            "origin",
+            "origin_index",
+            "horizon",
+            "target_realized",
+            "asof_reference_value",
+        ]
+        for optional in ["prior_spf_forecast", "rolling_signal_mean_4", "recent_signal_change_4"]:
+            if optional in cards:
+                card_columns.append(optional)
         joined = forecasts.merge(
-            cards[
-                [
-                    "card_id",
-                    "variable",
-                    "origin",
-                    "origin_index",
-                    "horizon",
-                    "target_realized",
-                    "asof_reference_value",
-                ]
-            ],
+            cards[card_columns],
             on=["card_id", "variable", "origin", "origin_index", "horizon"],
             how="inner",
         )
@@ -328,6 +337,173 @@ def paired_loss_row(group: pd.DataFrame, base: pd.DataFrame, *, source: str, var
         "dm_t_approx_squared_loss": t_stat(diff),
         "normal_approx_p_two_sided": normal_p_value(t_stat(diff)),
     }
+
+
+def build_belief_structure_audit(joined: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if joined.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    enriched = joined.copy()
+    spf_abs = (
+        enriched[enriched["source"] == "spf_consensus"][["card_id", "error"]]
+        .rename(columns={"error": "spf_error"})
+        .copy()
+    )
+    if not spf_abs.empty:
+        spf_abs["spf_abs_error"] = spf_abs["spf_error"].abs()
+        enriched = enriched.merge(spf_abs[["card_id", "spf_abs_error"]], on="card_id", how="left")
+    elif "spf_abs_error" not in enriched:
+        enriched["spf_abs_error"] = np.nan
+
+    summary_rows: list[dict[str, Any]] = []
+    for keys, group in enriched.groupby(["source", "variable"], dropna=False):
+        source, variable = keys
+        summary_rows.append(belief_structure_summary_row(group, source=str(source), variable=str(variable)))
+    for source, group in enriched.groupby("source", dropna=False):
+        summary_rows.append(belief_structure_summary_row(group, source=str(source), variable="ALL"))
+    summary = pd.DataFrame(summary_rows).sort_values(["variable", "source"]).reset_index(drop=True)
+    detail_rows: list[dict[str, Any]] = []
+    for _, row in summary.iterrows():
+        base = {"source": row["source"], "variable": row["variable"], "n": int(row["n"])}
+        for metric_name in [column for column in summary.columns if column not in {"source", "variable", "n"}]:
+            detail_rows.append(
+                {
+                    **base,
+                    "metric_family": belief_metric_family(metric_name),
+                    "metric_name": metric_name,
+                    "value": row[metric_name],
+                }
+            )
+    detail = pd.DataFrame(detail_rows).sort_values(["variable", "source", "metric_family", "metric_name"]).reset_index(drop=True)
+    return detail, summary
+
+
+def belief_structure_summary_row(group: pd.DataFrame, *, source: str, variable: str) -> dict[str, Any]:
+    point = numeric_column(group, "point_forecast")
+    target = numeric_column(group, "target_realized")
+    asof = numeric_column(group, "asof_reference_value")
+    prior_spf = numeric_column(group, "prior_spf_forecast")
+    rolling_mean = numeric_column(group, "rolling_signal_mean_4")
+    recent_change = numeric_column(group, "recent_signal_change_4")
+    panel_std = numeric_column(group, "panel_std")
+    p10 = numeric_column(group, "p10")
+    p90 = numeric_column(group, "p90")
+    confidence = numeric_column(group, "confidence")
+    spf_abs_error = numeric_column(group, "spf_abs_error")
+    error = point - target
+    abs_error = error.abs()
+    revision = point - prior_spf
+    realized_minus_forecast = target - point
+    forecast_change = point - asof
+    recent_signal = asof - rolling_mean
+    interval_width = p90 - p10
+    interval_mask = finite_mask(target, p10, p90) & (p10 <= p90)
+    interval_coverage = (
+        ((target[interval_mask] >= p10[interval_mask]) & (target[interval_mask] <= p90[interval_mask])).mean()
+        if interval_mask.any()
+        else np.nan
+    )
+    confidence_mask = finite_mask(confidence, abs_error)
+    confidence_median = float(confidence[confidence_mask].median()) if confidence_mask.any() else np.nan
+    high_conf_mae = float(abs_error[confidence_mask & (confidence >= confidence_median)].mean()) if np.isfinite(confidence_median) else np.nan
+    low_conf_mae = float(abs_error[confidence_mask & (confidence < confidence_median)].mean()) if np.isfinite(confidence_median) else np.nan
+    surprise_mask = finite_mask(spf_abs_error, error)
+    surprise_median = float(spf_abs_error[surprise_mask].median()) if surprise_mask.any() else np.nan
+    high_surprise = error[surprise_mask & (spf_abs_error > surprise_median)]
+    low_surprise = error[surprise_mask & (spf_abs_error <= surprise_median)]
+    high_surprise_rmse = rmse(high_surprise)
+    low_surprise_rmse = rmse(low_surprise)
+    return {
+        "source": source,
+        "variable": variable,
+        "n": int(group.shape[0]),
+        "underreaction_slope_error_on_revision": slope(revision, realized_minus_forecast),
+        "mean_forecast_revision": finite_mean(revision),
+        "mean_realized_minus_forecast": finite_mean(realized_minus_forecast),
+        "extrapolation_slope_forecast_change_on_recent_signal": slope(recent_signal, forecast_change),
+        "extrapolation_slope_forecast_change_on_recent_spf_change": slope(recent_change, forecast_change),
+        "mean_panel_std": finite_mean(panel_std),
+        "dispersion_slope_abs_error_on_panel_std": slope(panel_std, abs_error),
+        "mean_interval_width_p90_p10": finite_mean(interval_width[interval_width >= 0]),
+        "interval_coverage_p10_p90": float(interval_coverage) if np.isfinite(interval_coverage) else np.nan,
+        "interval_n": int(interval_mask.sum()),
+        "median_abs_error": finite_median(abs_error),
+        "mean_confidence": finite_mean(confidence),
+        "confidence_abs_error_corr": correlation(confidence, abs_error),
+        "confidence_slope_abs_error_on_confidence": slope(confidence, abs_error),
+        "high_confidence_mae": high_conf_mae,
+        "low_confidence_mae": low_conf_mae,
+        "high_minus_low_confidence_mae": high_conf_mae - low_conf_mae if np.isfinite(high_conf_mae) and np.isfinite(low_conf_mae) else np.nan,
+        "surprise_slope_abs_error_on_spf_abs_error": slope(spf_abs_error, abs_error),
+        "surprise_rmse_gap_high_minus_low_spf_error": high_surprise_rmse - low_surprise_rmse
+        if np.isfinite(high_surprise_rmse) and np.isfinite(low_surprise_rmse)
+        else np.nan,
+    }
+
+
+def belief_metric_family(metric_name: str) -> str:
+    if metric_name.startswith("underreaction") or metric_name.startswith("mean_forecast_revision") or metric_name.startswith("mean_realized"):
+        return "underreaction"
+    if metric_name.startswith("extrapolation"):
+        return "extrapolation"
+    if "panel_std" in metric_name or metric_name.startswith("dispersion"):
+        return "disagreement_dispersion"
+    if "interval" in metric_name:
+        return "interval_calibration"
+    if "confidence" in metric_name or metric_name == "median_abs_error":
+        return "confidence_calibration"
+    if metric_name.startswith("surprise"):
+        return "surprise_response"
+    return "other"
+
+
+def numeric_column(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame:
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def finite_mask(*values: pd.Series) -> pd.Series:
+    if not values:
+        return pd.Series(dtype=bool)
+    mask = pd.Series(True, index=values[0].index)
+    for value in values:
+        mask &= np.isfinite(pd.to_numeric(value, errors="coerce"))
+    return mask
+
+
+def finite_mean(values: pd.Series) -> float:
+    finite = pd.to_numeric(values, errors="coerce").dropna()
+    return float(finite.mean()) if len(finite) else np.nan
+
+
+def finite_median(values: pd.Series) -> float:
+    finite = pd.to_numeric(values, errors="coerce").dropna()
+    return float(finite.median()) if len(finite) else np.nan
+
+
+def rmse(values: pd.Series) -> float:
+    finite = pd.to_numeric(values, errors="coerce").dropna()
+    return float(np.sqrt(np.mean(np.square(finite)))) if len(finite) else np.nan
+
+
+def slope(x: pd.Series, y: pd.Series) -> float:
+    x_values = pd.to_numeric(x, errors="coerce").to_numpy(dtype=float)
+    y_values = pd.to_numeric(y, errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if mask.sum() < 3 or np.nanstd(x_values[mask]) < 1e-12:
+        return np.nan
+    centered_x = x_values[mask] - np.mean(x_values[mask])
+    centered_y = y_values[mask] - np.mean(y_values[mask])
+    return float(np.sum(centered_x * centered_y) / np.sum(centered_x**2))
+
+
+def correlation(x: pd.Series, y: pd.Series) -> float:
+    x_values = pd.to_numeric(x, errors="coerce").to_numpy(dtype=float)
+    y_values = pd.to_numeric(y, errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(x_values) & np.isfinite(y_values)
+    if mask.sum() < 3 or np.nanstd(x_values[mask]) < 1e-12 or np.nanstd(y_values[mask]) < 1e-12:
+        return np.nan
+    return float(np.corrcoef(x_values[mask], y_values[mask])[0, 1])
 
 
 def score_group(group: pd.DataFrame, *, source: str, variable: str) -> dict[str, Any]:
@@ -634,8 +810,11 @@ def build_audit_report(
     theil: pd.DataFrame,
     paired: pd.DataFrame,
     recall_scores: pd.DataFrame,
+    *,
+    belief_summary: pd.DataFrame | None = None,
 ) -> str:
     overall = filter_variable(source_scores, "ALL").sort_values("rmse") if "rmse" in source_scores else pd.DataFrame()
+    belief_all = filter_variable(belief_summary if belief_summary is not None else pd.DataFrame(), "ALL")
     surprise_gap = filter_variable(surprise, "ALL")
     if not surprise_gap.empty and "source" in surprise_gap:
         surprise_gap = surprise_gap[surprise_gap["source"] == "llm_minus_spf_gap"].copy()
@@ -671,6 +850,23 @@ def build_audit_report(
                     "mean_abs_loss_diff_vs_baseline",
                     "dm_t_approx_squared_loss",
                     "normal_approx_p_two_sided",
+                ],
+            )
+        ),
+        "",
+        "## Belief Structure",
+        markdown_table(
+            select_columns(
+                belief_all,
+                [
+                    "source",
+                    "n",
+                    "underreaction_slope_error_on_revision",
+                    "extrapolation_slope_forecast_change_on_recent_signal",
+                    "mean_panel_std",
+                    "interval_coverage_p10_p90",
+                    "confidence_abs_error_corr",
+                    "surprise_rmse_gap_high_minus_low_spf_error",
                 ],
             )
         ),

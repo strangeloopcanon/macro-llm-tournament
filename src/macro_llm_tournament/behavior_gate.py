@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from importlib import resources
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +17,10 @@ from .agent_types import build_household_type_cells
 from .llm_common import LLMUnavailable
 
 
-BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v1"
+BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v2"
+BEHAVIOR_PROMPT_VERSION = "household_behavior_target_gate_v1"
+TARGET_CATALOG_PACKAGE = "macro_llm_tournament"
+TARGET_CATALOG_RESOURCE = "data/public_behavior_targets.csv"
 
 
 @dataclass(frozen=True)
@@ -70,118 +74,6 @@ BEHAVIOR_SCENARIOS: tuple[BehaviorScenario, ...] = (
 )
 
 
-BEHAVIOR_TARGETS: tuple[dict[str, Any], ...] = (
-    {
-        "scenario_id": "rebate_2001_style",
-        "target_name": "aggregate_nondurable_spending_share_6mo",
-        "target_family": "mpc",
-        "target_low": 0.20,
-        "target_high": 0.40,
-        "target_value": 0.30,
-        "prediction_column": "aggregate_nondurable_spending_share",
-        "source_label": "Johnson Parker Souleles 2006 / CFPB summary",
-        "source_url": "https://files.consumerfinance.gov/f/documents/cfpb_pagel_income-liquidity-and-the-consumption-response-to-the-2020-economic-_H7TYltp.pdf",
-        "notes": "Prior tax-rebate literature estimates 20-40 percent of checks spent on nondurables and services over six months.",
-    },
-    {
-        "scenario_id": "stimulus_2008_style",
-        "target_name": "aggregate_nondurable_spending_share_3mo",
-        "target_family": "mpc",
-        "target_low": 0.12,
-        "target_high": 0.30,
-        "target_value": 0.21,
-        "prediction_column": "aggregate_nondurable_spending_share",
-        "source_label": "Parker Souleles Johnson McClelland 2013",
-        "source_url": "https://www.openicpsr.org/openicpsr/project/116117/version/V1/view",
-        "notes": "2008 ESP estimates show 12-30 percent of payments spent on nondurables in the receipt quarter.",
-    },
-    {
-        "scenario_id": "stimulus_2008_style",
-        "target_name": "aggregate_total_spending_share_6mo",
-        "target_family": "mpc",
-        "target_low": 0.50,
-        "target_high": 0.90,
-        "target_value": 0.70,
-        "prediction_column": "aggregate_total_spending_share",
-        "source_label": "Parker Souleles Johnson McClelland 2013",
-        "source_url": "https://www.openicpsr.org/openicpsr/project/116117/version/V1/view",
-        "notes": "Including durables, the average total spending response is reported as 50-90 percent of payments.",
-    },
-    {
-        "scenario_id": "eip_2020_style",
-        "target_name": "aggregate_total_spending_share_10d",
-        "target_family": "mpc",
-        "target_low": 0.266,
-        "target_high": 0.369,
-        "target_value": 0.33,
-        "prediction_column": "aggregate_total_spending_share",
-        "source_label": "CFPB/Pagel et al. 2020",
-        "source_url": "https://files.consumerfinance.gov/f/documents/cfpb_pagel_income-liquidity-and-the-consumption-response-to-the-2020-economic-_H7TYltp.pdf",
-        "notes": "Estimated weighted MPC is about 0.266 and immediate spending increases by roughly one third of the payment.",
-    },
-    {
-        "scenario_id": "eip_2020_style",
-        "target_name": "aggregate_debt_repayment_share",
-        "target_family": "debt_saving",
-        "target_low": 0.30,
-        "target_high": 0.40,
-        "target_value": 0.35,
-        "prediction_column": "aggregate_debt_repayment_share",
-        "source_label": "NY Fed SCE / Liberty Street Economics 2020",
-        "source_url": "https://libertystreeteconomics.newyorkfed.org/2020/10/how-have-households-used-their-stimulus-payments-and-how-would-they-spend-the-next/",
-        "notes": "The June 2020 SCE module reports 35 percent of first-round EIP funds used to pay down debt.",
-    },
-    {
-        "scenario_id": "eip_2020_style",
-        "target_name": "aggregate_liquid_saving_share",
-        "target_family": "debt_saving",
-        "target_low": 0.31,
-        "target_high": 0.41,
-        "target_value": 0.36,
-        "prediction_column": "aggregate_liquid_saving_share",
-        "source_label": "NY Fed SCE / Liberty Street Economics 2020",
-        "source_url": "https://libertystreeteconomics.newyorkfed.org/2020/10/how-have-households-used-their-stimulus-payments-and-how-would-they-spend-the-next/",
-        "notes": "The June 2020 SCE module reports 36 percent of first-round EIP funds saved.",
-    },
-    {
-        "scenario_id": "eip_2020_style",
-        "target_name": "low_liquidity_total_spending_share",
-        "target_family": "liquidity_gradient",
-        "target_low": 0.40,
-        "target_high": 0.70,
-        "target_value": 0.45,
-        "prediction_column": "low_liquidity_total_spending_share",
-        "source_label": "CFPB/Pagel et al. 2020",
-        "source_url": "https://files.consumerfinance.gov/f/documents/cfpb_pagel_income-liquidity-and-the-consumption-response-to-the-2020-economic-_H7TYltp.pdf",
-        "notes": "Users with very low balances have MPCs of 0.4 or above.",
-    },
-    {
-        "scenario_id": "eip_2020_style",
-        "target_name": "high_liquidity_total_spending_share",
-        "target_family": "liquidity_gradient",
-        "target_low": 0.05,
-        "target_high": 0.15,
-        "target_value": 0.10,
-        "prediction_column": "high_liquidity_total_spending_share",
-        "source_label": "CFPB/Pagel et al. 2020",
-        "source_url": "https://files.consumerfinance.gov/f/documents/cfpb_pagel_income-liquidity-and-the-consumption-response-to-the-2020-economic-_H7TYltp.pdf",
-        "notes": "Users with high balances have MPCs on the order of 0.1.",
-    },
-    {
-        "scenario_id": "eip_2020_style",
-        "target_name": "low_high_liquidity_spending_ratio",
-        "target_family": "liquidity_gradient",
-        "target_low": 3.0,
-        "target_high": 6.0,
-        "target_value": 4.0,
-        "prediction_column": "low_high_liquidity_spending_ratio",
-        "source_label": "CFPB/Pagel et al. 2020",
-        "source_url": "https://files.consumerfinance.gov/f/documents/cfpb_pagel_income-liquidity-and-the-consumption-response-to-the-2020-economic-_H7TYltp.pdf",
-        "notes": "Low-balance MPCs are roughly four times high-balance MPCs using 0.4+ versus about 0.1.",
-    },
-)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run direct household behavior target gate.")
     parser.add_argument("--provider", choices=["codex_cli"], default="codex_cli")
@@ -218,46 +110,73 @@ def main() -> int:
     try:
         type_cells, type_status = build_household_type_cells(work_dir=WORK_ROOT / "scf", wave=args.scf_wave)
         scenarios = scenarios_to_frame(BEHAVIOR_SCENARIOS)
-        targets = behavior_targets_frame()
+        target_catalog = behavior_target_catalog(include_unscored=True)
+        targets = behavior_targets_frame(target_scope="aggregate")
+        cell_targets = behavior_targets_frame(target_scope="cell")
         llm_client = BehaviorLLMClient(args.provider, args.model, cache_dir, mode=args.behavior_mode, max_live_calls=args.max_live_calls)
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=llm_client)
         controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
         all_actions = pd.concat([actions, controls], ignore_index=True)
         aggregates = aggregate_behavior_actions(all_actions)
         scores = score_behavior_targets(aggregates, targets)
+        cell_joined_errors = join_cell_behavior_target_errors(all_actions, cell_targets)
+        cell_scores = score_cell_behavior_targets(all_actions, cell_targets)
         scenarios.to_csv(output_dir / "behavior_scenarios.csv", index=False)
         targets.to_csv(output_dir / "behavior_targets.csv", index=False)
+        cell_targets.to_csv(output_dir / "behavior_cell_targets.csv", index=False)
+        target_catalog.to_csv(output_dir / "behavior_target_catalog.csv", index=False)
         type_cells.to_csv(output_dir / "household_type_cells.csv", index=False)
         all_actions.to_csv(output_dir / "household_behavior_actions.csv", index=False)
         aggregates.to_csv(output_dir / "behavior_aggregates.csv", index=False)
         scores.to_csv(output_dir / "behavior_target_scores.csv", index=False)
+        cell_joined_errors.to_csv(output_dir / "behavior_cell_target_joined_errors.csv", index=False)
+        cell_scores.to_csv(output_dir / "behavior_cell_target_scores.csv", index=False)
         (output_dir / "behavior_llm_raw_records.json").write_text(json.dumps(llm_client.raw_records, indent=2, sort_keys=True), encoding="utf-8")
         manifest.update(
             {
                 "status": "ok",
                 "scenario_count": len(BEHAVIOR_SCENARIOS),
                 "target_count": int(targets.shape[0]),
+                "cell_target_count": int(cell_targets.shape[0]),
+                "target_catalog_rows": int(target_catalog.shape[0]),
+                "unscored_target_gap_count": int((~target_catalog["scored"]).sum()) if "scored" in target_catalog else 0,
                 "household_type_status": type_status,
                 "household_type_count": int(type_cells.shape[0]),
                 "action_rows": int(all_actions.shape[0]),
                 "aggregate_rows": int(aggregates.shape[0]),
                 "score_rows": int(scores.shape[0]),
+                "cell_score_rows": int(cell_scores.shape[0]),
+                "cell_joined_error_rows": int(cell_joined_errors.shape[0]),
                 "live_call_count": int(llm_client.live_call_count),
                 "cache_hit_count": int(llm_client.cache_hit_count),
                 "cache_dir": str(cache_dir.relative_to(Path.cwd()) if cache_dir.is_relative_to(Path.cwd()) else cache_dir),
                 "outputs": [
                     "behavior_scenarios.csv",
                     "behavior_targets.csv",
+                    "behavior_cell_targets.csv",
+                    "behavior_target_catalog.csv",
                     "household_type_cells.csv",
                     "household_behavior_actions.csv",
                     "behavior_aggregates.csv",
                     "behavior_target_scores.csv",
+                    "behavior_cell_target_joined_errors.csv",
+                    "behavior_cell_target_scores.csv",
                     "behavior_llm_raw_records.json",
                     "behavior_gate_report.md",
                 ],
             }
         )
-        report = build_behavior_gate_report(manifest, scenarios, targets, aggregates, scores)
+        report = build_behavior_gate_report(
+            manifest,
+            scenarios,
+            targets,
+            aggregates,
+            scores,
+            target_catalog=target_catalog,
+            cell_targets=cell_targets,
+            cell_scores=cell_scores,
+            cell_joined_errors=cell_joined_errors,
+        )
         (output_dir / "behavior_gate_report.md").write_text(report, encoding="utf-8")
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         print(output_dir)
@@ -336,7 +255,7 @@ def run_behavior_controls(scenarios: Iterable[BehaviorScenario], type_cells: pd.
 
 def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
     payload = {
-        "prompt_version": BEHAVIOR_GATE_VERSION,
+        "prompt_version": BEHAVIOR_PROMPT_VERSION,
         "task": "Allocate a one-time household transfer into spending, debt repayment, and liquid saving.",
         "as_of_rule": "Use only the scenario and type-cell information below. Do not cite realized study estimates.",
         "scenario": {
@@ -380,7 +299,7 @@ def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str
 
 def fixture_behavior_payload(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> dict[str, Any]:
     return {
-        "prompt_version": BEHAVIOR_GATE_VERSION,
+        "prompt_version": BEHAVIOR_PROMPT_VERSION,
         "household_actions": [
             {
                 "type_id": str(row["type_id"]),
@@ -441,6 +360,10 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
         high = group[group["liquidity_group"] == "high"]
         low_spend = _weighted_average(low, "total_spending_share")
         high_spend = _weighted_average(high, "total_spending_share")
+        low_debt = _weighted_average(low, "debt_repayment_share")
+        high_debt = _weighted_average(high, "debt_repayment_share")
+        low_liquid_saving = _weighted_average(low, "liquid_saving_share")
+        high_liquid_saving = _weighted_average(high, "liquid_saving_share")
         rows.append(
             {
                 "scenario_id": scenario_id,
@@ -454,6 +377,12 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
                 "low_liquidity_total_spending_share": low_spend,
                 "high_liquidity_total_spending_share": high_spend,
                 "low_high_liquidity_spending_ratio": low_spend / max(high_spend, 1e-9),
+                "low_liquidity_debt_repayment_share": low_debt,
+                "high_liquidity_debt_repayment_share": high_debt,
+                "low_minus_high_debt_repayment_share": low_debt - high_debt,
+                "low_liquidity_liquid_saving_share": low_liquid_saving,
+                "high_liquidity_liquid_saving_share": high_liquid_saving,
+                "high_minus_low_liquid_saving_share": high_liquid_saving - low_liquid_saving,
             }
         )
     return pd.DataFrame(rows)
@@ -469,26 +398,112 @@ def score_behavior_targets(aggregates: pd.DataFrame, targets: pd.DataFrame) -> p
     rows: list[dict[str, Any]] = []
     for keys, group in joined.groupby(["source", "target_family"], dropna=False):
         source, target_family = keys
-        rows.append(_score_group(group, source=source, target_family=target_family))
+        rows.append(_score_group(group, source=source, target_family=target_family, target_scope="aggregate"))
     for source, group in joined.groupby("source", dropna=False):
-        rows.append(_score_group(group, source=source, target_family="ALL"))
+        rows.append(_score_group(group, source=source, target_family="ALL", target_scope="aggregate"))
     return pd.DataFrame(rows).sort_values(["target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
-def behavior_targets_frame() -> pd.DataFrame:
-    return pd.DataFrame(BEHAVIOR_TARGETS)
+def join_cell_behavior_target_errors(actions: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
+    if actions.empty or targets.empty:
+        return pd.DataFrame()
+    required = {"scenario_id", "type_id", "prediction_column", "target_low", "target_high", "target_value"}
+    missing = required - set(targets.columns)
+    if missing:
+        raise ValueError(f"Cell behavior targets missing columns: {', '.join(sorted(missing))}")
+    joined = actions.merge(targets, on=["scenario_id", "type_id"], how="inner", suffixes=("", "_target"))
+    if joined.empty:
+        return joined
+    joined["prediction"] = [float(row[row["prediction_column"]]) for _, row in joined.iterrows()]
+    joined["range_error"] = joined.apply(_range_error, axis=1)
+    joined["point_error"] = joined["prediction"] - joined["target_value"].astype(float)
+    joined["abs_range_error"] = joined["range_error"].abs()
+    joined["score_weight"] = joined["population_weight"].astype(float).clip(lower=0.0)
+    return joined.sort_values(["scenario_id", "source", "type_id", "target_id"]).reset_index(drop=True)
+
+
+def score_cell_behavior_targets(actions: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
+    joined = join_cell_behavior_target_errors(actions, targets)
+    if joined.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for keys, group in joined.groupby(["source", "target_family"], dropna=False):
+        source, target_family = keys
+        rows.append(
+            _score_group(
+                group,
+                source=source,
+                target_family=target_family,
+                target_scope="cell",
+                weight_column="score_weight",
+            )
+        )
+    for source, group in joined.groupby("source", dropna=False):
+        rows.append(
+            _score_group(
+                group,
+                source=source,
+                target_family="ALL",
+                target_scope="cell",
+                weight_column="score_weight",
+            )
+        )
+    return pd.DataFrame(rows).sort_values(["target_family", "rmse_range", "source"]).reset_index(drop=True)
+
+
+def behavior_target_catalog(*, include_unscored: bool = True) -> pd.DataFrame:
+    with resources.files(TARGET_CATALOG_PACKAGE).joinpath(TARGET_CATALOG_RESOURCE).open("r", encoding="utf-8") as handle:
+        frame = pd.read_csv(handle)
+    numeric_columns = ["target_low", "target_high", "target_value"]
+    for column in numeric_columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame["scored"] = frame["scored"].astype(str).str.lower().isin({"true", "1", "yes"})
+    if "target_scope" not in frame:
+        frame["target_scope"] = np.where(frame["scored"], "aggregate", "unscored_gap")
+    frame["target_scope"] = frame["target_scope"].fillna("").replace("", "aggregate")
+    if "type_id" not in frame:
+        frame["type_id"] = ""
+    frame["type_id"] = frame["type_id"].fillna("").astype(str)
+    if not include_unscored:
+        frame = frame[frame["scored"] & (frame["source_status"] == "verified_public")].copy()
+    return frame.reset_index(drop=True)
+
+
+def behavior_targets_frame(*, include_unscored: bool = False, target_scope: str | None = "aggregate") -> pd.DataFrame:
+    frame = behavior_target_catalog(include_unscored=include_unscored)
+    if not include_unscored:
+        frame = frame[frame["scored"] & (frame["source_status"] == "verified_public")].copy()
+    if target_scope is not None:
+        frame = frame[frame["target_scope"] == target_scope].copy()
+    return frame.reset_index(drop=True)
 
 
 def scenarios_to_frame(scenarios: Iterable[BehaviorScenario]) -> pd.DataFrame:
     return pd.DataFrame([scenario.__dict__ for scenario in scenarios])
 
 
-def build_behavior_gate_report(manifest: dict[str, Any], scenarios: pd.DataFrame, targets: pd.DataFrame, aggregates: pd.DataFrame, scores: pd.DataFrame) -> str:
+def build_behavior_gate_report(
+    manifest: dict[str, Any],
+    scenarios: pd.DataFrame,
+    targets: pd.DataFrame,
+    aggregates: pd.DataFrame,
+    scores: pd.DataFrame,
+    *,
+    target_catalog: pd.DataFrame | None = None,
+    cell_targets: pd.DataFrame | None = None,
+    cell_scores: pd.DataFrame | None = None,
+    cell_joined_errors: pd.DataFrame | None = None,
+) -> str:
+    target_catalog = target_catalog if target_catalog is not None else behavior_target_catalog(include_unscored=True)
+    cell_targets = cell_targets if cell_targets is not None else behavior_targets_frame(target_scope="cell")
+    cell_scores = cell_scores if cell_scores is not None else pd.DataFrame()
+    cell_joined_errors = cell_joined_errors if cell_joined_errors is not None else pd.DataFrame()
+    gaps = target_catalog[~target_catalog["scored"]].copy() if "scored" in target_catalog else pd.DataFrame()
     lines = [
         "# Household Behavior Target Gate",
         "",
         "## Bottom Line",
-        _behavior_bottom_line(scores),
+        _behavior_bottom_line(scores, cell_scores),
         "",
         "## Run Setup",
         f"- Provider/model: `{manifest.get('provider')}` / `{manifest.get('model')}`",
@@ -496,23 +511,90 @@ def build_behavior_gate_report(manifest: dict[str, Any], scenarios: pd.DataFrame
         f"- Live calls used: `{manifest.get('live_call_count')}` of cap `{manifest.get('max_live_calls')}`",
         f"- Cache hits: `{manifest.get('cache_hit_count')}`",
         f"- Scenario count: `{manifest.get('scenario_count')}`",
-        f"- Target count: `{manifest.get('target_count')}`",
+        f"- Aggregate target count: `{manifest.get('target_count')}`",
+        f"- Cell-level target count: `{manifest.get('cell_target_count')}`",
+        f"- Unscored target gaps: `{manifest.get('unscored_target_gap_count', 0)}`",
         f"- SCF type source: `{manifest.get('household_type_status', {}).get('status', 'unknown')}`",
         "",
-        "## Scoreboard",
+        "## Aggregate Scoreboard",
         markdown_table(scores.sort_values(["target_family", "rmse_range", "source"])),
+        "",
+        "## Cell-Level Scoreboard",
+        markdown_table(cell_scores.sort_values(["target_family", "rmse_range", "source"]) if not cell_scores.empty else cell_scores),
+        "",
+        "## Cell-Level Joined Errors",
+        markdown_table(
+            cell_joined_errors[
+                [
+                    "scenario_id",
+                    "source",
+                    "type_id",
+                    "target_name",
+                    "target_family",
+                    "prediction",
+                    "target_low",
+                    "target_high",
+                    "range_error",
+                    "score_weight",
+                ]
+            ].sort_values(["scenario_id", "source", "type_id"]).head(48)
+            if not cell_joined_errors.empty
+            else cell_joined_errors
+        ),
         "",
         "## Aggregates",
         markdown_table(aggregates.sort_values(["scenario_id", "source"]).head(32)),
         "",
-        "## Targets",
-        markdown_table(targets[["scenario_id", "target_name", "target_low", "target_high", "target_value", "prediction_column", "source_label"]]),
+        "## Aggregate Targets",
+        markdown_table(
+            targets[
+                [
+                    "scenario_id",
+                    "target_name",
+                    "target_family",
+                    "household_bucket",
+                    "window",
+                    "target_low",
+                    "target_high",
+                    "target_value",
+                    "prediction_column",
+                    "source_label",
+                ]
+            ]
+        ),
+        "",
+        "## Cell-Level Targets",
+        markdown_table(
+            cell_targets[
+                [
+                    "scenario_id",
+                    "type_id",
+                    "target_name",
+                    "target_family",
+                    "household_bucket",
+                    "window",
+                    "target_low",
+                    "target_high",
+                    "target_value",
+                    "prediction_column",
+                    "source_label",
+                ]
+            ]
+            if not cell_targets.empty
+            else cell_targets
+        ),
+        "",
+        "## Unscored Direct-Target Gaps",
+        markdown_table(gaps[["scenario_id", "target_name", "target_family", "response_variable", "household_bucket", "notes"]] if not gaps.empty else gaps),
         "",
         "## What This Gate Means",
         (
             "This gate scores household behavior directly against public stimulus-response moments. "
-            "It is still historical and contamination-confounded, but it tests the agent layer on spending, saving, "
-            "debt repayment, and liquidity gradients rather than only on macro forecasts or survey beliefs."
+            "The aggregate surface covers spending, debt repayment, saving, and directional debt/saving gradients "
+            "by liquidity. The cell-level surface applies public low- and high-liquidity response ranges to matching "
+            "SCF household types, weighted by population share, so the bridge asks whether typed agents beat a "
+            "liquidity baseline at the household-cell grain. "
+            "Rows in the unscored gap table are intentionally held out until a public direct target is verified."
         ),
         "",
         "## Manifest",
@@ -625,30 +707,59 @@ def _range_error(row: pd.Series) -> float:
     return low - prediction if prediction < low else prediction - high
 
 
-def _score_group(group: pd.DataFrame, *, source: str, target_family: str) -> dict[str, Any]:
+def _score_group(
+    group: pd.DataFrame,
+    *,
+    source: str,
+    target_family: str,
+    target_scope: str,
+    weight_column: str | None = None,
+) -> dict[str, Any]:
     range_error = group["range_error"].astype(float)
     point_error = group["point_error"].astype(float)
+    if weight_column and weight_column in group:
+        weights = group[weight_column].astype(float).clip(lower=0.0)
+        if float(weights.sum()) <= 0.0:
+            weights = pd.Series(np.ones(len(group)), index=group.index, dtype=float)
+    else:
+        weights = pd.Series(np.ones(len(group)), index=group.index, dtype=float)
+    weight_sum = float(weights.sum())
     return {
         "source": source,
         "target_family": target_family,
+        "target_scope": target_scope,
         "n": int(group.shape[0]),
-        "rmse_range": float(np.sqrt(np.mean(np.square(range_error)))),
-        "mae_range": float(np.mean(np.abs(range_error))),
-        "rmse_point": float(np.sqrt(np.mean(np.square(point_error)))),
-        "mae_point": float(np.mean(np.abs(point_error))),
-        "mean_prediction": float(group["prediction"].mean()),
-        "mean_target": float(group["target_value"].mean()),
+        "effective_weight": weight_sum,
+        "rmse_range": float(np.sqrt((weights * np.square(range_error)).sum() / weight_sum)),
+        "mae_range": float((weights * np.abs(range_error)).sum() / weight_sum),
+        "rmse_point": float(np.sqrt((weights * np.square(point_error)).sum() / weight_sum)),
+        "mae_point": float((weights * np.abs(point_error)).sum() / weight_sum),
+        "mean_prediction": float((weights * group["prediction"].astype(float)).sum() / weight_sum),
+        "mean_target": float((weights * group["target_value"].astype(float)).sum() / weight_sum),
     }
 
 
-def _behavior_bottom_line(scores: pd.DataFrame) -> str:
+def _behavior_bottom_line(scores: pd.DataFrame, cell_scores: pd.DataFrame | None = None) -> str:
     if scores.empty:
         return "Behavior target scoring produced no rows."
     overall = scores[scores["target_family"] == "ALL"].sort_values("rmse_range")
     if overall.empty:
         return "Behavior target scoring produced no overall row."
     best = overall.iloc[0]
-    return f"Best overall source is `{best['source']}` with range RMSE `{float(best['rmse_range']):.4f}` across `{int(best['n'])}` behavior targets."
+    cell_line = ""
+    if cell_scores is not None and not cell_scores.empty:
+        cell_overall = cell_scores[cell_scores["target_family"] == "ALL"].sort_values("rmse_range")
+        if not cell_overall.empty:
+            cell_best = cell_overall.iloc[0]
+            cell_line = (
+                f" Cell-level best source is `{cell_best['source']}` with population-weighted range RMSE "
+                f"`{float(cell_best['rmse_range']):.4f}` across `{int(cell_best['n'])}` cell targets."
+            )
+    return (
+        f"Aggregate best source is `{best['source']}` with range RMSE `{float(best['rmse_range']):.4f}` "
+        f"across `{int(best['n'])}` behavior targets."
+        f"{cell_line}"
+    )
 
 
 if __name__ == "__main__":
