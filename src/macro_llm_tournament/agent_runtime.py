@@ -62,9 +62,10 @@ def run_agent_economy(
     feasible_rows: list[dict[str, Any]] = []
     aggregate_rows: list[dict[str, Any]] = []
     diagnostic_rows: list[dict[str, Any]] = []
+    state_history_rows: list[dict[str, Any]] = []
 
     origins = sorted({(card.origin_index, card.origin) for card in ordered_cards})
-    for origin_index, _origin in origins:
+    for origin_index, origin in origins:
         origin_cards = [card for card in ordered_cards if card.origin_index == origin_index]
         origin_state_updates: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for card in origin_cards:
@@ -122,13 +123,30 @@ def run_agent_economy(
                 for row in feasible:
                     origin_state_updates[(str(source), str(row["type_id"]))].append(row)
         for key, rows in origin_state_updates.items():
-            state_by_key[key] = _next_state_from_origin_rows(rows)
+            updated_state = _next_state_from_origin_rows(rows)
+            state_by_key[key] = updated_state
+            state_history_rows.append(
+                {
+                    **updated_state,
+                    "origin_index": int(origin_index),
+                    "origin": str(origin),
+                    "state_stage": "post_origin",
+                }
+            )
 
     desired_frame = pd.DataFrame(desired_rows)
     feasible_frame = pd.DataFrame(feasible_rows)
     aggregate_frame = pd.DataFrame(aggregate_rows)
     diagnostics = pd.DataFrame(diagnostic_rows)
     agent_scores = _score_agent_aggregates(aggregate_frame)
+    state_final_rows = (
+        pd.DataFrame(state_by_key.values())
+        .sort_values(["belief_source", "type_id"])
+        .reset_index(drop=True)
+        .to_dict(orient="records")
+    )
+    desired_frame.attrs["state_history_records"] = state_history_rows
+    desired_frame.attrs["state_final_records"] = state_final_rows
     return state_initial, desired_frame, feasible_frame, aggregate_frame, diagnostics, agent_scores
 
 
@@ -385,13 +403,19 @@ def _reconcile_event(card: ForecastCard, source: str, desired_rows: list[dict[st
         debt_before = float(row["prior_debt"])
         income = float(row["period_income"])
         borrowing = min(float(row["desired_borrowing"]) * credit_rationing_ratio, float(row["credit_limit_proxy"]))
-        repayment_capacity = max(0.0, liquid_before + income - 0.35 * float(row["baseline_consumption"]))
-        debt_repayment = min(float(row["desired_debt_repayment"]), debt_before, repayment_capacity)
         desired_portfolio = float(row["desired_portfolio_to_liquid"])
         portfolio_to_liquid = min(max(desired_portfolio, 0.0), illiquid_before)
-        portfolio_to_illiquid = min(max(-desired_portfolio, 0.0), liquid_before + income + borrowing)
+        cash_sources = liquid_before + income + borrowing + portfolio_to_liquid
+        repayment_capacity = max(0.0, cash_sources - 0.35 * float(row["baseline_consumption"]))
+        debt_repayment = min(float(row["desired_debt_repayment"]), debt_before, repayment_capacity)
+        cash_after_repayment = liquid_before + income + borrowing + portfolio_to_liquid - debt_repayment
+        sale_adjustment_cost = ADJUSTMENT_COST_RATE * portfolio_to_liquid
+        max_portfolio_to_illiquid = max(0.0, (cash_after_repayment - sale_adjustment_cost) / (1.0 + ADJUSTMENT_COST_RATE))
+        portfolio_to_illiquid = min(max(-desired_portfolio, 0.0), max_portfolio_to_illiquid)
         adjustment_cost = ADJUSTMENT_COST_RATE * (portfolio_to_liquid + portfolio_to_illiquid)
         available_cash = liquid_before + income + borrowing + portfolio_to_liquid - debt_repayment - portfolio_to_illiquid - adjustment_cost
+        if -ACCOUNTING_TOLERANCE <= available_cash < 0.0:
+            available_cash = 0.0
         reserve_target = max(0.0, float(row["desired_liquid_buffer_change"]))
         consumption = min(float(row["desired_consumption"]), max(0.0, available_cash - reserve_target))
         liquid_after = available_cash - consumption
@@ -411,6 +435,12 @@ def _reconcile_event(card: ForecastCard, source: str, desired_rows: list[dict[st
         networth_before = liquid_before + illiquid_before - debt_before
         networth_after = liquid_after + illiquid_after - debt_after
         networth_residual = networth_after - (networth_before + income - consumption - adjustment_cost)
+        balance_sheet_floor_ok = (
+            liquid_after >= -ACCOUNTING_TOLERANCE
+            and illiquid_after >= -ACCOUNTING_TOLERANCE
+            and debt_after >= -ACCOUNTING_TOLERANCE
+        )
+        identity_ok = abs(cash_residual) <= ACCOUNTING_TOLERANCE and abs(networth_residual) <= ACCOUNTING_TOLERANCE
         out.update(
             {
                 "bank_credit_supply_aggregate": credit_supply,
@@ -428,7 +458,8 @@ def _reconcile_event(card: ForecastCard, source: str, desired_rows: list[dict[st
                 "debt_after": max(0.0, debt_after),
                 "cash_accounting_residual": cash_residual,
                 "networth_accounting_residual": networth_residual,
-                "passes_accounting": abs(cash_residual) <= ACCOUNTING_TOLERANCE and abs(networth_residual) <= ACCOUNTING_TOLERANCE,
+                "passes_balance_sheet_floors": balance_sheet_floor_ok,
+                "passes_accounting": identity_ok and balance_sheet_floor_ok,
             }
         )
         feasible.append(out)
@@ -530,6 +561,9 @@ def _diagnose_event(card: ForecastCard, source: str, feasible_rows: list[dict[st
         "household_rows": len(feasible_rows),
         "max_abs_cash_residual": max((abs(float(row["cash_accounting_residual"])) for row in feasible_rows), default=0.0),
         "max_abs_networth_residual": max((abs(float(row["networth_accounting_residual"])) for row in feasible_rows), default=0.0),
+        "min_liquid_assets_after": min((float(row["liquid_assets_after"]) for row in feasible_rows), default=0.0),
+        "min_illiquid_assets_after": min((float(row["illiquid_assets_after"]) for row in feasible_rows), default=0.0),
+        "min_debt_after": min((float(row["debt_after"]) for row in feasible_rows), default=0.0),
         "credit_market_gap": desired_borrowing - feasible_borrowing,
         "credit_rationing_ratio": aggregate.get("credit_rationing_ratio", np.nan),
         "passes_accounting": all(bool(row["passes_accounting"]) for row in feasible_rows),

@@ -107,6 +107,9 @@ def build_agent_economy_report(
                     "household_rows",
                     "max_abs_cash_residual",
                     "max_abs_networth_residual",
+                    "min_liquid_assets_after",
+                    "min_illiquid_assets_after",
+                    "min_debt_after",
                     "credit_market_gap",
                     "passes_accounting",
                 ]
