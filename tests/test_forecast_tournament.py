@@ -1062,6 +1062,8 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn("survey-style anchors", prompt_text)
         self.assertIn("Do not collapse household cells", prompt_text)
         self.assertIn("5 means normal precaution", prompt_text)
+        self.assertIn("recently absorbed liquid buffer improvement", prompt_text)
+        self.assertIn("elevated macro-feedback regime", prompt_text)
 
         with TemporaryDirectory() as temp_dir:
             client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)

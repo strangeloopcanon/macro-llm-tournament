@@ -19,7 +19,7 @@ from .llm_common import LLMUnavailable
 
 
 DEMAND_ECONOMY_VERSION = "hank_lite_belief_demand_economy_v2"
-DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v1"
+DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v2"
 NAIVE_PERSONA_PROMPT_VERSION = "hank_lite_naive_persona_direct_consumption_v1"
 BELIEF_MODES = ("fixture", "replay", "live")
 FEEDBACK_MODES = ("closed_loop", "none")
@@ -667,9 +667,11 @@ def belief_module_prompt_payload(
             "In a no-shock period near steady state, beliefs should usually remain close to the cell's survey-style priors.",
             "Under normal dispersion and feedback conditions, damp one-period noise rather than extrapolating it into a persistent boom or slump.",
             "Under elevated dispersion or elevated macro-feedback conditions, preserve wider cross-cell belief differences and let fragile cells react more strongly.",
+            "In an elevated macro-feedback regime, persistently weak output, lower employment, falling confidence, or rising job-risk beliefs should reinforce cautious beliefs; do not mean-revert fragile cells until the supplied current_environment improves.",
+            "A current or recently absorbed liquid buffer improvement is balance-sheet information, not bad news. For low-liquidity cells, higher liquid_buffer_months after a cash-flow gain should usually reduce near-term precaution or sustain confidence for several periods unless job-risk or employment signals deteriorate.",
             "Treat precautionary_saving_score as a within-cell deviation index: 5 means normal precaution for that cell at its supplied prior state.",
             "Do not assign very low precaution merely because a cell has high liquid assets; only move below 5 when current abstract conditions improve versus that cell's own prior state.",
-            "When output is only mildly above steady state and policy is responding, expected income growth should mean-revert toward the supplied prior rather than drift upward.",
+            "When output is only mildly above steady state and policy is responding, expected income growth should mean-revert toward the supplied prior rather than drift upward; do not convert temporary policy response after a cash transfer into a job-security scare by itself.",
             "Low-liquidity, high-job-risk, and low-income cells can rationally carry higher job-risk beliefs and precaution than high-buffer cells.",
         ],
         "contamination_control": "No calendar dates, named historical episodes, target realized paths, or external data are supplied.",
