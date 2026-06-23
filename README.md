@@ -18,7 +18,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against a packaged public stimulus-response target catalog for aggregate MPC, liquidity gradients, debt repayment, liquid saving, directional debt/saving gradients by liquidity, and cell-level MPC-by-liquidity targets; unverified direct-target gaps stay unscored.
 - `src/macro_llm_tournament/persona_belief_panel.py` runs data-grounded persona belief panels and scores cross-sectional gradients, within-group spread, distribution distance, and common-core correlation.
 - `src/macro_llm_tournament/persona_ecology.py` runs respondent-seeded belief ecologies with profile, prior-expectation, external-information, behavior, and aggregate-feedback modules.
-- `src/macro_llm_tournament/demand_economy.py` runs the abstract behavior-based demand economy: households choose consume-vs-save parameters, aggregate demand feeds output, employment, income, sticky inflation, and policy, then that state feeds the next period.
+- `src/macro_llm_tournament/demand_economy.py` runs the abstract HANK-lite demand economy: household belief modules form inflation, income, job-risk, confidence, and precautionary-saving beliefs; deterministic structural code converts those beliefs into budget-constrained consumption, aggregate demand, output, employment, sticky inflation, and policy feedback.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
 
 ## Quick start
@@ -356,17 +356,22 @@ Run the abstract, date-free behavior demand economy:
 
 ```bash
 PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
-  --decision-mode fixture \
+  --belief-mode fixture \
   --max-live-calls 0 \
   --models gpt-5.5 \
   --household-source fixture \
-  --household-count 6 \
-  --period-count 8 \
+  --household-count 24 \
+  --period-count 100 \
+  --variants representative,adaptive,llm_belief,naive_persona \
   --feedback-mode closed_loop \
   --output-dir outputs/demand_economy_fixture
 ```
 
-This is the first behavior-based macro gate. The economy has one good, no capital, survey-style household types choosing consume-vs-save behavior each period, aggregate demand feeding output, employment, income, sticky inflation, and a Taylor-rule policy rate, and that macro state feeding the next household decision. Validation is dynamic: transfer-shock MPC, liquidity-gradient MPC, monetary-shock consumption response, no-shock belief-feedback amplification, and accounting identities every period. The fixture mode spends zero model calls and proves the harness; live mode reuses the same strict household-decision payload for LLM actors.
+This is the first behavior-based macro gate. The economy has one good, no capital, a liquid safe-asset buffer, survey-style household cells, aggregate demand feeding output, employment, income, sticky inflation, and a Taylor-rule policy rate. The LLM-facing variant is deliberately a belief module: it predicts beliefs only. The code owns budgets, consumption, saving, aggregation, feedback, and accounting.
+
+The fixture run spends zero model calls and validates the lab before live canaries. It emits four variants: a representative-agent baseline, an adaptive heterogeneous baseline, the main belief-module architecture, and a naive direct consume-vs-save persona baseline. The required gate is the main belief architecture plus accounting and stability coverage across the baselines. Optional ablation misses remain in the report because they are evidence: the representative agent should lack HANK-style heterogeneity, and the naive persona baseline should fail some transfer-gradient checks.
+
+Validation is dynamic rather than a single-path fit: baseline steady state, transfer-shock aggregate MPC, MPC gradients by liquidity and income, monetary-shock consumption/output/employment/inflation responses, precautionary response to job-risk news before income moves, belief-feedback amplification, belief dispersion, and per-period accounting identities.
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 

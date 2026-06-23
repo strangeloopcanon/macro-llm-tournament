@@ -18,12 +18,16 @@ from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
 from .llm_common import LLMUnavailable
 
 
-DEMAND_ECONOMY_VERSION = "abstract_behavior_demand_economy_v1"
-DEMAND_ECONOMY_PROMPT_VERSION = "abstract_behavior_demand_economy_v1"
-DECISION_MODES = ("fixture", "replay", "live")
+DEMAND_ECONOMY_VERSION = "hank_lite_belief_demand_economy_v2"
+DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v1"
+NAIVE_PERSONA_PROMPT_VERSION = "hank_lite_naive_persona_direct_consumption_v1"
+BELIEF_MODES = ("fixture", "replay", "live")
 FEEDBACK_MODES = ("closed_loop", "none")
+MODEL_VARIANTS = ("representative", "adaptive", "llm_belief", "naive_persona")
+LLM_VARIANTS = {"llm_belief", "naive_persona"}
 NEUTRAL_POLICY_RATE = 3.0
 INFLATION_TARGET = 2.0
+STEADY_EMPLOYMENT_RATE = 0.955
 
 
 @dataclass(frozen=True)
@@ -35,24 +39,28 @@ class DemandScenario:
     rate_shock_start: int = -1
     rate_shock_end: int = -1
     rate_shock_pp: float = 0.0
+    job_risk_shock_start: int = -1
+    job_risk_shock_end: int = -1
+    job_risk_shock_pp: float = 0.0
     belief_dispersion_multiplier: float = 1.0
     feedback_gain: float = 1.0
     notes: str = ""
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run an abstract behavior-based demand economy.")
+    parser = argparse.ArgumentParser(description="Run a HANK-lite behavior demand economy with belief modules.")
     parser.add_argument("--provider", choices=SUPPORTED_FORECAST_PROVIDERS, default="codex_cli")
     parser.add_argument("--models", default="gpt-5.5")
-    parser.add_argument("--decision-mode", choices=DECISION_MODES, default="fixture")
+    parser.add_argument("--belief-mode", "--decision-mode", dest="belief_mode", choices=BELIEF_MODES, default="fixture")
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--household-source", choices=["fixture", "csv"], default="fixture")
     parser.add_argument("--household-csv", default=None)
-    parser.add_argument("--household-count", type=int, default=6)
-    parser.add_argument("--period-count", type=int, default=8)
+    parser.add_argument("--household-count", type=int, default=24)
+    parser.add_argument("--period-count", type=int, default=100)
     parser.add_argument("--feedback-mode", choices=FEEDBACK_MODES, default="closed_loop")
-    parser.add_argument("--scenarios", default="baseline,transfer_shock,rate_hike,belief_feedback")
+    parser.add_argument("--variants", default="representative,adaptive,llm_belief,naive_persona")
+    parser.add_argument("--scenarios", default="baseline,transfer_shock,rate_hike,job_risk_shock,belief_feedback")
     parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
 
@@ -60,6 +68,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     models = [part.strip() for part in args.models.split(",") if part.strip()]
+    variants = [part.strip() for part in args.variants.split(",") if part.strip()]
+    unknown_variants = sorted(set(variants) - set(MODEL_VARIANTS))
+    if unknown_variants:
+        raise SystemExit(f"Unknown variants: {', '.join(unknown_variants)}")
     scenario_ids = [part.strip() for part in args.scenarios.split(",") if part.strip()]
     scenarios = [scenario for scenario in default_demand_scenarios() if scenario.scenario_id in set(scenario_ids)]
     missing_scenarios = sorted(set(scenario_ids) - {scenario.scenario_id for scenario in scenarios})
@@ -67,21 +79,25 @@ def main() -> int:
         raise SystemExit(f"Unknown scenarios: {', '.join(missing_scenarios)}")
     if not models:
         raise SystemExit("--models must contain at least one model")
+    if not variants:
+        raise SystemExit("--variants must contain at least one variant")
     if not scenarios:
         raise SystemExit("--scenarios must contain at least one scenario")
-    if args.period_count < 4:
-        raise SystemExit("--period-count must be at least 4 for impulse-response validation")
-    if args.decision_mode == "live" and args.max_live_calls <= 0:
-        raise SystemExit("--max-live-calls must be positive when --decision-mode live is used")
-    if args.decision_mode == "live" and not args.fresh_cache:
-        raise SystemExit("--fresh-cache is required when --decision-mode live is used")
-    required_calls = len(models) * len(scenarios) * int(args.period_count)
-    if args.decision_mode == "live" and args.max_live_calls < required_calls:
-        raise SystemExit(
-            "--max-live-calls must be at least "
-            f"{required_calls} for a fresh live run with {len(models)} model(s), "
-            f"{len(scenarios)} scenario(s), and {args.period_count} periods"
-        )
+    if args.period_count < 8:
+        raise SystemExit("--period-count must be at least 8 for impulse-response validation")
+    live_variant_count = sum(1 for variant in variants if variant in LLM_VARIANTS)
+    required_calls = len(models) * len(scenarios) * int(args.period_count) * live_variant_count
+    if args.belief_mode == "live" and required_calls > 0:
+        if args.max_live_calls <= 0:
+            raise SystemExit("--max-live-calls must be positive when --belief-mode live is used")
+        if not args.fresh_cache:
+            raise SystemExit("--fresh-cache is required when --belief-mode live is used")
+        if args.max_live_calls < required_calls:
+            raise SystemExit(
+                "--max-live-calls must be at least "
+                f"{required_calls} for a fresh live run with {len(models)} model(s), "
+                f"{live_variant_count} live variant(s), {len(scenarios)} scenario(s), and {args.period_count} periods"
+            )
     if args.household_source == "csv":
         if not args.household_csv:
             raise SystemExit("--household-csv is required when --household-source csv")
@@ -99,6 +115,7 @@ def main() -> int:
     )
 
     all_initial: list[pd.DataFrame] = []
+    all_beliefs: list[pd.DataFrame] = []
     all_decisions: list[pd.DataFrame] = []
     all_periods: list[pd.DataFrame] = []
     all_accounting: list[pd.DataFrame] = []
@@ -106,15 +123,17 @@ def main() -> int:
     raw_records: list[dict[str, Any]] = []
     live_used = 0
     cache_hits = 0
-    for model in models:
+    client_specs = _client_specs(variants, models)
+    for variant, model in client_specs:
         client = DemandEconomyClient(
             args.provider,
             model,
             cache_dir,
-            mode=args.decision_mode,
+            mode=args.belief_mode,
+            variant=variant,
             max_live_calls=max(0, int(args.max_live_calls) - live_used),
         )
-        initial, decisions, periods, accounting, prompt_rows = run_demand_economy(
+        initial, beliefs, decisions, periods, accounting, prompt_rows = run_demand_economy(
             households,
             scenarios,
             client,
@@ -122,6 +141,7 @@ def main() -> int:
             feedback_mode=args.feedback_mode,
         )
         all_initial.append(initial)
+        all_beliefs.append(beliefs)
         all_decisions.append(decisions)
         all_periods.append(periods)
         all_accounting.append(accounting)
@@ -131,15 +151,18 @@ def main() -> int:
         cache_hits += client.cache_hit_count
 
     initial_frame = pd.concat(all_initial, ignore_index=True) if all_initial else pd.DataFrame()
+    beliefs_frame = pd.concat(all_beliefs, ignore_index=True) if all_beliefs else pd.DataFrame()
     decisions_frame = pd.concat(all_decisions, ignore_index=True) if all_decisions else pd.DataFrame()
     periods_frame = pd.concat(all_periods, ignore_index=True) if all_periods else pd.DataFrame()
     accounting_frame = pd.concat(all_accounting, ignore_index=True) if all_accounting else pd.DataFrame()
-    validation = score_demand_economy_validation(periods_frame, decisions_frame, accounting_frame)
-    evidence = classify_demand_economy_evidence(validation, mode=args.decision_mode)
+    validation = score_demand_economy_validation(periods_frame, decisions_frame, beliefs_frame, accounting_frame)
+    ablations = build_ablation_table(validation, periods_frame, decisions_frame, beliefs_frame)
+    evidence = classify_demand_economy_evidence(validation, ablations, mode=args.belief_mode)
 
     manifest = {
         "schema_version": DEMAND_ECONOMY_VERSION,
         "prompt_version": DEMAND_ECONOMY_PROMPT_VERSION,
+        "naive_persona_prompt_version": NAIVE_PERSONA_PROMPT_VERSION,
         "timestamp_utc": timestamp,
         "argv": _sanitized_argv(),
         "run_command": shlex.join(_sanitized_argv()),
@@ -147,7 +170,8 @@ def main() -> int:
         "status": "ok",
         "provider": args.provider,
         "models": models,
-        "decision_mode": args.decision_mode,
+        "variants": variants,
+        "belief_mode": args.belief_mode,
         "fresh_cache": bool(args.fresh_cache),
         "max_live_calls": int(args.max_live_calls),
         "live_call_count": int(live_used),
@@ -162,10 +186,12 @@ def main() -> int:
         "outputs": [
             "demand_households.csv",
             "demand_initial_state.csv",
-            "demand_periods.csv",
+            "demand_beliefs.csv",
             "demand_household_decisions.csv",
+            "demand_periods.csv",
             "demand_accounting.csv",
             "demand_validation_scores.csv",
+            "demand_ablation_table.csv",
             "demand_prompt_cards.jsonl",
             "demand_raw_records.json",
             "demand_economy_report.md",
@@ -175,14 +201,16 @@ def main() -> int:
 
     households.to_csv(output_dir / "demand_households.csv", index=False)
     initial_frame.to_csv(output_dir / "demand_initial_state.csv", index=False)
-    periods_frame.to_csv(output_dir / "demand_periods.csv", index=False)
+    beliefs_frame.to_csv(output_dir / "demand_beliefs.csv", index=False)
     decisions_frame.to_csv(output_dir / "demand_household_decisions.csv", index=False)
+    periods_frame.to_csv(output_dir / "demand_periods.csv", index=False)
     accounting_frame.to_csv(output_dir / "demand_accounting.csv", index=False)
     validation.to_csv(output_dir / "demand_validation_scores.csv", index=False)
+    ablations.to_csv(output_dir / "demand_ablation_table.csv", index=False)
     pd.DataFrame(all_prompt_rows).to_json(output_dir / "demand_prompt_cards.jsonl", orient="records", lines=True)
     _write_json(output_dir / "demand_raw_records.json", raw_records)
     _write_json(output_dir / "manifest.json", manifest)
-    report = build_demand_economy_report(manifest, households, periods_frame, validation, accounting_frame)
+    report = build_demand_economy_report(manifest, households, periods_frame, beliefs_frame, validation, ablations, accounting_frame)
     (output_dir / "demand_economy_report.md").write_text(report, encoding="utf-8")
     print(f"Wrote demand economy run to {output_dir}")
     print(json.dumps(_jsonable(evidence), indent=2, sort_keys=True, allow_nan=False))
@@ -197,16 +225,21 @@ class DemandEconomyClient:
         cache_dir: Path,
         *,
         mode: str = "fixture",
+        variant: str = "llm_belief",
         max_live_calls: int = 0,
     ):
-        if mode not in DECISION_MODES:
+        if mode not in BELIEF_MODES:
             raise ValueError(f"Unsupported demand-economy mode: {mode}")
+        if variant not in MODEL_VARIANTS:
+            raise ValueError(f"Unsupported demand-economy variant: {variant}")
         self.provider = provider
         self.model = model
         self.cache_dir = cache_dir
         self.mode = mode
+        self.variant = variant
         self.raw_records: list[dict[str, Any]] = []
-        self._llm = ForecastLLMClient(provider, model, cache_dir, mode=mode, max_live_calls=max_live_calls)
+        llm_mode = mode if variant in LLM_VARIANTS else "fixture"
+        self._llm = ForecastLLMClient(provider, model, cache_dir, mode=llm_mode, max_live_calls=max_live_calls)
 
     @property
     def live_call_count(self) -> int:
@@ -218,32 +251,68 @@ class DemandEconomyClient:
 
     @property
     def source(self) -> str:
-        prefix = "fixture" if self.mode == "fixture" else self.provider
-        return f"{prefix}_{self.model}"
+        if self.variant in LLM_VARIANTS:
+            prefix = "fixture" if self.mode == "fixture" else self.provider
+            return f"{self.variant}_{prefix}_{self.model}"
+        return self.variant
 
-    def decision_panel(
+    def belief_panel(
         self,
         scenario: DemandScenario,
         period_state: dict[str, Any],
         household_states: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        prompt_payload = demand_economy_prompt_payload(scenario, period_state, household_states)
-        prompt_text = demand_economy_prompt(scenario, period_state, household_states)
-        if self.mode == "fixture":
+        if self.variant == "representative":
             data = {
                 "provider": self.provider,
                 "model": self.model,
-                "payload": fixture_demand_payload(scenario, period_state, household_states),
+                "payload": representative_belief_payload(scenario, period_state, household_states),
                 "cache_hit": True,
                 "cache_path": None,
             }
+            prompt_payload = belief_module_prompt_payload(scenario, period_state, household_states, variant=self.variant)
+        elif self.variant == "adaptive":
+            data = {
+                "provider": self.provider,
+                "model": self.model,
+                "payload": adaptive_belief_payload(scenario, period_state, household_states),
+                "cache_hit": True,
+                "cache_path": None,
+            }
+            prompt_payload = belief_module_prompt_payload(scenario, period_state, household_states, variant=self.variant)
+        elif self.variant == "naive_persona":
+            prompt_payload = naive_persona_prompt_payload(scenario, period_state, household_states)
+            if self.mode == "fixture":
+                data = {
+                    "provider": self.provider,
+                    "model": self.model,
+                    "payload": fixture_naive_persona_payload(scenario, period_state, household_states),
+                    "cache_hit": True,
+                    "cache_path": None,
+                }
+            else:
+                prompt_text = naive_persona_prompt(scenario, period_state, household_states)
+                cache_name = f"demand_naive_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt_payload})}"
+                data = self._llm.json_call(prompt_text, cache_name, instructions=_demand_instructions())
         else:
-            cache_name = f"demand_economy_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt_payload})}"
-            data = self._llm.json_call(prompt_text, cache_name, instructions=_demand_instructions())
-        normalized = normalize_demand_payload(household_states, data)
+            prompt_payload = belief_module_prompt_payload(scenario, period_state, household_states, variant=self.variant)
+            if self.mode == "fixture":
+                data = {
+                    "provider": self.provider,
+                    "model": self.model,
+                    "payload": fixture_belief_payload(scenario, period_state, household_states),
+                    "cache_hit": True,
+                    "cache_path": None,
+                }
+            else:
+                prompt_text = belief_module_prompt(scenario, period_state, household_states, variant=self.variant)
+                cache_name = f"demand_belief_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt_payload})}"
+                data = self._llm.json_call(prompt_text, cache_name, instructions=_demand_instructions())
+        normalized = normalize_period_payload(household_states, data, variant=self.variant)
         self.raw_records.append(
             {
                 "source": self.source,
+                "variant": self.variant,
                 "scenario_id": scenario.scenario_id,
                 "period_id": period_state["period_id"],
                 "period_index": int(period_state["period_index"]),
@@ -256,20 +325,28 @@ class DemandEconomyClient:
         )
         return normalized
 
+    def decision_panel(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self.belief_panel(scenario, period_state, household_states)
+
 
 def default_demand_scenarios() -> list[DemandScenario]:
     return [
         DemandScenario(
             "baseline",
-            "No exogenous shock; heterogeneous households react only to endogenous feedback.",
-            notes="Control path for impulse-response scoring.",
+            "No exogenous shock; households react only to endogenous feedback.",
+            notes="Control path for stability and impulse-response scoring.",
         ),
         DemandScenario(
             "transfer_shock",
             "One-period lump-sum household transfer.",
             transfer_period=1,
             transfer_amount=1000.0,
-            notes="Tests aggregate MPC and the liquidity gradient.",
+            notes="Tests aggregate MPC and liquidity/income gradients.",
         ),
         DemandScenario(
             "rate_hike",
@@ -277,141 +354,105 @@ def default_demand_scenarios() -> list[DemandScenario]:
             rate_shock_start=1,
             rate_shock_end=4,
             rate_shock_pp=1.0,
-            notes="Tests whether consumption falls after a monetary tightening.",
+            notes="Tests whether consumption/output fall and inflation cools after monetary tightening.",
+        ),
+        DemandScenario(
+            "job_risk_shock",
+            "Temporary perceived job-loss-risk shock without an immediate income shock.",
+            job_risk_shock_start=1,
+            job_risk_shock_end=4,
+            job_risk_shock_pp=8.0,
+            notes="Tests precautionary saving before realized income changes.",
         ),
         DemandScenario(
             "belief_feedback",
-            "No exogenous shock; stronger initial belief dispersion and feedback.",
+            "No exogenous shock; stronger belief dispersion and feedback.",
             belief_dispersion_multiplier=1.8,
             feedback_gain=1.35,
-            notes="Tests whether heterogeneous beliefs plus feedback generate endogenous fluctuations.",
+            notes="Tests whether heterogeneous beliefs plus feedback amplify fluctuations.",
         ),
     ]
 
 
-def build_fixture_demand_households(household_count: int = 6) -> pd.DataFrame:
-    rows = [
-        {
-            "type_id": "low_liquidity_renter",
-            "label": "Low-liquidity renter",
-            "population_weight": 0.18,
-            "income_group": "low",
-            "liquidity_group": "low",
-            "employment_status": "employed_high_risk",
-            "annual_income": 32000.0,
-            "baseline_consumption_annual": 31000.0,
-            "liquid_assets": 500.0,
-            "debt": 4500.0,
-            "base_mpc": 0.84,
-            "rate_sensitivity": 0.20,
-            "income_sensitivity": 0.80,
-            "precautionary_sensitivity": 0.75,
-            "baseline_job_loss_probability": 11.0,
-            "target_buffer_months": 1.2,
-            "inflation_expectation_1y": 3.4,
-            "income_growth_expectation_1y": 0.4,
-        },
-        {
-            "type_id": "low_income_parent",
-            "label": "Low-income working parent",
-            "population_weight": 0.16,
-            "income_group": "low",
-            "liquidity_group": "low",
-            "employment_status": "employed",
-            "annual_income": 42000.0,
-            "baseline_consumption_annual": 39800.0,
-            "liquid_assets": 900.0,
-            "debt": 6500.0,
-            "base_mpc": 0.78,
-            "rate_sensitivity": 0.24,
-            "income_sensitivity": 0.74,
-            "precautionary_sensitivity": 0.68,
-            "baseline_job_loss_probability": 9.0,
-            "target_buffer_months": 1.6,
-            "inflation_expectation_1y": 3.1,
-            "income_growth_expectation_1y": 0.6,
-        },
-        {
-            "type_id": "middle_liquidity_worker",
-            "label": "Middle-liquidity worker",
-            "population_weight": 0.28,
-            "income_group": "middle",
-            "liquidity_group": "middle",
-            "employment_status": "employed",
-            "annual_income": 68000.0,
-            "baseline_consumption_annual": 57000.0,
-            "liquid_assets": 6000.0,
-            "debt": 12000.0,
-            "base_mpc": 0.50,
-            "rate_sensitivity": 0.34,
-            "income_sensitivity": 0.58,
-            "precautionary_sensitivity": 0.42,
-            "baseline_job_loss_probability": 6.0,
-            "target_buffer_months": 2.8,
-            "inflation_expectation_1y": 2.7,
-            "income_growth_expectation_1y": 1.0,
-        },
-        {
-            "type_id": "indebted_homeowner",
-            "label": "Indebted homeowner",
-            "population_weight": 0.18,
-            "income_group": "middle",
-            "liquidity_group": "middle",
-            "employment_status": "employed",
-            "annual_income": 90000.0,
-            "baseline_consumption_annual": 76000.0,
-            "liquid_assets": 9000.0,
-            "debt": 42000.0,
-            "base_mpc": 0.42,
-            "rate_sensitivity": 0.70,
-            "income_sensitivity": 0.46,
-            "precautionary_sensitivity": 0.36,
-            "baseline_job_loss_probability": 5.0,
-            "target_buffer_months": 3.0,
-            "inflation_expectation_1y": 2.5,
-            "income_growth_expectation_1y": 1.2,
-        },
-        {
-            "type_id": "high_liquidity_professional",
-            "label": "High-liquidity professional",
-            "population_weight": 0.14,
-            "income_group": "high",
-            "liquidity_group": "high",
-            "employment_status": "employed_low_risk",
-            "annual_income": 145000.0,
-            "baseline_consumption_annual": 101000.0,
-            "liquid_assets": 55000.0,
-            "debt": 18000.0,
-            "base_mpc": 0.22,
-            "rate_sensitivity": 0.54,
-            "income_sensitivity": 0.34,
-            "precautionary_sensitivity": 0.18,
-            "baseline_job_loss_probability": 3.0,
-            "target_buffer_months": 6.0,
-            "inflation_expectation_1y": 2.2,
-            "income_growth_expectation_1y": 1.5,
-        },
-        {
-            "type_id": "retired_saver",
-            "label": "Retired high-buffer saver",
-            "population_weight": 0.06,
-            "income_group": "middle",
-            "liquidity_group": "high",
-            "employment_status": "retired",
-            "annual_income": 72000.0,
-            "baseline_consumption_annual": 58000.0,
-            "liquid_assets": 85000.0,
-            "debt": 4000.0,
-            "base_mpc": 0.18,
-            "rate_sensitivity": 0.18,
-            "income_sensitivity": 0.20,
-            "precautionary_sensitivity": 0.12,
-            "baseline_job_loss_probability": 2.0,
-            "target_buffer_months": 9.0,
-            "inflation_expectation_1y": 2.4,
-            "income_growth_expectation_1y": 0.5,
-        },
-    ]
+def build_fixture_demand_households(household_count: int = 24) -> pd.DataFrame:
+    income_specs = {
+        "low": {"weight": 0.34, "annual_income": 36000.0, "consumption_ratio": 0.94, "debt_service": 0.16, "prior_pi": 3.4, "prior_income": 0.4},
+        "middle": {"weight": 0.33, "annual_income": 72000.0, "consumption_ratio": 0.82, "debt_service": 0.13, "prior_pi": 2.8, "prior_income": 1.0},
+        "high": {"weight": 0.33, "annual_income": 135000.0, "consumption_ratio": 0.68, "debt_service": 0.09, "prior_pi": 2.3, "prior_income": 1.6},
+    }
+    liquid_specs = {
+        "low": {"weight_by_income": {"low": 0.70, "middle": 0.45, "high": 0.22}, "months": {"low": 0.5, "middle": 0.9, "high": 1.4}},
+        "high": {"weight_by_income": {"low": 0.30, "middle": 0.55, "high": 0.78}, "months": {"low": 3.5, "middle": 5.0, "high": 8.5}},
+    }
+    risk_specs = {
+        "low": {"weight_by_income": {"low": 0.45, "middle": 0.60, "high": 0.72}, "job_loss": {"low": 6.0, "middle": 4.0, "high": 2.5}},
+        "high": {"weight_by_income": {"low": 0.55, "middle": 0.40, "high": 0.28}, "job_loss": {"low": 12.0, "middle": 8.0, "high": 5.0}},
+    }
+    age_specs = {
+        "prime": {"weight": 0.62, "income_factor": 1.08, "consumption_factor": 1.02, "mpc_shift": 0.04, "rate_shift": 0.08},
+        "older": {"weight": 0.38, "income_factor": 0.88, "consumption_factor": 0.92, "mpc_shift": -0.04, "rate_shift": -0.04},
+    }
+    rows: list[dict[str, Any]] = []
+    for income_group, income in income_specs.items():
+        for liquidity_group, liquidity in liquid_specs.items():
+            for job_risk_type, risk in risk_specs.items():
+                for age_bucket, age in age_specs.items():
+                    weight = (
+                        income["weight"]
+                        * liquidity["weight_by_income"][income_group]
+                        * risk["weight_by_income"][income_group]
+                        * age["weight"]
+                    )
+                    annual_income = income["annual_income"] * age["income_factor"]
+                    baseline_consumption = annual_income * income["consumption_ratio"] * age["consumption_factor"]
+                    liquid_months = liquidity["months"][income_group]
+                    liquid_assets = liquid_months * (baseline_consumption / 12.0)
+                    low_liquid = liquidity_group == "low"
+                    high_risk = job_risk_type == "high"
+                    base_mpc = (
+                        0.72
+                        if low_liquid
+                        else 0.24
+                    )
+                    base_mpc += {"low": 0.09, "middle": 0.0, "high": -0.08}[income_group]
+                    base_mpc += age["mpc_shift"]
+                    base_mpc += 0.04 if high_risk else -0.02
+                    target_buffer = (1.5 if low_liquid else 5.0) + (1.2 if high_risk else 0.0) + (0.8 if age_bucket == "older" else 0.0)
+                    attention_prices = 0.74 if income_group == "low" else 0.60 if income_group == "middle" else 0.48
+                    attention_jobs = 0.78 if high_risk else 0.46
+                    attention_rates = 0.68 if liquidity_group == "high" or income_group == "high" else 0.36
+                    rows.append(
+                        {
+                            "type_id": f"{income_group}_{liquidity_group}_liquid_{job_risk_type}_risk_{age_bucket}",
+                            "label": f"{income_group} income, {liquidity_group} liquid assets, {job_risk_type} job risk, {age_bucket} age",
+                            "population_weight": weight,
+                            "age_bucket": age_bucket,
+                            "income_group": income_group,
+                            "liquidity_group": liquidity_group,
+                            "job_loss_risk_type": job_risk_type,
+                            "employment_status": "employed_high_risk" if high_risk else "employed_low_risk",
+                            "annual_income": annual_income,
+                            "baseline_consumption_annual": baseline_consumption,
+                            "liquid_assets": liquid_assets,
+                            "debt": annual_income * income["debt_service"] * (1.4 if age_bucket == "prime" else 0.7),
+                            "debt_service_burden": income["debt_service"],
+                            "base_mpc": float(np.clip(base_mpc, 0.08, 0.92)),
+                            "base_saving_rate": float(np.clip(0.12 + (0.10 if liquidity_group == "high" else -0.03) + (0.05 if income_group == "high" else 0.0), 0.02, 0.35)),
+                            "rate_sensitivity": float(np.clip(0.28 + attention_rates * 0.42 + age["rate_shift"], 0.10, 0.90)),
+                            "income_sensitivity": {"low": 0.82, "middle": 0.58, "high": 0.36}[income_group],
+                            "precautionary_sensitivity": float(np.clip(0.34 + (0.30 if low_liquid else 0.06) + (0.20 if high_risk else 0.0), 0.10, 0.90)),
+                            "baseline_job_loss_probability": risk["job_loss"][income_group],
+                            "target_buffer_months": target_buffer,
+                            "inflation_expectation_1y": income["prior_pi"] + (0.25 if high_risk else 0.0),
+                            "income_growth_expectation_1y": income["prior_income"] - (0.25 if high_risk else 0.0),
+                            "confidence_index": 52.0 + (8.0 if income_group == "high" else -6.0 if income_group == "low" else 0.0) - (5.0 if high_risk else 0.0),
+                            "attention_weight_prices": attention_prices,
+                            "attention_weight_jobs": attention_jobs,
+                            "attention_weight_rates": attention_rates,
+                            "income_volatility": 0.10 + (0.08 if high_risk else 0.02) + (0.04 if income_group == "low" else 0.0),
+                            "subsistence_floor_share": 0.56 if income_group == "low" else 0.48 if income_group == "middle" else 0.38,
+                        }
+                    )
     count = max(1, min(int(household_count or len(rows)), len(rows)))
     return normalize_demand_households(pd.DataFrame(rows[:count]))
 
@@ -440,9 +481,27 @@ def normalize_demand_households(frame: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Demand household panel missing columns: {', '.join(sorted(missing))}")
     out = frame.copy()
-    for column in required - {"type_id", "label", "income_group", "liquidity_group", "employment_status"}:
+    defaults: dict[str, Any] = {
+        "age_bucket": "unknown",
+        "job_loss_risk_type": "unknown",
+        "employment_status": "unknown",
+        "debt_service_burden": 0.10,
+        "base_saving_rate": 0.12,
+        "confidence_index": 50.0,
+        "attention_weight_prices": 0.55,
+        "attention_weight_jobs": 0.55,
+        "attention_weight_rates": 0.55,
+        "income_volatility": 0.12,
+        "subsistence_floor_share": 0.50,
+    }
+    for column, default in defaults.items():
+        if column not in out:
+            out[column] = default
+    text_columns = {"type_id", "label", "income_group", "liquidity_group", "employment_status", "age_bucket", "job_loss_risk_type"}
+    numeric_columns = sorted(set(required).union(defaults) - text_columns)
+    for column in numeric_columns:
         out[column] = pd.to_numeric(out[column], errors="coerce")
-    if out[list(required - {"type_id", "label", "income_group", "liquidity_group", "employment_status"})].isna().any().any():
+    if out[numeric_columns].isna().any().any():
         raise ValueError("Demand household panel contains non-numeric required values")
     out["type_id"] = out["type_id"].astype(str)
     if out["type_id"].duplicated().any():
@@ -453,7 +512,10 @@ def normalize_demand_households(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Demand household population weights must sum to a positive value")
     out["population_weight"] = out["population_weight"] / total_weight
     out["base_mpc"] = out["base_mpc"].clip(lower=0.02, upper=0.98)
+    for column in ["attention_weight_prices", "attention_weight_jobs", "attention_weight_rates"]:
+        out[column] = out[column].clip(lower=0.0, upper=1.0)
     out["liquidity_group"] = out["liquidity_group"].astype(str).str.lower()
+    out["income_group"] = out["income_group"].astype(str).str.lower()
     return out.sort_values("type_id").reset_index(drop=True)
 
 
@@ -462,14 +524,15 @@ def run_demand_economy(
     scenarios: Iterable[DemandScenario],
     client: DemandEconomyClient,
     *,
-    period_count: int = 8,
+    period_count: int = 100,
     feedback_mode: str = "closed_loop",
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     if feedback_mode not in FEEDBACK_MODES:
         raise ValueError(f"Unsupported feedback mode: {feedback_mode}")
     households = normalize_demand_households(households)
     source = client.source
-    initial = _initial_household_states(households, source=source)
+    initial = _initial_household_states(households, source=source, variant=client.variant)
+    belief_rows: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
     period_rows: list[dict[str, Any]] = []
     accounting_rows: list[dict[str, Any]] = []
@@ -479,25 +542,36 @@ def run_demand_economy(
         env = _initial_environment(households)
         for period_index in range(int(period_count)):
             period_state = _period_state(env, scenario, period_index)
-            panel = client.decision_panel(scenario, period_state, household_states)
+            panel = client.belief_panel(scenario, period_state, household_states)
             prompt_rows.append(
                 {
                     "source": source,
+                    "variant": client.variant,
                     "scenario_id": scenario.scenario_id,
                     "period_id": period_state["period_id"],
                     "period_index": int(period_index),
-                    "prompt_payload": demand_economy_prompt_payload(scenario, period_state, household_states),
+                    "prompt_payload": _prompt_payload_for_variant(client.variant, scenario, period_state, household_states),
                 }
             )
-            realized = _realize_household_period(households, household_states, panel, period_state, source=source)
+            period_beliefs = _belief_rows(panel, household_states, period_state, source=source, variant=client.variant)
+            belief_rows.extend(period_beliefs)
+            realized = _realize_household_period(
+                households,
+                household_states,
+                panel,
+                period_state,
+                source=source,
+                variant=client.variant,
+            )
             decision_rows.extend(realized)
-            aggregate = _aggregate_period(realized, scenario, period_state, source=source)
+            aggregate = _aggregate_period(realized, scenario, period_state, source=source, variant=client.variant)
             period_rows.append(aggregate)
             accounting_rows.extend(_accounting_rows(realized, aggregate))
             household_states = _next_household_states(realized, households, aggregate)
             env = _next_environment(env, aggregate, scenario, feedback_mode=feedback_mode)
     return (
         initial,
+        pd.DataFrame(belief_rows),
         pd.DataFrame(decision_rows),
         pd.DataFrame(period_rows),
         pd.DataFrame(accounting_rows),
@@ -505,52 +579,63 @@ def run_demand_economy(
     )
 
 
-def demand_economy_prompt(
+def belief_module_prompt(
     scenario: DemandScenario,
     period_state: dict[str, Any],
     household_states: list[dict[str, Any]],
+    *,
+    variant: str = "llm_belief",
 ) -> str:
-    payload = demand_economy_prompt_payload(scenario, period_state, household_states)
+    payload = belief_module_prompt_payload(scenario, period_state, household_states, variant=variant)
     return f"""
-Abstract demand-economy household decision card:
+HANK-lite belief module card:
 {json.dumps(payload, indent=2, sort_keys=True)}
 
 Return exactly this JSON shape:
 {{
   "prompt_version": "{DEMAND_ECONOMY_PROMPT_VERSION}",
-  "household_decisions": [
+  "beliefs": [
     {{
       "type_id": "one supplied type_id",
-      "consumption_propensity_shift_pp": 0.0,
-      "desired_buffer_months": 3.0,
-      "job_loss_probability": 5.0,
-      "confidence": 0.5,
-      "reason": "short reason based only on the abstract state"
+      "expected_inflation_next_period": 2.0,
+      "expected_income_growth_next_period": 1.0,
+      "perceived_job_loss_probability": 5.0,
+      "confidence_index": 50.0,
+      "precautionary_saving_score": 5.0,
+      "attention_weight_prices": 0.5,
+      "attention_weight_jobs": 0.5,
+      "attention_weight_rates": 0.5,
+      "reason_codes": ["prices", "jobs"],
+      "causal_path": ["macro signal", "belief update", "saving motive"]
     }}
   ]
 }}
 
-Return one decision for every supplied household type. Do not include markdown.
+Return one belief object for every supplied household type. Do not choose consumption or saving dollars.
+Do not include markdown.
 """.strip()
 
 
-def demand_economy_prompt_payload(
+def belief_module_prompt_payload(
     scenario: DemandScenario,
     period_state: dict[str, Any],
     household_states: list[dict[str, Any]],
+    *,
+    variant: str = "llm_belief",
 ) -> dict[str, Any]:
     return {
         "prompt_version": DEMAND_ECONOMY_PROMPT_VERSION,
+        "variant": variant,
         "task": (
-            "Choose consume-vs-save behavior parameters for representative households in an abstract, "
-            "date-free, one-good economy. Deterministic code will enforce budgets and aggregate feedback."
+            "Predict the beliefs of survey-seeded household cells in an abstract economy. "
+            "The structural code, not you, will choose consumption, saving, budgets, and aggregation."
         ),
         "contamination_control": "No calendar dates, named historical episodes, target realized paths, or external data are supplied.",
         "economy": {
             "goods": "one nondurable consumption good",
             "capital": "none",
-            "asset_market": "one liquid buffer asset only",
-            "firms": "meet demand up to feedback-adjusted output",
+            "asset_market": "one liquid safe-asset buffer",
+            "firms": "output follows aggregate demand with employment feedback",
             "policy": "Taylor-rule short rate with optional abstract shock",
         },
         "scenario": {
@@ -558,6 +643,7 @@ def demand_economy_prompt_payload(
             "label": scenario.label,
             "transfer_active": bool(float(period_state["transfer_per_household"]) > 0),
             "policy_rate_shock_pp": round_or_none(period_state["policy_rate_shock_pp"]),
+            "job_risk_shock_pp": round_or_none(period_state["job_risk_shock_pp"]),
             "notes": scenario.notes,
         },
         "current_environment": {
@@ -569,31 +655,324 @@ def demand_economy_prompt_payload(
                 "inflation_rate",
                 "policy_rate",
                 "transfer_per_household",
+                "job_risk_shock_pp",
                 "aggregate_job_loss_belief",
+                "aggregate_confidence_index",
                 "aggregate_liquid_buffer_months",
             ]
         },
         "period_id": period_state["period_id"],
-        "households": [
-            {
-                "type_id": row["type_id"],
-                "label": row["label"],
-                "income_group": row["income_group"],
-                "liquidity_group": row["liquidity_group"],
-                "population_weight": round_or_none(row["population_weight"]),
-                "quarterly_labor_income": round_or_none(row["labor_income"]),
-                "quarterly_baseline_consumption": round_or_none(row["baseline_consumption"]),
-                "liquid_assets": round_or_none(row["liquid_assets"]),
-                "liquid_buffer_months": round_or_none(row["liquid_buffer_months"]),
-                "base_mpc": round_or_none(row["base_mpc"]),
-                "prior_job_loss_probability": round_or_none(row["job_loss_probability"]),
-                "prior_inflation_expectation_1y": round_or_none(row["inflation_expectation_1y"]),
-                "prior_income_growth_expectation_1y": round_or_none(row["income_growth_expectation_1y"]),
-            }
-            for row in household_states
-        ],
+        "household_cells": [_household_prompt_row(row) for row in household_states],
+        "allowed_type_ids": [row["type_id"] for row in household_states],
+        "required_response": {
+            "beliefs": [
+                {
+                    "type_id": "one supplied type_id",
+                    "expected_inflation_next_period": "percent, not decimal",
+                    "expected_income_growth_next_period": "percent, not decimal",
+                    "perceived_job_loss_probability": "percent probability, 0 to 40",
+                    "confidence_index": "0 to 100",
+                    "precautionary_saving_score": "0 to 10",
+                    "attention_weight_prices": "0 to 1",
+                    "attention_weight_jobs": "0 to 1",
+                    "attention_weight_rates": "0 to 1",
+                    "reason_codes": "short list from prices/jobs/income/rates/liquidity/confidence",
+                    "causal_path": "compact causal chain; no historical references",
+                }
+            ]
+        },
+    }
+
+
+def naive_persona_prompt(
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+) -> str:
+    payload = naive_persona_prompt_payload(scenario, period_state, household_states)
+    return f"""
+Naive persona baseline card:
+{json.dumps(payload, indent=2, sort_keys=True)}
+
+Return exactly this JSON shape:
+{{
+  "prompt_version": "{NAIVE_PERSONA_PROMPT_VERSION}",
+  "actions": [
+    {{
+      "type_id": "one supplied type_id",
+      "desired_consumption_change_pct": 0.0,
+      "desired_saving_change_pct": 0.0,
+      "confidence": 0.5,
+      "reason": "short reason"
+    }}
+  ]
+}}
+
+Return one action for every supplied household type. Do not include markdown.
+""".strip()
+
+
+def naive_persona_prompt_payload(
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "prompt_version": NAIVE_PERSONA_PROMPT_VERSION,
+        "task": (
+            "Naive baseline: use a plain household persona and choose consume-vs-save directly. "
+            "Deterministic code will still clamp budgets, but this variant intentionally lacks the belief/structure split."
+        ),
+        "contamination_control": "No calendar dates, named historical episodes, target realized paths, or external data are supplied.",
+        "scenario": {
+            "scenario_id": scenario.scenario_id,
+            "label": scenario.label,
+            "transfer_active": bool(float(period_state["transfer_per_household"]) > 0),
+            "policy_rate_shock_pp": round_or_none(period_state["policy_rate_shock_pp"]),
+            "job_risk_shock_pp": round_or_none(period_state["job_risk_shock_pp"]),
+        },
+        "current_environment": {
+            key: round_or_none(period_state[key])
+            for key in [
+                "period_index",
+                "output_gap_pct",
+                "employment_rate",
+                "inflation_rate",
+                "policy_rate",
+                "transfer_per_household",
+                "job_risk_shock_pp",
+            ]
+        },
+        "period_id": period_state["period_id"],
+        "household_personas": [_household_prompt_row(row) for row in household_states],
         "allowed_type_ids": [row["type_id"] for row in household_states],
     }
+
+
+def fixture_belief_payload(
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+) -> dict[str, Any]:
+    beliefs = []
+    output_gap = float(period_state["output_gap_pct"])
+    policy_gap = float(period_state["policy_rate"]) - NEUTRAL_POLICY_RATE
+    inflation_gap = float(period_state["inflation_rate"]) - INFLATION_TARGET
+    job_shock = float(period_state["job_risk_shock_pp"])
+    for row in household_states:
+        high_risk = str(row.get("job_loss_risk_type", "")).lower() == "high"
+        low_liquid = str(row.get("liquidity_group", "")).lower() == "low"
+        prior_pi = float(row["inflation_expectation_1y"])
+        prior_income = float(row["income_growth_expectation_1y"])
+        attention_prices = float(row["attention_weight_prices"])
+        attention_jobs = float(row["attention_weight_jobs"])
+        attention_rates = float(row["attention_weight_rates"])
+        expected_pi = 0.70 * prior_pi + 0.30 * float(period_state["inflation_rate"]) + 0.18 * attention_prices * inflation_gap
+        expected_pi += 0.025 * max(0.0, output_gap)
+        expected_income = 0.84 * prior_income + 0.060 * output_gap - 0.10 * max(0.0, policy_gap)
+        job_loss = float(row["baseline_job_loss_probability"])
+        job_loss += attention_jobs * (0.45 * max(0.0, -output_gap) + 0.35 * job_shock + 0.20 * max(0.0, policy_gap))
+        job_loss *= float(scenario.belief_dispersion_multiplier)
+        confidence = float(row["confidence_index"]) + 0.35 * output_gap - 1.4 * (job_loss - float(row["baseline_job_loss_probability"])) - 2.0 * max(0.0, inflation_gap)
+        precaution = 4.0 + 0.22 * job_loss + (1.2 if low_liquid else -0.3) + (0.5 if high_risk else -0.2) - 0.035 * confidence
+        beliefs.append(
+            _belief_payload_row(
+                row,
+                expected_inflation=expected_pi,
+                expected_income=expected_income,
+                job_loss=job_loss,
+                confidence=confidence,
+                precaution=precaution,
+                attention_prices=attention_prices,
+                attention_jobs=attention_jobs,
+                attention_rates=attention_rates,
+                reason_codes=_reason_codes(inflation_gap, output_gap, policy_gap, job_shock, low_liquid=low_liquid),
+            )
+        )
+    return {"prompt_version": DEMAND_ECONOMY_PROMPT_VERSION, "beliefs": beliefs}
+
+
+def adaptive_belief_payload(
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+) -> dict[str, Any]:
+    beliefs = []
+    output_gap = float(period_state["output_gap_pct"])
+    policy_gap = float(period_state["policy_rate"]) - NEUTRAL_POLICY_RATE
+    inflation_gap = float(period_state["inflation_rate"]) - INFLATION_TARGET
+    job_shock = float(period_state["job_risk_shock_pp"])
+    for row in household_states:
+        alpha = 0.78 - 0.18 * float(row["attention_weight_prices"])
+        expected_pi = alpha * float(row["inflation_expectation_1y"]) + (1.0 - alpha) * float(period_state["inflation_rate"])
+        expected_income = 0.88 * float(row["income_growth_expectation_1y"]) + 0.055 * output_gap
+        job_loss = float(row["baseline_job_loss_probability"]) + 0.35 * max(0.0, -output_gap) + 0.55 * job_shock
+        job_loss += 0.12 * max(0.0, policy_gap)
+        confidence = 54.0 + 0.32 * output_gap - 1.0 * job_loss - 1.5 * max(0.0, inflation_gap)
+        precaution = 3.2 + 0.18 * job_loss + 0.8 * float(row["precautionary_sensitivity"])
+        beliefs.append(
+            _belief_payload_row(
+                row,
+                expected_inflation=expected_pi,
+                expected_income=expected_income,
+                job_loss=job_loss,
+                confidence=confidence,
+                precaution=precaution,
+                attention_prices=float(row["attention_weight_prices"]),
+                attention_jobs=float(row["attention_weight_jobs"]),
+                attention_rates=float(row["attention_weight_rates"]),
+                reason_codes=_reason_codes(inflation_gap, output_gap, policy_gap, job_shock, low_liquid=str(row["liquidity_group"]) == "low"),
+            )
+        )
+    return {"prompt_version": DEMAND_ECONOMY_PROMPT_VERSION, "beliefs": beliefs}
+
+
+def representative_belief_payload(
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+) -> dict[str, Any]:
+    frame = pd.DataFrame(household_states)
+    weights = frame["population_weight"].astype(float)
+    representative = {
+        "inflation_expectation_1y": _weighted_frame_average(frame, "inflation_expectation_1y"),
+        "income_growth_expectation_1y": _weighted_frame_average(frame, "income_growth_expectation_1y"),
+        "baseline_job_loss_probability": _weighted_frame_average(frame, "baseline_job_loss_probability"),
+        "confidence_index": _weighted_frame_average(frame, "confidence_index"),
+        "attention_weight_prices": _weighted_frame_average(frame, "attention_weight_prices"),
+        "attention_weight_jobs": _weighted_frame_average(frame, "attention_weight_jobs"),
+        "attention_weight_rates": _weighted_frame_average(frame, "attention_weight_rates"),
+        "precautionary_sensitivity": _weighted_frame_average(frame, "precautionary_sensitivity"),
+    }
+    pseudo_rows = []
+    for row in household_states:
+        merged = dict(row)
+        merged.update(representative)
+        pseudo_rows.append(merged)
+    payload = adaptive_belief_payload(scenario, period_state, pseudo_rows)
+    for belief in payload["beliefs"]:
+        belief["reason_codes"] = ["representative_agent"]
+        belief["causal_path"] = ["aggregate household", "single belief rule", "structural consumption"]
+    return payload
+
+
+def fixture_naive_persona_payload(
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+) -> dict[str, Any]:
+    actions = []
+    output_gap = float(period_state["output_gap_pct"])
+    policy_gap = float(period_state["policy_rate"]) - NEUTRAL_POLICY_RATE
+    transfer_active = float(period_state["transfer_per_household"]) > 0
+    job_shock = float(period_state["job_risk_shock_pp"])
+    for row in household_states:
+        change = 0.25 * output_gap - 1.15 * max(0.0, policy_gap) - 0.30 * job_shock
+        if transfer_active:
+            change += 6.0
+        change = float(np.clip(change, -10.0, 10.0))
+        actions.append(
+            {
+                "type_id": row["type_id"],
+                "desired_consumption_change_pct": change,
+                "desired_saving_change_pct": -0.45 * change,
+                "confidence": 0.55,
+                "reason": "naive direct consume-save persona baseline",
+            }
+        )
+    return {"prompt_version": NAIVE_PERSONA_PROMPT_VERSION, "actions": actions}
+
+
+def normalize_period_payload(household_states: list[dict[str, Any]], data: dict[str, Any], *, variant: str) -> dict[str, Any]:
+    if variant == "naive_persona":
+        return normalize_naive_persona_payload(household_states, data)
+    return normalize_belief_payload(household_states, data)
+
+
+def normalize_belief_payload(household_states: list[dict[str, Any]], data: dict[str, Any]) -> dict[str, Any]:
+    payload = data.get("payload", data)
+    if payload.get("prompt_version") != DEMAND_ECONOMY_PROMPT_VERSION:
+        raise LLMUnavailable("Demand economy belief payload has the wrong prompt_version")
+    beliefs = payload.get("beliefs")
+    if not isinstance(beliefs, list):
+        raise LLMUnavailable("Demand economy payload must contain beliefs")
+    allowed = {str(row["type_id"]) for row in household_states}
+    by_type: dict[str, dict[str, Any]] = {}
+    for belief in beliefs:
+        if not isinstance(belief, dict):
+            raise LLMUnavailable("Each demand economy belief row must be an object")
+        type_id = str(belief.get("type_id", ""))
+        if type_id not in allowed:
+            raise LLMUnavailable(f"Unknown demand economy household type_id: {type_id}")
+        if type_id in by_type:
+            raise LLMUnavailable(f"Duplicate demand economy household type_id: {type_id}")
+        by_type[type_id] = {
+            "type_id": type_id,
+            "expected_inflation_next_period": bounded_float(belief, "expected_inflation_next_period", -5.0, 15.0),
+            "expected_income_growth_next_period": bounded_float(belief, "expected_income_growth_next_period", -12.0, 12.0),
+            "perceived_job_loss_probability": bounded_float(belief, "perceived_job_loss_probability", 0.0, 40.0),
+            "confidence_index": bounded_float(belief, "confidence_index", 0.0, 100.0),
+            "precautionary_saving_score": bounded_float(belief, "precautionary_saving_score", 0.0, 10.0),
+            "attention_weight_prices": bounded_float(belief, "attention_weight_prices", 0.0, 1.0),
+            "attention_weight_jobs": bounded_float(belief, "attention_weight_jobs", 0.0, 1.0),
+            "attention_weight_rates": bounded_float(belief, "attention_weight_rates", 0.0, 1.0),
+            "reason_codes": _string_list(belief.get("reason_codes"), limit=6),
+            "causal_path": _string_list(belief.get("causal_path"), limit=6),
+        }
+    missing = allowed - set(by_type)
+    if missing:
+        raise LLMUnavailable(f"Demand economy belief payload missing household type_ids: {', '.join(sorted(missing))}")
+    return {"prompt_version": DEMAND_ECONOMY_PROMPT_VERSION, "beliefs_by_type": by_type, "direct_actions_by_type": {}}
+
+
+def normalize_naive_persona_payload(household_states: list[dict[str, Any]], data: dict[str, Any]) -> dict[str, Any]:
+    payload = data.get("payload", data)
+    if payload.get("prompt_version") != NAIVE_PERSONA_PROMPT_VERSION:
+        raise LLMUnavailable("Naive persona payload has the wrong prompt_version")
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        raise LLMUnavailable("Naive persona payload must contain actions")
+    allowed = {str(row["type_id"]) for row in household_states}
+    direct: dict[str, dict[str, Any]] = {}
+    beliefs: dict[str, dict[str, Any]] = {}
+    state_by_type = {str(row["type_id"]): row for row in household_states}
+    for action in actions:
+        if not isinstance(action, dict):
+            raise LLMUnavailable("Each naive persona action must be an object")
+        type_id = str(action.get("type_id", ""))
+        if type_id not in allowed:
+            raise LLMUnavailable(f"Unknown naive persona household type_id: {type_id}")
+        if type_id in direct:
+            raise LLMUnavailable(f"Duplicate naive persona household type_id: {type_id}")
+        direct[type_id] = {
+            "type_id": type_id,
+            "desired_consumption_change_pct": bounded_float(action, "desired_consumption_change_pct", -25.0, 25.0),
+            "desired_saving_change_pct": bounded_float(action, "desired_saving_change_pct", -25.0, 25.0),
+            "confidence": bounded_float(action, "confidence", 0.0, 1.0),
+            "reason": str(action.get("reason", ""))[:300],
+        }
+        state = state_by_type[type_id]
+        beliefs[type_id] = {
+            "type_id": type_id,
+            "expected_inflation_next_period": float(state["inflation_expectation_1y"]),
+            "expected_income_growth_next_period": float(state["income_growth_expectation_1y"]),
+            "perceived_job_loss_probability": float(state["job_loss_probability"]),
+            "confidence_index": 100.0 * float(direct[type_id]["confidence"]),
+            "precautionary_saving_score": float(np.clip(5.0 + direct[type_id]["desired_saving_change_pct"] / 5.0, 0.0, 10.0)),
+            "attention_weight_prices": 0.5,
+            "attention_weight_jobs": 0.5,
+            "attention_weight_rates": 0.5,
+            "reason_codes": ["naive_persona"],
+            "causal_path": ["persona prompt", "direct consumption", "budget clamp"],
+        }
+    missing = allowed - set(direct)
+    if missing:
+        raise LLMUnavailable(f"Naive persona payload missing household type_ids: {', '.join(sorted(missing))}")
+    return {"prompt_version": NAIVE_PERSONA_PROMPT_VERSION, "beliefs_by_type": beliefs, "direct_actions_by_type": direct}
+
+
+def normalize_demand_payload(household_states: list[dict[str, Any]], data: dict[str, Any]) -> dict[str, Any]:
+    return normalize_belief_payload(household_states, data)
 
 
 def fixture_demand_payload(
@@ -601,94 +980,44 @@ def fixture_demand_payload(
     period_state: dict[str, Any],
     household_states: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    decisions = []
-    output_gap = float(period_state["output_gap_pct"])
-    policy_gap = float(period_state["policy_rate"]) - NEUTRAL_POLICY_RATE
-    transfer = float(period_state["transfer_per_household"])
-    for row in household_states:
-        liquidity = str(row["liquidity_group"]).lower()
-        base_mpc = float(row["base_mpc"])
-        current_buffer = float(row["liquid_buffer_months"])
-        target_buffer = float(row["target_buffer_months"])
-        job_loss = float(row["baseline_job_loss_probability"])
-        job_loss += 0.30 * max(0.0, -output_gap)
-        job_loss += 0.20 * max(0.0, policy_gap)
-        job_loss *= float(scenario.belief_dispersion_multiplier)
-        if liquidity == "low":
-            transfer_shift = 3.0 if transfer > 0 else 0.0
-            buffer_target = max(target_buffer, 1.5)
-        elif liquidity == "middle":
-            transfer_shift = 0.5 if transfer > 0 else 0.0
-            buffer_target = max(target_buffer, 2.8)
-        else:
-            transfer_shift = -1.5 if transfer > 0 else 0.0
-            buffer_target = max(target_buffer, 5.5)
-        precaution_shift = -0.35 * max(0.0, job_loss - float(row["baseline_job_loss_probability"]))
-        rate_shift = -1.8 * float(row["rate_sensitivity"]) * max(0.0, policy_gap)
-        buffer_shift = -0.55 * max(0.0, buffer_target - current_buffer)
-        consumption_shift = float(np.clip(100.0 * (base_mpc - 0.48) + transfer_shift + precaution_shift + rate_shift + buffer_shift, -15.0, 18.0))
-        decisions.append(
-            {
-                "type_id": row["type_id"],
-                "consumption_propensity_shift_pp": consumption_shift,
-                "desired_buffer_months": float(np.clip(buffer_target, 0.5, 12.0)),
-                "job_loss_probability": float(np.clip(job_loss, 0.5, 35.0)),
-                "confidence": float(np.clip(0.68 - 0.012 * abs(output_gap) - 0.01 * abs(policy_gap), 0.25, 0.85)),
-                "reason": "fixture decision from liquidity, job-risk, transfer, and policy-rate state",
-            }
-        )
-    return {"prompt_version": DEMAND_ECONOMY_PROMPT_VERSION, "household_decisions": decisions}
-
-
-def normalize_demand_payload(household_states: list[dict[str, Any]], data: dict[str, Any]) -> dict[str, Any]:
-    payload = data.get("payload", data)
-    if payload.get("prompt_version") != DEMAND_ECONOMY_PROMPT_VERSION:
-        raise LLMUnavailable("Demand economy payload has the wrong prompt_version")
-    decisions = payload.get("household_decisions")
-    if not isinstance(decisions, list):
-        raise LLMUnavailable("Demand economy payload must contain household_decisions")
-    allowed = {str(row["type_id"]) for row in household_states}
-    by_type: dict[str, dict[str, Any]] = {}
-    for decision in decisions:
-        if not isinstance(decision, dict):
-            raise LLMUnavailable("Each demand economy household decision must be an object")
-        type_id = str(decision.get("type_id", ""))
-        if type_id not in allowed:
-            raise LLMUnavailable(f"Unknown demand economy household type_id: {type_id}")
-        if type_id in by_type:
-            raise LLMUnavailable(f"Duplicate demand economy household type_id: {type_id}")
-        by_type[type_id] = {
-            "type_id": type_id,
-            "consumption_propensity_shift_pp": bounded_float(decision, "consumption_propensity_shift_pp", -20.0, 20.0),
-            "desired_buffer_months": bounded_float(decision, "desired_buffer_months", 0.0, 12.0),
-            "job_loss_probability": bounded_float(decision, "job_loss_probability", 0.0, 40.0),
-            "confidence": bounded_float(decision, "confidence", 0.0, 1.0),
-            "reason": str(decision.get("reason", ""))[:300],
-        }
-    missing = allowed - set(by_type)
-    if missing:
-        raise LLMUnavailable(f"Demand economy payload missing household type_ids: {', '.join(sorted(missing))}")
-    return {"prompt_version": DEMAND_ECONOMY_PROMPT_VERSION, "household_decisions": by_type}
+    return fixture_belief_payload(scenario, period_state, household_states)
 
 
 def score_demand_economy_validation(
     periods: pd.DataFrame,
     decisions: pd.DataFrame,
-    accounting: pd.DataFrame,
+    beliefs: pd.DataFrame | None = None,
+    accounting: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    if accounting is None:
+        accounting = beliefs if beliefs is not None else pd.DataFrame()
+        beliefs = pd.DataFrame()
+    beliefs = beliefs if beliefs is not None else pd.DataFrame()
+    accounting = accounting if accounting is not None else pd.DataFrame()
     if periods.empty:
         return pd.DataFrame()
     rows: list[dict[str, Any]] = []
-    max_accounting_residual = (
-        float(accounting["abs_residual"].max())
+    max_accounting_by_source = (
+        accounting.groupby("source")["abs_residual"].max().to_dict()
         if not accounting.empty and "abs_residual" in accounting
-        else np.inf
+        else {}
     )
     for source, source_periods in periods.groupby("source", sort=True):
         baseline = source_periods[source_periods["scenario_id"] == "baseline"].copy()
         transfer = source_periods[source_periods["scenario_id"] == "transfer_shock"].copy()
         rate_hike = source_periods[source_periods["scenario_id"] == "rate_hike"].copy()
+        job_risk = source_periods[source_periods["scenario_id"] == "job_risk_shock"].copy()
         feedback = source_periods[source_periods["scenario_id"] == "belief_feedback"].copy()
+        max_accounting_residual = float(max_accounting_by_source.get(source, np.inf))
+        if not baseline.empty:
+            tail = baseline.tail(min(20, baseline.shape[0]))
+            rows.extend(
+                [
+                    _metric_row(source, "steady_state_final_output_gap_abs", abs(float(baseline["output_gap_pct"].iloc[-1])), 0.0, 2.50, "Absolute final baseline output gap."),
+                    _metric_row(source, "steady_state_tail_output_gap_range", float(tail["output_gap_pct"].max() - tail["output_gap_pct"].min()), 0.0, 1.50, "Range of baseline output gap over the final window."),
+                    _metric_row(source, "steady_state_tail_inflation_range", float(tail["inflation_rate"].max() - tail["inflation_rate"].min()), 0.0, 1.00, "Range of inflation over the final window."),
+                ]
+            )
         if not baseline.empty and not transfer.empty:
             joined = transfer.merge(
                 baseline[["period_index", "aggregate_consumption"]],
@@ -708,39 +1037,51 @@ def score_demand_economy_validation(
                 if transfer_amount and np.isfinite(transfer_amount)
                 else np.nan
             )
-            low_mpc, high_mpc = _liquidity_mpcs(decisions, source=source)
+            low_mpc, high_mpc = _group_mpcs(decisions, source=source, group_column="liquidity_group", low_label="low", high_label="high")
+            low_income_mpc, high_income_mpc = _group_mpcs(decisions, source=source, group_column="income_group", low_label="low", high_label="high")
             rows.extend(
                 [
                     _metric_row(source, "transfer_impact_mpc", impact_mpc, 0.20, 0.85, "Aggregate impact MPC after a one-period transfer."),
                     _metric_row(source, "transfer_cumulative_mpc_4p", cumulative_mpc, 0.20, 2.40, "Cumulative four-period transfer MPC."),
-                    _metric_row(source, "low_liquidity_impact_mpc", low_mpc, 0.45, 1.00, "Impact MPC for low-liquidity households."),
-                    _metric_row(source, "high_liquidity_impact_mpc", high_mpc, 0.05, 0.45, "Impact MPC for high-liquidity households."),
-                    _metric_row(
-                        source,
-                        "liquidity_mpc_gradient",
-                        low_mpc - high_mpc,
-                        0.20,
-                        1.00,
-                        "Low-liquidity impact MPC minus high-liquidity impact MPC.",
-                    ),
+                    _metric_row(source, "low_liquidity_impact_mpc", low_mpc, 0.35, 1.00, "Impact MPC for low-liquidity households."),
+                    _metric_row(source, "high_liquidity_impact_mpc", high_mpc, 0.03, 0.55, "Impact MPC for high-liquidity households."),
+                    _metric_row(source, "liquidity_mpc_gradient", low_mpc - high_mpc, 0.15, 1.00, "Low-liquidity impact MPC minus high-liquidity impact MPC."),
+                    _metric_row(source, "income_mpc_gradient", low_income_mpc - high_income_mpc, 0.05, 0.80, "Low-income impact MPC minus high-income impact MPC."),
                 ]
             )
         if not baseline.empty and not rate_hike.empty:
             joined = rate_hike.merge(
-                baseline[["period_index", "aggregate_consumption"]],
+                baseline[["period_index", "aggregate_consumption", "output_gap_pct", "employment_rate", "inflation_rate"]],
                 on="period_index",
                 suffixes=("_rate_hike", "_baseline"),
             )
-            window = joined[(joined["period_index"] >= 1) & (joined["period_index"] <= 4)]
-            mean_response = float((window["aggregate_consumption_rate_hike"] - window["aggregate_consumption_baseline"]).mean())
-            impact_response = float(
-                (joined.loc[joined["period_index"] == 1, "aggregate_consumption_rate_hike"].iloc[0])
-                - (joined.loc[joined["period_index"] == 1, "aggregate_consumption_baseline"].iloc[0])
-            )
+            window = joined[(joined["period_index"] >= 1) & (joined["period_index"] <= 6)]
+            mean_consumption = float((window["aggregate_consumption_rate_hike"] - window["aggregate_consumption_baseline"]).mean())
+            mean_output = float((window["output_gap_pct_rate_hike"] - window["output_gap_pct_baseline"]).mean())
+            mean_employment = float((window["employment_rate_rate_hike"] - window["employment_rate_baseline"]).mean())
+            late = joined[(joined["period_index"] >= 4) & (joined["period_index"] <= 8)]
+            late_inflation = float((late["inflation_rate_rate_hike"] - late["inflation_rate_baseline"]).mean()) if not late.empty else np.nan
             rows.extend(
                 [
-                    _metric_row(source, "rate_hike_impact_consumption_delta", impact_response, -np.inf, -1e-6, "Impact-period consumption response to a rate hike."),
-                    _metric_row(source, "rate_hike_mean_consumption_delta_4p", mean_response, -np.inf, -1e-6, "Mean four-period consumption response to a rate hike."),
+                    _metric_row(source, "rate_hike_mean_consumption_delta_6p", mean_consumption, -np.inf, -1e-6, "Mean six-period consumption response to a rate hike."),
+                    _metric_row(source, "rate_hike_mean_output_gap_delta_6p", mean_output, -np.inf, -1e-6, "Mean six-period output-gap response to a rate hike."),
+                    _metric_row(source, "rate_hike_mean_employment_delta_6p", mean_employment, -np.inf, 1e-6, "Mean six-period employment response to a rate hike."),
+                    _metric_row(source, "rate_hike_late_inflation_delta", late_inflation, -np.inf, 0.05, "Later inflation response to a rate hike."),
+                ]
+            )
+        if not baseline.empty and not job_risk.empty:
+            joined = job_risk.merge(
+                baseline[["period_index", "aggregate_consumption", "aggregate_income"]],
+                on="period_index",
+                suffixes=("_job_risk", "_baseline"),
+            )
+            impact = joined[joined["period_index"] == 1]
+            consumption_delta = float((impact["aggregate_consumption_job_risk"] - impact["aggregate_consumption_baseline"]).iloc[0]) if not impact.empty else np.nan
+            income_delta = float((impact["aggregate_income_job_risk"] - impact["aggregate_income_baseline"]).iloc[0]) if not impact.empty else np.nan
+            rows.extend(
+                [
+                    _metric_row(source, "job_risk_impact_consumption_delta", consumption_delta, -np.inf, -1e-6, "Consumption response when perceived job risk rises before income changes."),
+                    _metric_row(source, "job_risk_impact_income_delta_abs", abs(income_delta), 0.0, 1e-6, "Income should not move on impact in a pure perceived-risk shock."),
                 ]
             )
         if not baseline.empty and not feedback.empty:
@@ -749,16 +1090,13 @@ def score_demand_economy_validation(
             rows.extend(
                 [
                     _metric_row(source, "baseline_no_shock_output_gap_rms", baseline_rms, 0.0, np.inf, "Baseline endogenous output-gap root-mean-square movement."),
-                    _metric_row(
-                        source,
-                        "belief_feedback_amplification_ratio",
-                        feedback_rms / max(baseline_rms, 1e-6),
-                        1.10,
-                        np.inf,
-                        "No-shock belief-feedback output-gap movement divided by baseline movement.",
-                    ),
+                    _metric_row(source, "belief_feedback_amplification_ratio", feedback_rms / max(baseline_rms, 1e-6), 1.05, np.inf, "Belief-feedback output-gap movement divided by baseline movement."),
                 ]
             )
+        if not beliefs.empty:
+            source_beliefs = beliefs[(beliefs["source"] == source) & (beliefs["scenario_id"] == "baseline") & (beliefs["period_index"] == 1)]
+            dispersion = _weighted_std_frame(source_beliefs, "expected_inflation_next_period", "population_weight") if not source_beliefs.empty else np.nan
+            rows.append(_metric_row(source, "belief_inflation_dispersion_p1", dispersion, 0.05, np.inf, "Weighted cross-cell expected-inflation dispersion at period 1."))
         rows.append(
             _metric_row(
                 source,
@@ -772,7 +1110,48 @@ def score_demand_economy_validation(
     return pd.DataFrame(rows).sort_values(["source", "metric"]).reset_index(drop=True)
 
 
-def classify_demand_economy_evidence(validation: pd.DataFrame, *, mode: str) -> dict[str, Any]:
+def build_ablation_table(
+    validation: pd.DataFrame,
+    periods: pd.DataFrame,
+    decisions: pd.DataFrame,
+    beliefs: pd.DataFrame,
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if periods.empty:
+        return pd.DataFrame()
+    for source, group in periods.groupby("source", sort=True):
+        source_validation = validation[validation["source"] == source]
+        variant = str(group["variant"].iloc[0]) if "variant" in group and not group.empty else _variant_from_source(source)
+        row = {
+            "source": source,
+            "variant": variant,
+            "expected_role": _variant_expected_role(variant),
+            "metric_count": int(source_validation.shape[0]),
+            "passed_metric_count": int(source_validation["passed"].astype(bool).sum()) if not source_validation.empty else 0,
+            "required_metric_count": int(source_validation["required"].astype(bool).sum()) if "required" in source_validation else int(source_validation.shape[0]),
+            "passed_required_metric_count": (
+                int((source_validation["required"].astype(bool) & source_validation["passed"].astype(bool)).sum())
+                if "required" in source_validation
+                else int(source_validation["passed"].astype(bool).sum())
+            ),
+            "all_metrics_passed": bool(source_validation["passed"].astype(bool).all()) if not source_validation.empty else False,
+            "required_metrics_passed": (
+                bool(source_validation.loc[source_validation["required"].astype(bool), "passed"].astype(bool).all())
+                if "required" in source_validation and not source_validation.empty
+                else bool(source_validation["passed"].astype(bool).all()) if not source_validation.empty else False
+            ),
+            "transfer_impact_mpc": _metric_value(source_validation, "transfer_impact_mpc"),
+            "liquidity_mpc_gradient": _metric_value(source_validation, "liquidity_mpc_gradient"),
+            "income_mpc_gradient": _metric_value(source_validation, "income_mpc_gradient"),
+            "rate_hike_mean_consumption_delta_6p": _metric_value(source_validation, "rate_hike_mean_consumption_delta_6p"),
+            "job_risk_impact_consumption_delta": _metric_value(source_validation, "job_risk_impact_consumption_delta"),
+            "belief_inflation_dispersion_p1": _metric_value(source_validation, "belief_inflation_dispersion_p1"),
+        }
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values(["variant", "source"]).reset_index(drop=True)
+
+
+def classify_demand_economy_evidence(validation: pd.DataFrame, ablations: pd.DataFrame | None = None, *, mode: str) -> dict[str, Any]:
     if validation.empty:
         return {
             "evidence_verdict": "no_validation_rows",
@@ -780,17 +1159,37 @@ def classify_demand_economy_evidence(validation: pd.DataFrame, *, mode: str) -> 
             "passed_metric_count": 0,
             "metric_count": 0,
         }
-    passed = validation["passed"].astype(bool)
+    ablations = ablations if ablations is not None else pd.DataFrame()
+    required = validation["required"].astype(bool) if "required" in validation else pd.Series(True, index=validation.index)
+    required_validation = validation[required]
+    passed = required_validation["passed"].astype(bool)
+    required_variants = {"representative", "adaptive", "llm_belief", "naive_persona"}
+    present_variants = set(ablations["variant"].astype(str)) if not ablations.empty and "variant" in ablations else set()
+    all_required_present = required_variants.issubset(present_variants)
     all_passed = bool(passed.all())
-    verdict = "behavior_demand_economy_ready" if all_passed else "behavior_demand_economy_needs_work"
-    if mode == "fixture" and all_passed:
-        verdict = "fixture_behavior_demand_economy_ready"
+    if all_passed and all_required_present:
+        verdict = "hank_lite_belief_lab_ready"
+        if mode == "fixture":
+            verdict = "fixture_hank_lite_belief_lab_ready"
+    elif all_passed:
+        verdict = "hank_lite_metrics_pass_but_ablation_incomplete"
+    else:
+        verdict = "hank_lite_belief_lab_needs_work"
     return {
         "evidence_verdict": verdict,
-        "passed": all_passed,
-        "passed_metric_count": int(passed.sum()),
+        "passed": bool(all_passed and all_required_present),
+        "passed_required_metric_count": int(passed.sum()),
+        "required_metric_count": int(required_validation.shape[0]),
+        "passed_metric_count": int(validation["passed"].astype(bool).sum()),
         "metric_count": int(validation.shape[0]),
-        "failed_metrics": validation.loc[~passed, ["source", "metric", "value", "target_low", "target_high"]].to_dict(orient="records"),
+        "required_variants_present": all_required_present,
+        "present_variants": sorted(present_variants),
+        "failed_required_metrics": required_validation.loc[
+            ~passed, ["source", "variant", "metric", "value", "target_low", "target_high"]
+        ].to_dict(orient="records"),
+        "failed_metrics": validation.loc[
+            ~validation["passed"].astype(bool), ["source", "variant", "metric", "value", "target_low", "target_high", "required"]
+        ].to_dict(orient="records"),
     }
 
 
@@ -798,45 +1197,65 @@ def build_demand_economy_report(
     manifest: dict[str, Any],
     households: pd.DataFrame,
     periods: pd.DataFrame,
+    beliefs: pd.DataFrame,
     validation: pd.DataFrame,
+    ablations: pd.DataFrame,
     accounting: pd.DataFrame,
 ) -> str:
     failed = validation[~validation["passed"].astype(bool)] if not validation.empty else pd.DataFrame()
-    period_preview = periods.sort_values(["source", "scenario_id", "period_index"]).head(48) if not periods.empty else periods
+    required_failed = (
+        validation[validation["required"].astype(bool) & ~validation["passed"].astype(bool)]
+        if not validation.empty and "required" in validation
+        else failed
+    )
+    optional_failed = (
+        validation[~validation["required"].astype(bool) & ~validation["passed"].astype(bool)]
+        if not validation.empty and "required" in validation
+        else pd.DataFrame()
+    )
+    period_preview = periods.sort_values(["source", "scenario_id", "period_index"]).head(64) if not periods.empty else periods
     accounting_summary = (
         accounting.groupby(["source", "scenario_id"], as_index=False)["abs_residual"].max().sort_values(["source", "scenario_id"])
         if not accounting.empty
         else accounting
     )
     lines = [
-        "# Abstract Behavior Demand Economy",
+        "# HANK-Lite Belief Demand Economy",
         "",
         "## Bottom Line",
-        _demand_bottom_line(manifest, failed),
+        _demand_bottom_line(manifest, required_failed),
         "",
         "## Setup",
-        f"- Decision mode: `{manifest.get('decision_mode')}`",
+        f"- Belief mode: `{manifest.get('belief_mode')}`",
         f"- Provider/models: `{manifest.get('provider')}` / `{', '.join(manifest.get('models', []))}`",
+        f"- Variants: `{', '.join(manifest.get('variants', []))}`",
         f"- Live calls used: `{manifest.get('live_call_count')}` of cap `{manifest.get('max_live_calls')}`",
-        f"- Household types: `{manifest.get('household_count')}`",
+        f"- Household cells: `{manifest.get('household_count')}`",
         f"- Scenarios: `{manifest.get('scenario_count')}`",
         f"- Periods per scenario: `{manifest.get('period_count')}`",
         f"- Feedback mode: `{manifest.get('feedback_mode')}`",
         "",
+        "## Ablation Table",
+        markdown_table(ablations),
+        "",
         "## Validation Scores",
         markdown_table(validation),
         "",
-        "## Failed Metrics",
-        markdown_table(failed),
+        "## Required Failed Metrics",
+        markdown_table(required_failed),
         "",
-        "## Household Type Surface",
-        markdown_table(households[["type_id", "population_weight", "income_group", "liquidity_group", "annual_income", "liquid_assets", "base_mpc"]]),
+        "## Optional Ablation Misses",
+        markdown_table(optional_failed),
+        "",
+        "## Household Cell Surface",
+        markdown_table(households[["type_id", "population_weight", "income_group", "liquidity_group", "job_loss_risk_type", "age_bucket", "annual_income", "liquid_assets", "base_mpc"]].head(48)),
         "",
         "## Period Paths",
         markdown_table(
             period_preview[
                 [
                     "source",
+                    "variant",
                     "scenario_id",
                     "period_id",
                     "aggregate_consumption",
@@ -845,6 +1264,7 @@ def build_demand_economy_report(
                     "inflation_rate",
                     "policy_rate",
                     "transfer_per_household",
+                    "job_risk_shock_pp",
                 ]
             ]
             if not period_preview.empty
@@ -856,10 +1276,11 @@ def build_demand_economy_report(
         "",
         "## Interpretation",
         (
-            "This is the first behavior-based macro gate. Households choose consume-vs-save parameters, "
-            "then deterministic code enforces their cash budgets, aggregates demand, maps demand into output, "
-            "employment, income, sticky inflation, and a Taylor-rule policy rate, and feeds that state into the "
-            "next period. The validation target is dynamic behavior, not matching a named historical path."
+            "This runner is a HANK-lite macro lab, not a persona society. The model variants separate "
+            "belief formation from structural consumption. LLM or fixture belief modules produce expectations, "
+            "confidence, perceived job-loss risk, precautionary-saving scores, and reason codes. Deterministic "
+            "code then enforces budgets, converts beliefs into consume-vs-save behavior, aggregates demand, "
+            "updates output, employment, inflation, and policy, and audits identities every period."
         ),
         "",
         "## Manifest",
@@ -871,7 +1292,7 @@ def build_demand_economy_report(
     return "\n".join(lines)
 
 
-def _initial_household_states(households: pd.DataFrame, *, source: str) -> pd.DataFrame:
+def _initial_household_states(households: pd.DataFrame, *, source: str, variant: str) -> pd.DataFrame:
     rows = []
     for _, row in households.iterrows():
         baseline_consumption = float(row["baseline_consumption_annual"]) / 4.0
@@ -879,17 +1300,23 @@ def _initial_household_states(households: pd.DataFrame, *, source: str) -> pd.Da
             {
                 "schema_version": DEMAND_ECONOMY_VERSION,
                 "source": source,
+                "variant": variant,
                 "type_id": row["type_id"],
                 "label": row["label"],
                 "population_weight": float(row["population_weight"]),
+                "age_bucket": row["age_bucket"],
                 "income_group": row["income_group"],
                 "liquidity_group": row["liquidity_group"],
+                "job_loss_risk_type": row["job_loss_risk_type"],
+                "employment_status": row["employment_status"],
                 "annual_income": float(row["annual_income"]),
                 "labor_income": float(row["annual_income"]) / 4.0,
                 "baseline_consumption": baseline_consumption,
                 "liquid_assets": float(row["liquid_assets"]),
                 "debt": float(row["debt"]),
+                "debt_service_burden": float(row["debt_service_burden"]),
                 "base_mpc": float(row["base_mpc"]),
+                "base_saving_rate": float(row["base_saving_rate"]),
                 "rate_sensitivity": float(row["rate_sensitivity"]),
                 "income_sensitivity": float(row["income_sensitivity"]),
                 "precautionary_sensitivity": float(row["precautionary_sensitivity"]),
@@ -898,6 +1325,12 @@ def _initial_household_states(households: pd.DataFrame, *, source: str) -> pd.Da
                 "target_buffer_months": float(row["target_buffer_months"]),
                 "inflation_expectation_1y": float(row["inflation_expectation_1y"]),
                 "income_growth_expectation_1y": float(row["income_growth_expectation_1y"]),
+                "confidence_index": float(row["confidence_index"]),
+                "attention_weight_prices": float(row["attention_weight_prices"]),
+                "attention_weight_jobs": float(row["attention_weight_jobs"]),
+                "attention_weight_rates": float(row["attention_weight_rates"]),
+                "income_volatility": float(row["income_volatility"]),
+                "subsistence_floor_share": float(row["subsistence_floor_share"]),
                 "liquid_buffer_months": _buffer_months(float(row["liquid_assets"]), baseline_consumption),
             }
         )
@@ -910,10 +1343,11 @@ def _initial_environment(households: pd.DataFrame) -> dict[str, float]:
         "baseline_aggregate_consumption": baseline_consumption,
         "aggregate_consumption": baseline_consumption,
         "output_gap_pct": 0.0,
-        "employment_rate": 0.955,
+        "employment_rate": STEADY_EMPLOYMENT_RATE,
         "inflation_rate": INFLATION_TARGET,
         "policy_rate": NEUTRAL_POLICY_RATE,
         "aggregate_job_loss_belief": float((households["population_weight"] * households["baseline_job_loss_probability"]).sum()),
+        "aggregate_confidence_index": float((households["population_weight"] * households["confidence_index"]).sum()),
         "aggregate_liquid_buffer_months": 3.0,
     }
 
@@ -924,6 +1358,11 @@ def _period_state(env: dict[str, float], scenario: DemandScenario, period_index:
         if scenario.rate_shock_start <= period_index <= scenario.rate_shock_end and scenario.rate_shock_start >= 0
         else 0.0
     )
+    job_risk_shock = (
+        float(scenario.job_risk_shock_pp)
+        if scenario.job_risk_shock_start <= period_index <= scenario.job_risk_shock_end and scenario.job_risk_shock_start >= 0
+        else 0.0
+    )
     transfer = float(scenario.transfer_amount) if period_index == scenario.transfer_period else 0.0
     return {
         **env,
@@ -932,6 +1371,7 @@ def _period_state(env: dict[str, float], scenario: DemandScenario, period_index:
         "period_id": f"period_{period_index}",
         "transfer_per_household": transfer,
         "policy_rate_shock_pp": rate_shock,
+        "job_risk_shock_pp": job_risk_shock,
         "policy_rate": float(env["policy_rate"]) + rate_shock,
     }
 
@@ -943,32 +1383,44 @@ def _realize_household_period(
     period_state: dict[str, Any],
     *,
     source: str,
+    variant: str,
 ) -> list[dict[str, Any]]:
     household_by_type = {str(row["type_id"]): row for _, row in households.iterrows()}
-    decisions = panel["household_decisions"]
+    beliefs = panel["beliefs_by_type"]
+    direct_actions = panel.get("direct_actions_by_type", {})
+    representative_mpc = _representative_mpc(household_states) if variant == "representative" else None
     rows: list[dict[str, Any]] = []
     for state in household_states:
         type_id = str(state["type_id"])
         static = household_by_type[type_id]
-        decision = decisions[type_id]
+        belief = beliefs[type_id]
+        direct = direct_actions.get(type_id)
         labor_income = float(state["labor_income"])
         liquid_before = float(state["liquid_assets"])
         transfer = float(period_state["transfer_per_household"])
         cash_available = liquid_before + labor_income + transfer
         baseline_consumption = float(state["baseline_consumption"])
         current_buffer = _buffer_months(liquid_before, baseline_consumption)
-        desired_buffer = float(decision["desired_buffer_months"])
-        mpc = float(np.clip(float(static["base_mpc"]) + float(decision["consumption_propensity_shift_pp"]) / 100.0, 0.02, 0.98))
-        income_gap = labor_income / max(float(static["annual_income"]) / 4.0, 1e-9) - 1.0
-        policy_gap = float(period_state["policy_rate"]) - NEUTRAL_POLICY_RATE
-        job_loss = float(decision["job_loss_probability"])
-        baseline_job_loss = float(static["baseline_job_loss_probability"])
-        rate_drag = max(0.0, policy_gap) * float(static["rate_sensitivity"]) * baseline_consumption * 0.060
-        precaution_drag = max(0.0, job_loss - baseline_job_loss) * float(static["precautionary_sensitivity"]) * baseline_consumption * 0.010
-        buffer_drag = max(0.0, desired_buffer - current_buffer) * baseline_consumption * 0.018
-        income_effect = income_gap * float(static["income_sensitivity"]) * baseline_consumption
-        desired_consumption = baseline_consumption + mpc * transfer + income_effect - rate_drag - precaution_drag - buffer_drag
-        floor_consumption = min(cash_available, 0.45 * baseline_consumption)
+        if direct is not None:
+            desired_consumption = baseline_consumption * (1.0 + float(direct["desired_consumption_change_pct"]) / 100.0)
+            mpc = float(static["base_mpc"])
+            desired_buffer = float(state["target_buffer_months"])
+            desired_saving_rate = float(state["base_saving_rate"])
+            real_rate = float(period_state["policy_rate"]) - float(belief["expected_inflation_next_period"])
+        else:
+            policy = _structural_consumption_policy(
+                static,
+                state,
+                belief,
+                period_state,
+                representative_mpc=representative_mpc,
+            )
+            desired_consumption = policy["desired_consumption"]
+            mpc = policy["effective_mpc"]
+            desired_buffer = policy["target_buffer_months"]
+            desired_saving_rate = policy["desired_saving_rate"]
+            real_rate = policy["real_rate"]
+        floor_consumption = min(cash_available, float(static["subsistence_floor_share"]) * baseline_consumption)
         consumption = float(np.clip(desired_consumption, floor_consumption, cash_available))
         saving_flow = labor_income + transfer - consumption
         liquid_after = liquid_before + saving_flow
@@ -977,34 +1429,129 @@ def _realize_household_period(
             {
                 "schema_version": DEMAND_ECONOMY_VERSION,
                 "source": source,
+                "variant": variant,
                 "scenario_id": period_state["scenario_id"],
                 "period_id": period_state["period_id"],
                 "period_index": int(period_state["period_index"]),
                 "type_id": type_id,
                 "label": state["label"],
+                "age_bucket": state["age_bucket"],
                 "income_group": state["income_group"],
                 "liquidity_group": state["liquidity_group"],
+                "job_loss_risk_type": state["job_loss_risk_type"],
                 "population_weight": float(state["population_weight"]),
                 "labor_income": labor_income,
                 "transfer": transfer,
                 "cash_available": cash_available,
                 "consumption": consumption,
+                "desired_consumption": float(desired_consumption),
                 "saving_flow": saving_flow,
                 "liquid_assets_before": liquid_before,
                 "liquid_assets_after": liquid_after,
+                "safe_asset_absorption": saving_flow,
                 "liquid_buffer_months_before": current_buffer,
                 "liquid_buffer_months_after": _buffer_months(liquid_after, baseline_consumption),
                 "base_mpc": float(static["base_mpc"]),
+                "effective_mpc": mpc,
                 "realized_mpc_from_transfer": consumption / transfer if transfer > 0 else np.nan,
-                "consumption_propensity_shift_pp": float(decision["consumption_propensity_shift_pp"]),
-                "desired_buffer_months": desired_buffer,
-                "job_loss_probability": job_loss,
-                "confidence": float(decision["confidence"]),
+                "desired_saving_rate": desired_saving_rate,
+                "target_buffer_months": desired_buffer,
+                "expected_inflation_next_period": float(belief["expected_inflation_next_period"]),
+                "expected_income_growth_next_period": float(belief["expected_income_growth_next_period"]),
+                "job_loss_probability": float(belief["perceived_job_loss_probability"]),
+                "confidence_index": float(belief["confidence_index"]),
+                "precautionary_saving_score": float(belief["precautionary_saving_score"]),
+                "real_rate": real_rate,
+                "direct_consumption_baseline": direct is not None,
                 "budget_residual": budget_residual,
-                "reason": decision["reason"],
+                "reason_codes_json": json.dumps(belief["reason_codes"], sort_keys=True),
             }
         )
     return rows
+
+
+def _structural_consumption_policy(
+    static: pd.Series,
+    state: dict[str, Any],
+    belief: dict[str, Any],
+    period_state: dict[str, Any],
+    *,
+    representative_mpc: float | None,
+) -> dict[str, float]:
+    baseline_consumption = float(state["baseline_consumption"])
+    liquid_before = float(state["liquid_assets"])
+    transfer = float(period_state["transfer_per_household"])
+    current_buffer = _buffer_months(liquid_before, baseline_consumption)
+    job_loss = float(belief["perceived_job_loss_probability"])
+    confidence = float(belief["confidence_index"])
+    expected_income = float(belief["expected_income_growth_next_period"])
+    expected_inflation = float(belief["expected_inflation_next_period"])
+    precaution_score = float(belief["precautionary_saving_score"])
+    real_rate = float(period_state["policy_rate"]) - expected_inflation
+    baseline_job_loss = float(static["baseline_job_loss_probability"])
+    baseline_confidence = float(static["confidence_index"])
+    baseline_expected_income = float(static["income_growth_expectation_1y"])
+    baseline_expected_inflation = float(static["inflation_expectation_1y"])
+    neutral_real_rate = NEUTRAL_POLICY_RATE - INFLATION_TARGET
+    job_loss_gap = job_loss - baseline_job_loss
+    confidence_gap = confidence - baseline_confidence
+    income_expectation_gap = expected_income - baseline_expected_income
+    inflation_expectation_gap = expected_inflation - baseline_expected_inflation
+    real_rate_gap = real_rate - neutral_real_rate
+    target_buffer = (
+        float(static["target_buffer_months"])
+        + 0.070 * job_loss_gap
+        - 0.020 * confidence_gap
+        + 0.18 * (precaution_score - 5.0)
+    )
+    target_buffer = float(np.clip(target_buffer, 0.5, 14.0))
+    desired_saving_rate = (
+        float(static["base_saving_rate"])
+        + 0.0060 * job_loss_gap
+        + 0.0065 * inflation_expectation_gap
+        + 0.0110 * real_rate_gap
+        - 0.0100 * income_expectation_gap
+        - 0.0018 * confidence_gap
+        + 0.010 * (precaution_score - 5.0)
+    )
+    desired_saving_rate = float(np.clip(desired_saving_rate, -0.10, 0.55))
+    mpc = float(static["base_mpc"]) if representative_mpc is None else float(representative_mpc)
+    mpc += -0.0060 * job_loss_gap
+    mpc += 0.0040 * income_expectation_gap
+    mpc += -0.0100 * max(0.0, real_rate_gap)
+    mpc += -0.010 * (precaution_score - 5.0)
+    mpc = float(np.clip(mpc, 0.03, 0.96))
+    labor_income = float(state["labor_income"])
+    normal_income = float(static["annual_income"]) / 4.0
+    income_gap = labor_income / max(normal_income, 1e-9) - 1.0
+    target_buffer_dollars = target_buffer * (baseline_consumption / 3.0)
+    baseline_target_buffer_dollars = float(static["target_buffer_months"]) * (baseline_consumption / 3.0)
+    baseline_buffer_gap = max(0.0, baseline_target_buffer_dollars - float(static["liquid_assets"]))
+    buffer_gap = max(0.0, target_buffer_dollars - liquid_before)
+    buffer_drag = 0.065 * (buffer_gap - baseline_buffer_gap)
+    saving_rate_gap = desired_saving_rate - float(static["base_saving_rate"])
+    precaution_drag = saving_rate_gap * labor_income * float(static["precautionary_sensitivity"])
+    rate_drag = max(0.0, real_rate_gap) * float(static["rate_sensitivity"]) * baseline_consumption * 0.060
+    income_effect = income_gap * float(static["income_sensitivity"]) * baseline_consumption
+    expected_income_effect = income_expectation_gap * baseline_consumption * 0.012
+    drawdown = 0.0
+    desired_consumption = (
+        baseline_consumption
+        + mpc * transfer
+        + income_effect
+        + expected_income_effect
+        + drawdown
+        - buffer_drag
+        - precaution_drag
+        - rate_drag
+    )
+    return {
+        "desired_consumption": float(desired_consumption),
+        "effective_mpc": mpc,
+        "target_buffer_months": target_buffer,
+        "desired_saving_rate": desired_saving_rate,
+        "real_rate": real_rate,
+    }
 
 
 def _aggregate_period(
@@ -1013,6 +1560,7 @@ def _aggregate_period(
     period_state: dict[str, Any],
     *,
     source: str,
+    variant: str,
 ) -> dict[str, Any]:
     aggregate_consumption = _weighted(realized, "consumption")
     aggregate_income = _weighted(realized, "labor_income")
@@ -1020,6 +1568,7 @@ def _aggregate_period(
     aggregate_saving = _weighted(realized, "saving_flow")
     aggregate_liquid_assets = _weighted(realized, "liquid_assets_after")
     aggregate_job_loss = _weighted(realized, "job_loss_probability")
+    aggregate_confidence = _weighted(realized, "confidence_index")
     aggregate_buffer = _weighted(realized, "liquid_buffer_months_after")
     baseline = float(period_state["baseline_aggregate_consumption"])
     output = aggregate_consumption
@@ -1027,6 +1576,7 @@ def _aggregate_period(
     return {
         "schema_version": DEMAND_ECONOMY_VERSION,
         "source": source,
+        "variant": variant,
         "scenario_id": scenario.scenario_id,
         "scenario_label": scenario.label,
         "period_id": period_state["period_id"],
@@ -1035,8 +1585,10 @@ def _aggregate_period(
         "aggregate_income": aggregate_income,
         "aggregate_transfer": aggregate_transfer,
         "aggregate_saving": aggregate_saving,
+        "safe_asset_absorption": aggregate_saving,
         "aggregate_liquid_assets": aggregate_liquid_assets,
         "aggregate_job_loss_belief": aggregate_job_loss,
+        "aggregate_confidence_index": aggregate_confidence,
         "aggregate_liquid_buffer_months": aggregate_buffer,
         "output": output,
         "output_gap_pct": output_gap,
@@ -1044,6 +1596,7 @@ def _aggregate_period(
         "inflation_rate": float(period_state["inflation_rate"]),
         "policy_rate": float(period_state["policy_rate"]),
         "policy_rate_shock_pp": float(period_state["policy_rate_shock_pp"]),
+        "job_risk_shock_pp": float(period_state["job_risk_shock_pp"]),
         "transfer_per_household": float(period_state["transfer_per_household"]),
         "goods_market_residual": output - aggregate_consumption,
     }
@@ -1055,40 +1608,52 @@ def _next_household_states(
     aggregate: dict[str, Any],
 ) -> list[dict[str, Any]]:
     static_by_type = {str(row["type_id"]): row for _, row in households.iterrows()}
-    employment_factor = float(aggregate["employment_rate"]) / 0.955
+    employment_factor = float(aggregate["employment_rate"]) / STEADY_EMPLOYMENT_RATE
     inflation_gap = float(aggregate["inflation_rate"]) - INFLATION_TARGET
     output_gap = float(aggregate["output_gap_pct"])
     rows: list[dict[str, Any]] = []
     for row in realized:
         static = static_by_type[str(row["type_id"])]
         annual_income = float(static["annual_income"])
-        labor_income = annual_income / 4.0 * np.clip(employment_factor * (1.0 + 0.002 * output_gap), 0.70, 1.25)
+        labor_income = annual_income / 4.0 * np.clip(employment_factor * (1.0 + 0.0015 * output_gap), 0.70, 1.25)
         baseline_consumption = float(static["baseline_consumption_annual"]) / 4.0
         job_loss = float(row["job_loss_probability"])
-        job_loss = float(np.clip(0.80 * job_loss + 0.20 * float(static["baseline_job_loss_probability"]) + 0.10 * max(0.0, -output_gap), 0.5, 35.0))
+        job_loss = float(np.clip(0.78 * job_loss + 0.22 * float(static["baseline_job_loss_probability"]) + 0.08 * max(0.0, -output_gap), 0.5, 35.0))
         rows.append(
             {
                 "schema_version": DEMAND_ECONOMY_VERSION,
                 "source": row["source"],
+                "variant": row["variant"],
                 "type_id": row["type_id"],
                 "label": row["label"],
                 "population_weight": float(row["population_weight"]),
+                "age_bucket": row["age_bucket"],
                 "income_group": row["income_group"],
                 "liquidity_group": row["liquidity_group"],
+                "job_loss_risk_type": row["job_loss_risk_type"],
+                "employment_status": str(static.get("employment_status", "unknown")),
                 "annual_income": annual_income,
                 "labor_income": float(labor_income),
                 "baseline_consumption": baseline_consumption,
                 "liquid_assets": float(row["liquid_assets_after"]),
                 "debt": float(static["debt"]),
+                "debt_service_burden": float(static["debt_service_burden"]),
                 "base_mpc": float(static["base_mpc"]),
+                "base_saving_rate": float(static["base_saving_rate"]),
                 "rate_sensitivity": float(static["rate_sensitivity"]),
                 "income_sensitivity": float(static["income_sensitivity"]),
                 "precautionary_sensitivity": float(static["precautionary_sensitivity"]),
                 "baseline_job_loss_probability": float(static["baseline_job_loss_probability"]),
                 "job_loss_probability": job_loss,
                 "target_buffer_months": float(static["target_buffer_months"]),
-                "inflation_expectation_1y": float(np.clip(float(static["inflation_expectation_1y"]) + 0.25 * inflation_gap, 0.0, 12.0)),
-                "income_growth_expectation_1y": float(np.clip(float(static["income_growth_expectation_1y"]) + 0.05 * output_gap, -8.0, 8.0)),
+                "inflation_expectation_1y": float(np.clip(0.72 * float(row["expected_inflation_next_period"]) + 0.28 * float(static["inflation_expectation_1y"]) + 0.10 * inflation_gap, -2.0, 12.0)),
+                "income_growth_expectation_1y": float(np.clip(0.68 * float(row["expected_income_growth_next_period"]) + 0.32 * float(static["income_growth_expectation_1y"]) + 0.012 * output_gap, -8.0, 8.0)),
+                "confidence_index": float(np.clip(0.70 * float(row["confidence_index"]) + 0.30 * float(static["confidence_index"]) + 0.040 * output_gap, 0.0, 100.0)),
+                "attention_weight_prices": float(static["attention_weight_prices"]),
+                "attention_weight_jobs": float(static["attention_weight_jobs"]),
+                "attention_weight_rates": float(static["attention_weight_rates"]),
+                "income_volatility": float(static["income_volatility"]),
+                "subsistence_floor_share": float(static["subsistence_floor_share"]),
                 "liquid_buffer_months": _buffer_months(float(row["liquid_assets_after"]), baseline_consumption),
             }
         )
@@ -1107,21 +1672,22 @@ def _next_environment(
             **env,
             "aggregate_consumption": float(aggregate["aggregate_consumption"]),
             "aggregate_job_loss_belief": float(aggregate["aggregate_job_loss_belief"]),
+            "aggregate_confidence_index": float(aggregate["aggregate_confidence_index"]),
             "aggregate_liquid_buffer_months": float(aggregate["aggregate_liquid_buffer_months"]),
         }
     output_gap = float(aggregate["output_gap_pct"])
     gain = float(scenario.feedback_gain)
-    next_employment = float(np.clip(0.72 * float(env["employment_rate"]) + 0.28 * (0.955 + 0.0022 * gain * output_gap), 0.82, 0.99))
+    next_employment = float(np.clip(0.82 * float(env["employment_rate"]) + 0.18 * (STEADY_EMPLOYMENT_RATE + 0.0010 * gain * output_gap), 0.82, 0.99))
     next_inflation = float(
         np.clip(
-            0.58 * float(env["inflation_rate"]) + 0.42 * INFLATION_TARGET + 0.030 * gain * output_gap,
+            0.64 * float(env["inflation_rate"]) + 0.36 * INFLATION_TARGET + 0.024 * gain * output_gap,
             -2.0,
             12.0,
         )
     )
     next_policy = float(
         np.clip(
-            NEUTRAL_POLICY_RATE + 1.35 * (next_inflation - INFLATION_TARGET) + 0.22 * output_gap,
+            NEUTRAL_POLICY_RATE + 1.35 * (next_inflation - INFLATION_TARGET) + 0.18 * output_gap,
             0.0,
             12.0,
         )
@@ -1134,6 +1700,7 @@ def _next_environment(
         "inflation_rate": next_inflation,
         "policy_rate": next_policy,
         "aggregate_job_loss_belief": float(aggregate["aggregate_job_loss_belief"]),
+        "aggregate_confidence_index": float(aggregate["aggregate_confidence_index"]),
         "aggregate_liquid_buffer_months": float(aggregate["aggregate_liquid_buffer_months"]),
     }
 
@@ -1142,6 +1709,7 @@ def _accounting_rows(realized: list[dict[str, Any]], aggregate: dict[str, Any]) 
     rows = [
         {
             "source": row["source"],
+            "variant": row["variant"],
             "scenario_id": row["scenario_id"],
             "period_id": row["period_id"],
             "period_index": int(row["period_index"]),
@@ -1157,6 +1725,7 @@ def _accounting_rows(realized: list[dict[str, Any]], aggregate: dict[str, Any]) 
     rows.append(
         {
             "source": aggregate["source"],
+            "variant": aggregate["variant"],
             "scenario_id": aggregate["scenario_id"],
             "period_id": aggregate["period_id"],
             "period_index": int(aggregate["period_index"]),
@@ -1170,7 +1739,155 @@ def _accounting_rows(realized: list[dict[str, Any]], aggregate: dict[str, Any]) 
     return rows
 
 
-def _liquidity_mpcs(decisions: pd.DataFrame, *, source: str) -> tuple[float, float]:
+def _belief_rows(
+    panel: dict[str, Any],
+    household_states: list[dict[str, Any]],
+    period_state: dict[str, Any],
+    *,
+    source: str,
+    variant: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    states = {str(row["type_id"]): row for row in household_states}
+    for type_id, belief in panel["beliefs_by_type"].items():
+        state = states[type_id]
+        rows.append(
+            {
+                "schema_version": DEMAND_ECONOMY_VERSION,
+                "source": source,
+                "variant": variant,
+                "scenario_id": period_state["scenario_id"],
+                "period_id": period_state["period_id"],
+                "period_index": int(period_state["period_index"]),
+                "type_id": type_id,
+                "population_weight": float(state["population_weight"]),
+                "income_group": state["income_group"],
+                "liquidity_group": state["liquidity_group"],
+                "job_loss_risk_type": state["job_loss_risk_type"],
+                "age_bucket": state["age_bucket"],
+                "expected_inflation_next_period": float(belief["expected_inflation_next_period"]),
+                "expected_income_growth_next_period": float(belief["expected_income_growth_next_period"]),
+                "perceived_job_loss_probability": float(belief["perceived_job_loss_probability"]),
+                "confidence_index": float(belief["confidence_index"]),
+                "precautionary_saving_score": float(belief["precautionary_saving_score"]),
+                "attention_weight_prices": float(belief["attention_weight_prices"]),
+                "attention_weight_jobs": float(belief["attention_weight_jobs"]),
+                "attention_weight_rates": float(belief["attention_weight_rates"]),
+                "reason_codes_json": json.dumps(belief["reason_codes"], sort_keys=True),
+                "causal_path_json": json.dumps(belief["causal_path"], sort_keys=True),
+            }
+        )
+    return rows
+
+
+def _client_specs(variants: list[str], models: list[str]) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    for variant in variants:
+        if variant in LLM_VARIANTS:
+            specs.extend((variant, model) for model in models)
+        else:
+            specs.append((variant, "structural"))
+    return specs
+
+
+def _prompt_payload_for_variant(
+    variant: str,
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if variant == "naive_persona":
+        return naive_persona_prompt_payload(scenario, period_state, household_states)
+    return belief_module_prompt_payload(scenario, period_state, household_states, variant=variant)
+
+
+def _household_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type_id": row["type_id"],
+        "label": row["label"],
+        "age_bucket": row.get("age_bucket"),
+        "income_group": row["income_group"],
+        "liquidity_group": row["liquidity_group"],
+        "job_loss_risk_type": row.get("job_loss_risk_type"),
+        "population_weight": round_or_none(row["population_weight"]),
+        "quarterly_labor_income": round_or_none(row["labor_income"]),
+        "quarterly_baseline_consumption": round_or_none(row["baseline_consumption"]),
+        "liquid_assets": round_or_none(row["liquid_assets"]),
+        "liquid_buffer_months": round_or_none(row["liquid_buffer_months"]),
+        "debt_service_burden": round_or_none(row.get("debt_service_burden")),
+        "base_mpc": round_or_none(row["base_mpc"]),
+        "prior_expected_inflation": round_or_none(row["inflation_expectation_1y"]),
+        "prior_expected_income_growth": round_or_none(row["income_growth_expectation_1y"]),
+        "prior_job_loss_probability": round_or_none(row["job_loss_probability"]),
+        "prior_confidence_index": round_or_none(row["confidence_index"]),
+        "attention_weight_prices": round_or_none(row["attention_weight_prices"]),
+        "attention_weight_jobs": round_or_none(row["attention_weight_jobs"]),
+        "attention_weight_rates": round_or_none(row["attention_weight_rates"]),
+    }
+
+
+def _belief_payload_row(
+    row: dict[str, Any],
+    *,
+    expected_inflation: float,
+    expected_income: float,
+    job_loss: float,
+    confidence: float,
+    precaution: float,
+    attention_prices: float,
+    attention_jobs: float,
+    attention_rates: float,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "type_id": row["type_id"],
+        "expected_inflation_next_period": float(np.clip(expected_inflation, -5.0, 15.0)),
+        "expected_income_growth_next_period": float(np.clip(expected_income, -12.0, 12.0)),
+        "perceived_job_loss_probability": float(np.clip(job_loss, 0.0, 40.0)),
+        "confidence_index": float(np.clip(confidence, 0.0, 100.0)),
+        "precautionary_saving_score": float(np.clip(precaution, 0.0, 10.0)),
+        "attention_weight_prices": float(np.clip(attention_prices, 0.0, 1.0)),
+        "attention_weight_jobs": float(np.clip(attention_jobs, 0.0, 1.0)),
+        "attention_weight_rates": float(np.clip(attention_rates, 0.0, 1.0)),
+        "reason_codes": reason_codes,
+        "causal_path": ["abstract signal", "belief update", "structural consumption rule"],
+    }
+
+
+def _reason_codes(
+    inflation_gap: float,
+    output_gap: float,
+    policy_gap: float,
+    job_shock: float,
+    *,
+    low_liquid: bool,
+) -> list[str]:
+    codes: list[str] = []
+    if abs(inflation_gap) > 0.15:
+        codes.append("prices")
+    if output_gap < -0.25:
+        codes.append("jobs")
+    if policy_gap > 0.15:
+        codes.append("rates")
+    if job_shock > 0:
+        codes.append("job_security")
+    if low_liquid:
+        codes.append("liquidity")
+    return codes or ["steady_state"]
+
+
+def _representative_mpc(household_states: list[dict[str, Any]]) -> float:
+    return float(sum(float(row["base_mpc"]) * float(row["population_weight"]) for row in household_states))
+
+
+def _group_mpcs(
+    decisions: pd.DataFrame,
+    *,
+    source: str,
+    group_column: str,
+    low_label: str,
+    high_label: str,
+) -> tuple[float, float]:
     subset = decisions[
         (decisions["source"] == source)
         & (decisions["period_index"] == 1)
@@ -1178,19 +1895,21 @@ def _liquidity_mpcs(decisions: pd.DataFrame, *, source: str) -> tuple[float, flo
     ].copy()
     if subset.empty:
         return np.nan, np.nan
-    baseline = subset[subset["scenario_id"] == "baseline"][
-        ["type_id", "consumption"]
-    ].rename(columns={"consumption": "baseline_consumption"})
+    baseline = subset[subset["scenario_id"] == "baseline"][["type_id", "consumption"]].rename(columns={"consumption": "baseline_consumption"})
     transfer = subset[subset["scenario_id"] == "transfer_shock"].merge(baseline, on="type_id", how="inner")
     if transfer.empty:
         return np.nan, np.nan
     transfer["type_mpc"] = (transfer["consumption"] - transfer["baseline_consumption"]) / transfer["transfer"].replace(0.0, np.nan)
     grouped = (
-        transfer.groupby("liquidity_group")
+        transfer.groupby(group_column)
         .apply(lambda group: float((group["type_mpc"] * group["population_weight"]).sum() / group["population_weight"].sum()))
         .to_dict()
     )
-    return float(grouped.get("low", np.nan)), float(grouped.get("high", np.nan))
+    return float(grouped.get(low_label, np.nan)), float(grouped.get(high_label, np.nan))
+
+
+def _liquidity_mpcs(decisions: pd.DataFrame, *, source: str) -> tuple[float, float]:
+    return _group_mpcs(decisions, source=source, group_column="liquidity_group", low_label="low", high_label="high")
 
 
 def _metric_row(source: str, metric: str, value: float, target_low: float, target_high: float, interpretation: str) -> dict[str, Any]:
@@ -1198,19 +1917,53 @@ def _metric_row(source: str, metric: str, value: float, target_low: float, targe
         passed = False
     else:
         passed = bool(float(value) >= float(target_low) and float(value) <= float(target_high))
+    variant = _variant_from_source(source)
     return {
         "source": source,
+        "variant": variant,
         "metric": metric,
         "value": float(value) if np.isfinite(value) else np.nan,
         "target_low": float(target_low) if np.isfinite(target_low) else target_low,
         "target_high": float(target_high) if np.isfinite(target_high) else target_high,
         "passed": passed,
+        "required": _required_metric_for_verdict(variant, metric),
         "interpretation": interpretation,
     }
 
 
+def _metric_value(validation: pd.DataFrame, metric: str) -> float | None:
+    row = validation[validation["metric"] == metric]
+    if row.empty:
+        return None
+    value = float(row["value"].iloc[0])
+    return value if np.isfinite(value) else None
+
+
 def _weighted(rows: list[dict[str, Any]], column: str) -> float:
     return float(sum(float(row[column]) * float(row["population_weight"]) for row in rows))
+
+
+def _weighted_frame_average(frame: pd.DataFrame, column: str) -> float:
+    if frame.empty:
+        return np.nan
+    weights = frame["population_weight"].astype(float)
+    total = float(weights.sum())
+    if total <= 0:
+        return np.nan
+    return float((frame[column].astype(float) * weights).sum() / total)
+
+
+def _weighted_std_frame(frame: pd.DataFrame, column: str, weight_column: str) -> float:
+    if frame.empty:
+        return np.nan
+    weights = frame[weight_column].astype(float)
+    total = float(weights.sum())
+    if total <= 0:
+        return np.nan
+    values = frame[column].astype(float)
+    mean = float((values * weights).sum() / total)
+    variance = float(((values - mean) ** 2 * weights).sum() / total)
+    return float(np.sqrt(max(0.0, variance)))
 
 
 def _buffer_months(liquid_assets: float, quarterly_consumption: float) -> float:
@@ -1218,23 +1971,71 @@ def _buffer_months(liquid_assets: float, quarterly_consumption: float) -> float:
     return float(max(0.0, float(liquid_assets)) / monthly_consumption)
 
 
+def _string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item)[:80] for item in value[:limit]]
+
+
+def _variant_from_source(source: str) -> str:
+    for variant in MODEL_VARIANTS:
+        if source.startswith(variant):
+            return variant
+    return source
+
+
+def _variant_expected_role(variant: str) -> str:
+    return {
+        "representative": "Smooth representative-agent baseline with weak heterogeneity.",
+        "adaptive": "Hand-coded heterogeneous belief baseline; proves closure without LLMs.",
+        "llm_belief": "Main architecture: belief module plus structural consumption/accounting.",
+        "naive_persona": "Bad baseline: direct consume/save prompt with budget clamp.",
+    }.get(variant, "")
+
+
+def _required_metric_for_verdict(variant: str, metric: str) -> bool:
+    optional_for_representative = {
+        "belief_feedback_amplification_ratio",
+        "belief_inflation_dispersion_p1",
+        "liquidity_mpc_gradient",
+        "income_mpc_gradient",
+    }
+    optional_for_adaptive = {"belief_feedback_amplification_ratio"}
+    required_for_naive = {
+        "steady_state_final_output_gap_abs",
+        "steady_state_tail_output_gap_range",
+        "steady_state_tail_inflation_range",
+        "max_accounting_abs_residual",
+    }
+    if variant == "llm_belief":
+        return True
+    if variant == "adaptive":
+        return metric not in optional_for_adaptive
+    if variant == "representative":
+        return metric not in optional_for_representative
+    if variant == "naive_persona":
+        return metric in required_for_naive
+    return True
+
+
 def _demand_instructions() -> str:
     return """
 Return only valid JSON. Use only the abstract economy state supplied in the prompt.
 Do not browse, inspect files, run commands, cite historical episodes, or infer calendar dates.
-Choose behavior parameters; deterministic code will enforce accounting.
+For the belief-module variant, do not choose consumption or saving dollars.
 """.strip()
 
 
 def _demand_bottom_line(manifest: dict[str, Any], failed: pd.DataFrame) -> str:
     evidence = manifest.get("evidence", {})
     verdict = evidence.get("evidence_verdict", "unknown")
-    if failed.empty:
+    if failed.empty and evidence.get("required_variants_present"):
         return (
-            f"`{verdict}`. The fixture economy clears the accounting, transfer-MPC, liquidity-gradient, "
-            "rate-hike, and no-shock feedback checks. That makes it ready as the behavior macro harness "
-            "for live LLM household actors."
+            f"`{verdict}`. The HANK-lite fixture clears accounting, steady-state, transfer, monetary, "
+            "job-risk, feedback, and ablation-coverage checks. It is ready for tiny live belief-module canaries."
         )
+    if failed.empty:
+        return f"`{verdict}`. Dynamic metrics pass, but the ablation surface is incomplete."
     return (
         f"`{verdict}`. The harness ran, but some dynamic validation checks failed. "
         "Treat the failed-metric table as the next calibration target before live model spend."

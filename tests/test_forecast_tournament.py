@@ -1002,30 +1002,31 @@ class ForecastTournamentTests(unittest.TestCase):
 
     def test_demand_economy_fixture_clears_dynamic_behavior_validation(self):
         with TemporaryDirectory() as temp_dir:
-            households = build_fixture_demand_households(6)
+            households = build_fixture_demand_households(24)
             client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)
 
-            initial, decisions, periods, accounting, prompts = run_demand_economy(
+            initial, beliefs, decisions, periods, accounting, prompts = run_demand_economy(
                 households,
                 default_demand_scenarios(),
                 client,
-                period_count=8,
+                period_count=100,
                 feedback_mode="closed_loop",
             )
-            validation = score_demand_economy_validation(periods, decisions, accounting)
+            validation = score_demand_economy_validation(periods, decisions, beliefs, accounting)
             verdict = classify_demand_economy_evidence(validation, mode="fixture")
             metrics = validation.set_index("metric")["value"].to_dict()
 
-            self.assertEqual(initial["type_id"].nunique(), 6)
-            self.assertEqual(periods.groupby("scenario_id")["period_index"].nunique().min(), 8)
-            self.assertEqual(decisions.groupby(["scenario_id", "period_index"])["type_id"].nunique().min(), 6)
-            self.assertEqual(len(prompts), len(default_demand_scenarios()) * 8)
-            self.assertEqual(verdict["evidence_verdict"], "fixture_behavior_demand_economy_ready")
-            self.assertTrue(validation["passed"].all())
+            self.assertEqual(initial["type_id"].nunique(), 24)
+            self.assertEqual(periods.groupby("scenario_id")["period_index"].nunique().min(), 100)
+            self.assertEqual(decisions.groupby(["scenario_id", "period_index"])["type_id"].nunique().min(), 24)
+            self.assertEqual(beliefs.groupby(["scenario_id", "period_index"])["type_id"].nunique().min(), 24)
+            self.assertEqual(len(prompts), len(default_demand_scenarios()) * 100)
+            self.assertEqual(verdict["evidence_verdict"], "hank_lite_metrics_pass_but_ablation_incomplete")
+            self.assertTrue(validation.loc[validation["required"].astype(bool), "passed"].all())
             self.assertLessEqual(float(accounting["abs_residual"].max()), 1e-6)
             self.assertGreater(float(metrics["transfer_impact_mpc"]), 0.2)
             self.assertGreater(float(metrics["liquidity_mpc_gradient"]), 0.2)
-            self.assertLess(float(metrics["rate_hike_mean_consumption_delta_4p"]), 0.0)
+            self.assertLess(float(metrics["rate_hike_mean_consumption_delta_6p"]), 0.0)
             self.assertGreater(float(metrics["belief_feedback_amplification_ratio"]), 1.1)
 
     def test_demand_economy_prompt_is_date_free_and_relative_period_only(self):
@@ -1033,7 +1034,7 @@ class ForecastTournamentTests(unittest.TestCase):
             households = build_fixture_demand_households(3)
             client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)
 
-            _initial, _decisions, _periods, _accounting, prompts = run_demand_economy(
+            _initial, _beliefs, _decisions, _periods, _accounting, prompts = run_demand_economy(
                 households,
                 [default_demand_scenarios()[0]],
                 client,
@@ -1047,6 +1048,8 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertNotIn("2026", prompt_text)
         self.assertNotIn("2008", prompt_text)
         self.assertNotIn("actual_", prompt_text)
+        self.assertNotIn("desired_consumption", prompt_text)
+        self.assertNotIn("desired_saving", prompt_text)
 
     def test_demand_economy_payload_fails_closed_when_type_missing(self):
         households = build_fixture_demand_households(4)
@@ -1067,11 +1070,13 @@ class ForecastTournamentTests(unittest.TestCase):
             "policy_rate": 3.0,
             "transfer_per_household": 0.0,
             "policy_rate_shock_pp": 0.0,
+            "job_risk_shock_pp": 0.0,
             "aggregate_job_loss_belief": 5.0,
+            "aggregate_confidence_index": 50.0,
             "aggregate_liquid_buffer_months": 3.0,
         }
         payload = fixture_demand_payload(scenario, period_state, initial)
-        payload["household_decisions"] = payload["household_decisions"][:-1]
+        payload["beliefs"] = payload["beliefs"][:-1]
 
         with self.assertRaises(LLMUnavailable):
             normalize_demand_payload(initial, {"payload": payload})
@@ -1083,16 +1088,18 @@ class ForecastTournamentTests(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "macro_llm_tournament.demand_economy",
-                    "--decision-mode",
+                    "--belief-mode",
                     "fixture",
                     "--max-live-calls",
                     "0",
                     "--models",
                     "gpt-5.5",
                     "--household-count",
-                    "6",
+                    "24",
                     "--period-count",
-                    "8",
+                    "100",
+                    "--variants",
+                    "representative,adaptive,llm_belief,naive_persona",
                     "--output-dir",
                     temp_dir,
                 ],
@@ -1107,13 +1114,19 @@ class ForecastTournamentTests(unittest.TestCase):
             manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
             report = (Path(temp_dir) / "demand_economy_report.md").read_text(encoding="utf-8")
             validation = pd.read_csv(Path(temp_dir) / "demand_validation_scores.csv")
+            ablations = pd.read_csv(Path(temp_dir) / "demand_ablation_table.csv")
+            beliefs = pd.read_csv(Path(temp_dir) / "demand_beliefs.csv")
             prompts = (Path(temp_dir) / "demand_prompt_cards.jsonl").read_text(encoding="utf-8")
             self.assertEqual(manifest["status"], "ok")
-            self.assertEqual(manifest["evidence"]["evidence_verdict"], "fixture_behavior_demand_economy_ready")
-            self.assertIn("first behavior-based macro gate", report)
-            self.assertTrue(validation["passed"].all())
+            self.assertEqual(manifest["evidence"]["evidence_verdict"], "fixture_hank_lite_belief_lab_ready")
+            self.assertIn("HANK-lite macro lab", report)
+            self.assertTrue(validation.loc[validation["required"].astype(bool), "passed"].all())
+            self.assertEqual(set(ablations["variant"]), {"representative", "adaptive", "llm_belief", "naive_persona"})
+            self.assertEqual(beliefs.groupby(["source", "scenario_id", "period_index"])["type_id"].nunique().min(), 24)
             self.assertIn("period_0", prompts)
-            self.assertNotIn("2026", prompts)
+            self.assertNotIn("2026-", prompts)
+            self.assertNotIn("survey_date", prompts)
+            self.assertNotIn("actual_", prompts)
 
     def test_persona_belief_prompt_hides_heldout_responses(self):
         respondents = build_fixture_respondent_panel(respondent_count=6, survey_date="2026-01-01")

@@ -100,12 +100,13 @@ persona-ecology-relative-fixture:
 
 demand-economy-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
-		--decision-mode fixture \
+		--belief-mode fixture \
 		--max-live-calls 0 \
 		--models gpt-5.5 \
 		--household-source fixture \
-		--household-count 6 \
-		--period-count 8 \
+		--household-count 24 \
+		--period-count 100 \
+		--variants representative,adaptive,llm_belief,naive_persona \
 		--feedback-mode closed_loop \
 		--output-dir outputs/demand_economy_fixture
 
