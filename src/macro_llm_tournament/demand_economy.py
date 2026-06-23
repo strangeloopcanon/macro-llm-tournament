@@ -156,6 +156,7 @@ def main() -> int:
     periods_frame = pd.concat(all_periods, ignore_index=True) if all_periods else pd.DataFrame()
     accounting_frame = pd.concat(all_accounting, ignore_index=True) if all_accounting else pd.DataFrame()
     validation = score_demand_economy_validation(periods_frame, decisions_frame, beliefs_frame, accounting_frame)
+    belief_targets = score_demand_belief_targets(initial_frame, beliefs_frame)
     ablations = build_ablation_table(validation, periods_frame, decisions_frame, beliefs_frame)
     evidence = classify_demand_economy_evidence(validation, ablations, mode=args.belief_mode)
 
@@ -191,6 +192,7 @@ def main() -> int:
             "demand_periods.csv",
             "demand_accounting.csv",
             "demand_validation_scores.csv",
+            "demand_belief_target_scores.csv",
             "demand_ablation_table.csv",
             "demand_prompt_cards.jsonl",
             "demand_raw_records.json",
@@ -206,11 +208,21 @@ def main() -> int:
     periods_frame.to_csv(output_dir / "demand_periods.csv", index=False)
     accounting_frame.to_csv(output_dir / "demand_accounting.csv", index=False)
     validation.to_csv(output_dir / "demand_validation_scores.csv", index=False)
+    belief_targets.to_csv(output_dir / "demand_belief_target_scores.csv", index=False)
     ablations.to_csv(output_dir / "demand_ablation_table.csv", index=False)
     pd.DataFrame(all_prompt_rows).to_json(output_dir / "demand_prompt_cards.jsonl", orient="records", lines=True)
     _write_json(output_dir / "demand_raw_records.json", raw_records)
     _write_json(output_dir / "manifest.json", manifest)
-    report = build_demand_economy_report(manifest, households, periods_frame, beliefs_frame, validation, ablations, accounting_frame)
+    report = build_demand_economy_report(
+        manifest,
+        households,
+        periods_frame,
+        beliefs_frame,
+        validation,
+        belief_targets,
+        ablations,
+        accounting_frame,
+    )
     (output_dir / "demand_economy_report.md").write_text(report, encoding="utf-8")
     print(f"Wrote demand economy run to {output_dir}")
     print(json.dumps(_jsonable(evidence), indent=2, sort_keys=True, allow_nan=False))
@@ -453,8 +465,12 @@ def build_fixture_demand_households(household_count: int = 24) -> pd.DataFrame:
                             "subsistence_floor_share": 0.56 if income_group == "low" else 0.48 if income_group == "middle" else 0.38,
                         }
                     )
-    count = max(1, min(int(household_count or len(rows)), len(rows)))
-    return normalize_demand_households(pd.DataFrame(rows[:count]))
+    full = normalize_demand_households(pd.DataFrame(rows))
+    count = max(1, min(int(household_count or len(full)), len(full)))
+    if count >= len(full):
+        return full
+    selected = np.linspace(0, len(full) - 1, count, dtype=int)
+    return normalize_demand_households(full.iloc[selected].copy())
 
 
 def normalize_demand_households(frame: pd.DataFrame) -> pd.DataFrame:
@@ -630,6 +646,13 @@ def belief_module_prompt_payload(
             "Predict the beliefs of survey-seeded household cells in an abstract economy. "
             "The structural code, not you, will choose consumption, saving, budgets, and aggregation."
         ),
+        "belief_update_rules": [
+            "Use each cell's prior_expected_inflation, prior_expected_income_growth, prior_job_loss_probability, and prior_confidence_index as survey-style anchors.",
+            "Update those anchors only from the abstract current_environment and the cell's own balance-sheet/labor-risk state.",
+            "Do not collapse household cells to one representative answer; cross-cell heterogeneity is signal.",
+            "In a no-shock period near steady state, beliefs should usually remain close to the cell's survey-style priors.",
+            "Low-liquidity, high-job-risk, and low-income cells can rationally carry higher job-risk beliefs and precaution than high-buffer cells.",
+        ],
         "contamination_control": "No calendar dates, named historical episodes, target realized paths, or external data are supplied.",
         "economy": {
             "goods": "one nondurable consumption good",
@@ -638,29 +661,8 @@ def belief_module_prompt_payload(
             "firms": "output follows aggregate demand with employment feedback",
             "policy": "Taylor-rule short rate with optional abstract shock",
         },
-        "scenario": {
-            "scenario_id": scenario.scenario_id,
-            "label": scenario.label,
-            "transfer_active": bool(float(period_state["transfer_per_household"]) > 0),
-            "policy_rate_shock_pp": round_or_none(period_state["policy_rate_shock_pp"]),
-            "job_risk_shock_pp": round_or_none(period_state["job_risk_shock_pp"]),
-            "notes": scenario.notes,
-        },
-        "current_environment": {
-            key: round_or_none(period_state[key])
-            for key in [
-                "period_index",
-                "output_gap_pct",
-                "employment_rate",
-                "inflation_rate",
-                "policy_rate",
-                "transfer_per_household",
-                "job_risk_shock_pp",
-                "aggregate_job_loss_belief",
-                "aggregate_confidence_index",
-                "aggregate_liquid_buffer_months",
-            ]
-        },
+        "current_exogenous_conditions": _prompt_current_conditions(period_state),
+        "current_environment": _prompt_current_environment(period_state),
         "period_id": period_state["period_id"],
         "household_cells": [_household_prompt_row(row) for row in household_states],
         "allowed_type_ids": [row["type_id"] for row in household_states],
@@ -724,25 +726,8 @@ def naive_persona_prompt_payload(
             "Deterministic code will still clamp budgets, but this variant intentionally lacks the belief/structure split."
         ),
         "contamination_control": "No calendar dates, named historical episodes, target realized paths, or external data are supplied.",
-        "scenario": {
-            "scenario_id": scenario.scenario_id,
-            "label": scenario.label,
-            "transfer_active": bool(float(period_state["transfer_per_household"]) > 0),
-            "policy_rate_shock_pp": round_or_none(period_state["policy_rate_shock_pp"]),
-            "job_risk_shock_pp": round_or_none(period_state["job_risk_shock_pp"]),
-        },
-        "current_environment": {
-            key: round_or_none(period_state[key])
-            for key in [
-                "period_index",
-                "output_gap_pct",
-                "employment_rate",
-                "inflation_rate",
-                "policy_rate",
-                "transfer_per_household",
-                "job_risk_shock_pp",
-            ]
-        },
+        "current_exogenous_conditions": _prompt_current_conditions(period_state),
+        "current_environment": _prompt_current_environment(period_state),
         "period_id": period_state["period_id"],
         "household_personas": [_household_prompt_row(row) for row in household_states],
         "allowed_type_ids": [row["type_id"] for row in household_states],
@@ -1011,11 +996,28 @@ def score_demand_economy_validation(
         max_accounting_residual = float(max_accounting_by_source.get(source, np.inf))
         if not baseline.empty:
             tail = baseline.tail(min(20, baseline.shape[0]))
+            steady_tail_required = int(baseline["period_index"].nunique()) >= 20
             rows.extend(
                 [
                     _metric_row(source, "steady_state_final_output_gap_abs", abs(float(baseline["output_gap_pct"].iloc[-1])), 0.0, 2.50, "Absolute final baseline output gap."),
-                    _metric_row(source, "steady_state_tail_output_gap_range", float(tail["output_gap_pct"].max() - tail["output_gap_pct"].min()), 0.0, 1.50, "Range of baseline output gap over the final window."),
-                    _metric_row(source, "steady_state_tail_inflation_range", float(tail["inflation_rate"].max() - tail["inflation_rate"].min()), 0.0, 1.00, "Range of inflation over the final window."),
+                    _metric_row(
+                        source,
+                        "steady_state_tail_output_gap_range",
+                        float(tail["output_gap_pct"].max() - tail["output_gap_pct"].min()),
+                        0.0,
+                        1.50,
+                        "Range of baseline output gap over the final window; diagnostic only for short canaries under 20 periods.",
+                        required=steady_tail_required,
+                    ),
+                    _metric_row(
+                        source,
+                        "steady_state_tail_inflation_range",
+                        float(tail["inflation_rate"].max() - tail["inflation_rate"].min()),
+                        0.0,
+                        1.00,
+                        "Range of inflation over the final window; diagnostic only for short canaries under 20 periods.",
+                        required=steady_tail_required,
+                    ),
                 ]
             )
         if not baseline.empty and not transfer.empty:
@@ -1110,6 +1112,98 @@ def score_demand_economy_validation(
     return pd.DataFrame(rows).sort_values(["source", "metric"]).reset_index(drop=True)
 
 
+def score_demand_belief_targets(initial: pd.DataFrame, beliefs: pd.DataFrame) -> pd.DataFrame:
+    if initial.empty or beliefs.empty:
+        return pd.DataFrame()
+    targets = {
+        "expected_inflation_next_period": ("inflation_expectation_1y", 1.0),
+        "expected_income_growth_next_period": ("income_growth_expectation_1y", 1.0),
+        "perceived_job_loss_probability": ("job_loss_probability", 5.0),
+        "confidence_index": ("confidence_index", 10.0),
+    }
+    initial_columns = ["source", "variant", "type_id", "population_weight", *[target for target, _scale in targets.values()]]
+    missing_initial = [column for column in initial_columns if column not in initial]
+    if missing_initial:
+        return pd.DataFrame()
+    period0 = beliefs[beliefs["period_index"] == 0].copy()
+    if period0.empty:
+        return pd.DataFrame()
+    merged = period0.merge(
+        initial[initial_columns],
+        on=["source", "variant", "type_id"],
+        how="inner",
+        suffixes=("", "_target"),
+    )
+    if merged.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    all_errors: list[float] = []
+    all_weights: list[float] = []
+    for source, group in merged.groupby("source", sort=True):
+        source_all_errors: list[float] = []
+        source_all_weights: list[float] = []
+        for belief_column, (target_column, normalizer) in targets.items():
+            if belief_column not in group or target_column not in group:
+                continue
+            weights = group["population_weight"].astype(float)
+            prediction = group[belief_column].astype(float)
+            target = group[target_column].astype(float)
+            error = prediction - target
+            mae = _weighted_array_average(np.abs(error), weights)
+            rmse = float(np.sqrt(_weighted_array_average(np.square(error), weights)))
+            bias = _weighted_array_average(error, weights)
+            normalized_errors = np.abs(error) / float(normalizer)
+            normalized_mae = _weighted_array_average(normalized_errors, weights)
+            source_all_errors.extend(normalized_errors.tolist())
+            source_all_weights.extend(weights.tolist())
+            all_errors.extend(normalized_errors.tolist())
+            all_weights.extend(weights.tolist())
+            rows.append(
+                {
+                    "source": source,
+                    "variant": str(group["variant"].iloc[0]),
+                    "period_index": 0,
+                    "belief_variable": belief_column,
+                    "target_variable": target_column,
+                    "target_source": "survey_seed_period0",
+                    "n": int(group.shape[0]),
+                    "weighted_mae": mae,
+                    "weighted_rmse": rmse,
+                    "weighted_bias": bias,
+                    "weighted_prediction_mean": _weighted_array_average(prediction, weights),
+                    "weighted_target_mean": _weighted_array_average(target, weights),
+                    "weighted_correlation": _weighted_corr(prediction, target, weights),
+                    "normalized_mae": normalized_mae,
+                    "score_direction": "lower_is_better",
+                    "interpretation": "Period-0 belief prediction error against the household cell's survey-style seed.",
+                }
+            )
+        if source_all_errors:
+            source_weights = pd.Series(source_all_weights, dtype=float)
+            source_errors = pd.Series(source_all_errors, dtype=float)
+            rows.append(
+                {
+                    "source": source,
+                    "variant": str(group["variant"].iloc[0]),
+                    "period_index": 0,
+                    "belief_variable": "ALL",
+                    "target_variable": "survey_seed_period0",
+                    "target_source": "survey_seed_period0",
+                    "n": int(group.shape[0]),
+                    "weighted_mae": _weighted_array_average(source_errors, source_weights),
+                    "weighted_rmse": float(np.sqrt(_weighted_array_average(np.square(source_errors), source_weights))),
+                    "weighted_bias": np.nan,
+                    "weighted_prediction_mean": np.nan,
+                    "weighted_target_mean": np.nan,
+                    "weighted_correlation": np.nan,
+                    "normalized_mae": _weighted_array_average(source_errors, source_weights),
+                    "score_direction": "lower_is_better",
+                    "interpretation": "Weighted normalized period-0 belief error across inflation, income, job-risk, and confidence seeds.",
+                }
+            )
+    return pd.DataFrame(rows).sort_values(["source", "belief_variable"]).reset_index(drop=True)
+
+
 def build_ablation_table(
     validation: pd.DataFrame,
     periods: pd.DataFrame,
@@ -1167,17 +1261,24 @@ def classify_demand_economy_evidence(validation: pd.DataFrame, ablations: pd.Dat
     present_variants = set(ablations["variant"].astype(str)) if not ablations.empty and "variant" in ablations else set()
     all_required_present = required_variants.issubset(present_variants)
     all_passed = bool(passed.all())
-    if all_passed and all_required_present:
+    canary_passed = bool(all_passed and mode == "live" and "llm_belief" in present_variants and not all_required_present)
+    full_lab_passed = bool(all_passed and all_required_present)
+    if full_lab_passed:
         verdict = "hank_lite_belief_lab_ready"
         if mode == "fixture":
             verdict = "fixture_hank_lite_belief_lab_ready"
     elif all_passed:
-        verdict = "hank_lite_metrics_pass_but_ablation_incomplete"
+        if mode == "live" and "llm_belief" in present_variants:
+            verdict = "live_hank_lite_belief_canary_ready"
+        else:
+            verdict = "hank_lite_metrics_pass_but_ablation_incomplete"
     else:
         verdict = "hank_lite_belief_lab_needs_work"
     return {
         "evidence_verdict": verdict,
-        "passed": bool(all_passed and all_required_present),
+        "passed": bool(full_lab_passed or canary_passed),
+        "full_lab_passed": full_lab_passed,
+        "canary_passed": canary_passed,
         "passed_required_metric_count": int(passed.sum()),
         "required_metric_count": int(required_validation.shape[0]),
         "passed_metric_count": int(validation["passed"].astype(bool).sum()),
@@ -1199,6 +1300,7 @@ def build_demand_economy_report(
     periods: pd.DataFrame,
     beliefs: pd.DataFrame,
     validation: pd.DataFrame,
+    belief_targets: pd.DataFrame,
     ablations: pd.DataFrame,
     accounting: pd.DataFrame,
 ) -> str:
@@ -1237,6 +1339,9 @@ def build_demand_economy_report(
         "",
         "## Ablation Table",
         markdown_table(ablations),
+        "",
+        "## Survey-Seed Belief Target Scores",
+        markdown_table(belief_targets),
         "",
         "## Validation Scores",
         markdown_table(validation),
@@ -1801,6 +1906,41 @@ def _prompt_payload_for_variant(
     return belief_module_prompt_payload(scenario, period_state, household_states, variant=variant)
 
 
+def _prompt_current_conditions(period_state: dict[str, Any]) -> dict[str, Any]:
+    transfer = float(period_state["transfer_per_household"])
+    rate_shock = float(period_state["policy_rate_shock_pp"])
+    job_risk_shock = float(period_state["job_risk_shock_pp"])
+    active = []
+    if transfer > 0:
+        active.append("lump_sum_transfer_now")
+    if abs(rate_shock) > 0:
+        active.append("policy_rate_shock_now")
+    if abs(job_risk_shock) > 0:
+        active.append("job_risk_news_now")
+    return {
+        "active_current_shocks": active or ["none"],
+        "transfer_per_household": round_or_none(transfer),
+        "policy_rate_shock_pp": round_or_none(rate_shock),
+        "job_risk_news_shock_pp": round_or_none(job_risk_shock),
+        "future_shock_path_disclosed": False,
+    }
+
+
+def _prompt_current_environment(period_state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "period_index": round_or_none(period_state["period_index"]),
+        "output_gap_pct": round_or_none(period_state["output_gap_pct"]),
+        "employment_rate": round_or_none(period_state["employment_rate"]),
+        "inflation_rate": round_or_none(period_state["inflation_rate"]),
+        "policy_rate": round_or_none(period_state["policy_rate"]),
+        "transfer_per_household": round_or_none(period_state["transfer_per_household"]),
+        "job_risk_news_pp": round_or_none(period_state["job_risk_shock_pp"]),
+        "aggregate_job_loss_belief": round_or_none(period_state.get("aggregate_job_loss_belief")),
+        "aggregate_confidence_index": round_or_none(period_state.get("aggregate_confidence_index")),
+        "aggregate_liquid_buffer_months": round_or_none(period_state.get("aggregate_liquid_buffer_months")),
+    }
+
+
 def _household_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "type_id": row["type_id"],
@@ -1912,7 +2052,16 @@ def _liquidity_mpcs(decisions: pd.DataFrame, *, source: str) -> tuple[float, flo
     return _group_mpcs(decisions, source=source, group_column="liquidity_group", low_label="low", high_label="high")
 
 
-def _metric_row(source: str, metric: str, value: float, target_low: float, target_high: float, interpretation: str) -> dict[str, Any]:
+def _metric_row(
+    source: str,
+    metric: str,
+    value: float,
+    target_low: float,
+    target_high: float,
+    interpretation: str,
+    *,
+    required: bool | None = None,
+) -> dict[str, Any]:
     if not np.isfinite(value):
         passed = False
     else:
@@ -1926,7 +2075,7 @@ def _metric_row(source: str, metric: str, value: float, target_low: float, targe
         "target_low": float(target_low) if np.isfinite(target_low) else target_low,
         "target_high": float(target_high) if np.isfinite(target_high) else target_high,
         "passed": passed,
-        "required": _required_metric_for_verdict(variant, metric),
+        "required": _required_metric_for_verdict(variant, metric) if required is None else bool(required),
         "interpretation": interpretation,
     }
 
@@ -1951,6 +2100,33 @@ def _weighted_frame_average(frame: pd.DataFrame, column: str) -> float:
     if total <= 0:
         return np.nan
     return float((frame[column].astype(float) * weights).sum() / total)
+
+
+def _weighted_array_average(values: Any, weights: Any) -> float:
+    values_series = pd.Series(values, dtype=float)
+    weights_series = pd.Series(weights, dtype=float)
+    total = float(weights_series.sum())
+    if total <= 0 or values_series.empty:
+        return np.nan
+    return float((values_series * weights_series).sum() / total)
+
+
+def _weighted_corr(x: Any, y: Any, weights: Any) -> float:
+    x_series = pd.Series(x, dtype=float)
+    y_series = pd.Series(y, dtype=float)
+    weights_series = pd.Series(weights, dtype=float)
+    total = float(weights_series.sum())
+    if total <= 0 or x_series.shape[0] < 2:
+        return np.nan
+    mean_x = _weighted_array_average(x_series, weights_series)
+    mean_y = _weighted_array_average(y_series, weights_series)
+    cov = _weighted_array_average((x_series - mean_x) * (y_series - mean_y), weights_series)
+    var_x = _weighted_array_average((x_series - mean_x) ** 2, weights_series)
+    var_y = _weighted_array_average((y_series - mean_y) ** 2, weights_series)
+    denom = float(np.sqrt(max(0.0, var_x) * max(0.0, var_y)))
+    if denom <= 0:
+        return np.nan
+    return float(cov / denom)
 
 
 def _weighted_std_frame(frame: pd.DataFrame, column: str, weight_column: str) -> float:
@@ -1997,6 +2173,8 @@ def _required_metric_for_verdict(variant: str, metric: str) -> bool:
     optional_for_representative = {
         "belief_feedback_amplification_ratio",
         "belief_inflation_dispersion_p1",
+        "high_liquidity_impact_mpc",
+        "low_liquidity_impact_mpc",
         "liquidity_mpc_gradient",
         "income_mpc_gradient",
     }

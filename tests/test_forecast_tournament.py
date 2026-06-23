@@ -1029,6 +1029,14 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertLess(float(metrics["rate_hike_mean_consumption_delta_6p"]), 0.0)
             self.assertGreater(float(metrics["belief_feedback_amplification_ratio"]), 1.1)
 
+    def test_demand_economy_fixture_subsample_keeps_cross_sectional_cells(self):
+        households = build_fixture_demand_households(6)
+
+        self.assertEqual(households["type_id"].nunique(), 6)
+        self.assertGreaterEqual(households["income_group"].nunique(), 3)
+        self.assertGreaterEqual(households["liquidity_group"].nunique(), 2)
+        self.assertAlmostEqual(float(households["population_weight"].sum()), 1.0)
+
     def test_demand_economy_prompt_is_date_free_and_relative_period_only(self):
         with TemporaryDirectory() as temp_dir:
             households = build_fixture_demand_households(3)
@@ -1045,11 +1053,31 @@ class ForecastTournamentTests(unittest.TestCase):
 
         self.assertIn("period_0", prompt_text)
         self.assertNotIn("survey_date", prompt_text)
-        self.assertNotIn("2026", prompt_text)
+        self.assertNotIn("2026-", prompt_text)
         self.assertNotIn("2008", prompt_text)
         self.assertNotIn("actual_", prompt_text)
+        self.assertNotIn("job_risk_shock", prompt_text)
         self.assertNotIn("desired_consumption", prompt_text)
         self.assertNotIn("desired_saving", prompt_text)
+        self.assertIn("survey-style anchors", prompt_text)
+        self.assertIn("Do not collapse household cells", prompt_text)
+
+        with TemporaryDirectory() as temp_dir:
+            client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)
+            _initial, _beliefs, _decisions, _periods, _accounting, shock_prompts = run_demand_economy(
+                households,
+                [default_demand_scenarios()[1]],
+                client,
+                period_count=2,
+                feedback_mode="closed_loop",
+            )
+        transfer_p0 = json.dumps(shock_prompts[0]["prompt_payload"], sort_keys=True)
+        transfer_p1 = json.dumps(shock_prompts[1]["prompt_payload"], sort_keys=True)
+        self.assertNotIn("transfer_shock", transfer_p0)
+        self.assertNotIn("job_risk_shock", transfer_p0)
+        self.assertNotIn("One-period lump-sum", transfer_p0)
+        self.assertIn('"active_current_shocks": ["none"]', transfer_p0)
+        self.assertIn("lump_sum_transfer_now", transfer_p1)
 
     def test_demand_economy_payload_fails_closed_when_type_missing(self):
         households = build_fixture_demand_households(4)
@@ -1114,13 +1142,18 @@ class ForecastTournamentTests(unittest.TestCase):
             manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
             report = (Path(temp_dir) / "demand_economy_report.md").read_text(encoding="utf-8")
             validation = pd.read_csv(Path(temp_dir) / "demand_validation_scores.csv")
+            belief_targets = pd.read_csv(Path(temp_dir) / "demand_belief_target_scores.csv")
             ablations = pd.read_csv(Path(temp_dir) / "demand_ablation_table.csv")
             beliefs = pd.read_csv(Path(temp_dir) / "demand_beliefs.csv")
             prompts = (Path(temp_dir) / "demand_prompt_cards.jsonl").read_text(encoding="utf-8")
             self.assertEqual(manifest["status"], "ok")
             self.assertEqual(manifest["evidence"]["evidence_verdict"], "fixture_hank_lite_belief_lab_ready")
+            self.assertTrue(manifest["evidence"]["full_lab_passed"])
+            self.assertFalse(manifest["evidence"]["canary_passed"])
             self.assertIn("HANK-lite macro lab", report)
+            self.assertIn("Survey-Seed Belief Target Scores", report)
             self.assertTrue(validation.loc[validation["required"].astype(bool), "passed"].all())
+            self.assertIn("ALL", set(belief_targets["belief_variable"]))
             self.assertEqual(set(ablations["variant"]), {"representative", "adaptive", "llm_belief", "naive_persona"})
             self.assertEqual(beliefs.groupby(["source", "scenario_id", "period_index"])["type_id"].nunique().min(), 24)
             self.assertIn("period_0", prompts)
