@@ -1061,6 +1061,7 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertNotIn("desired_saving", prompt_text)
         self.assertIn("survey-style anchors", prompt_text)
         self.assertIn("Do not collapse household cells", prompt_text)
+        self.assertIn("5 means normal precaution", prompt_text)
 
         with TemporaryDirectory() as temp_dir:
             client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)
@@ -1078,6 +1079,20 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertNotIn("One-period lump-sum", transfer_p0)
         self.assertIn('"active_current_shocks": ["none"]', transfer_p0)
         self.assertIn("lump_sum_transfer_now", transfer_p1)
+
+        with TemporaryDirectory() as temp_dir:
+            client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)
+            _initial, _beliefs, _decisions, _periods, _accounting, feedback_prompts = run_demand_economy(
+                households,
+                [default_demand_scenarios()[4]],
+                client,
+                period_count=2,
+                feedback_mode="closed_loop",
+            )
+        feedback_p0 = json.dumps(feedback_prompts[0]["prompt_payload"], sort_keys=True)
+        self.assertNotIn("belief_feedback", feedback_p0)
+        self.assertIn("elevated_belief_dispersion_regime_now", feedback_p0)
+        self.assertIn("elevated_macro_feedback_regime_now", feedback_p0)
 
     def test_demand_economy_payload_fails_closed_when_type_missing(self):
         households = build_fixture_demand_households(4)
@@ -1150,7 +1165,11 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertEqual(manifest["evidence"]["evidence_verdict"], "fixture_hank_lite_belief_lab_ready")
             self.assertTrue(manifest["evidence"]["full_lab_passed"])
             self.assertFalse(manifest["evidence"]["canary_passed"])
+            self.assertEqual(manifest["verdict"], "fixture_hank_lite_belief_lab_ready")
+            self.assertTrue(manifest["full_lab_passed"])
             self.assertIn("HANK-lite macro lab", report)
+            self.assertIn("Baseline Comparison", report)
+            self.assertIn("mechanical fixture seed echo", report)
             self.assertIn("Survey-Seed Belief Target Scores", report)
             self.assertTrue(validation.loc[validation["required"].astype(bool), "passed"].all())
             self.assertIn("ALL", set(belief_targets["belief_variable"]))
@@ -1160,6 +1179,48 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertNotIn("2026-", prompts)
             self.assertNotIn("survey_date", prompts)
             self.assertNotIn("actual_", prompts)
+
+    def test_demand_economy_live_mode_can_force_fixture_baseline_variants(self):
+        with TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_economy",
+                    "--belief-mode",
+                    "live",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5",
+                    "--household-count",
+                    "3",
+                    "--period-count",
+                    "8",
+                    "--variants",
+                    "naive_persona",
+                    "--fixture-variants",
+                    "naive_persona",
+                    "--scenarios",
+                    "baseline",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
+            beliefs = pd.read_csv(Path(temp_dir) / "demand_beliefs.csv")
+            self.assertEqual(manifest["belief_mode"], "live")
+            self.assertEqual(manifest["fixture_variants"], ["naive_persona"])
+            self.assertEqual(manifest["live_call_count"], 0)
+            self.assertEqual(set(beliefs["source"]), {"naive_persona_fixture_gpt-5.5"})
+            self.assertEqual(manifest["verdict"], manifest["evidence"]["evidence_verdict"])
 
     def test_persona_belief_prompt_hides_heldout_responses(self):
         respondents = build_fixture_respondent_panel(respondent_count=6, survey_date="2026-01-01")
