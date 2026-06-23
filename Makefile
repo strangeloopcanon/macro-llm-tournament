@@ -1,4 +1,4 @@
-.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture demand-economy-fixture postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -97,6 +97,17 @@ persona-ecology-relative-fixture:
 		--feedback-mode closed_loop \
 		--date-mode relative \
 		--output-dir outputs/persona_ecology_fixture_relative_gate
+
+demand-economy-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
+		--decision-mode fixture \
+		--max-live-calls 0 \
+		--models gpt-5.5 \
+		--household-source fixture \
+		--household-count 6 \
+		--period-count 8 \
+		--feedback-mode closed_loop \
+		--output-dir outputs/demand_economy_fixture
 
 postcutoff-behavior-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_behavior_gate \

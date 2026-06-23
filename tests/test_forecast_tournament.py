@@ -37,6 +37,16 @@ from macro_llm_tournament.behavior_gate import (
     score_cell_behavior_targets,
     score_behavior_targets,
 )
+from macro_llm_tournament.demand_economy import (
+    DemandEconomyClient,
+    build_fixture_demand_households,
+    classify_demand_economy_evidence,
+    default_demand_scenarios,
+    fixture_demand_payload,
+    normalize_demand_payload,
+    run_demand_economy,
+    score_demand_economy_validation,
+)
 from macro_llm_tournament.forecast_audit import (
     DirectRecallClient,
     build_belief_structure_audit,
@@ -989,6 +999,121 @@ class ForecastTournamentTests(unittest.TestCase):
 
         with self.assertRaises(LLMUnavailable):
             normalize_behavior_payload(scenario, type_cells, {"payload": payload})
+
+    def test_demand_economy_fixture_clears_dynamic_behavior_validation(self):
+        with TemporaryDirectory() as temp_dir:
+            households = build_fixture_demand_households(6)
+            client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)
+
+            initial, decisions, periods, accounting, prompts = run_demand_economy(
+                households,
+                default_demand_scenarios(),
+                client,
+                period_count=8,
+                feedback_mode="closed_loop",
+            )
+            validation = score_demand_economy_validation(periods, decisions, accounting)
+            verdict = classify_demand_economy_evidence(validation, mode="fixture")
+            metrics = validation.set_index("metric")["value"].to_dict()
+
+            self.assertEqual(initial["type_id"].nunique(), 6)
+            self.assertEqual(periods.groupby("scenario_id")["period_index"].nunique().min(), 8)
+            self.assertEqual(decisions.groupby(["scenario_id", "period_index"])["type_id"].nunique().min(), 6)
+            self.assertEqual(len(prompts), len(default_demand_scenarios()) * 8)
+            self.assertEqual(verdict["evidence_verdict"], "fixture_behavior_demand_economy_ready")
+            self.assertTrue(validation["passed"].all())
+            self.assertLessEqual(float(accounting["abs_residual"].max()), 1e-6)
+            self.assertGreater(float(metrics["transfer_impact_mpc"]), 0.2)
+            self.assertGreater(float(metrics["liquidity_mpc_gradient"]), 0.2)
+            self.assertLess(float(metrics["rate_hike_mean_consumption_delta_4p"]), 0.0)
+            self.assertGreater(float(metrics["belief_feedback_amplification_ratio"]), 1.1)
+
+    def test_demand_economy_prompt_is_date_free_and_relative_period_only(self):
+        with TemporaryDirectory() as temp_dir:
+            households = build_fixture_demand_households(3)
+            client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)
+
+            _initial, _decisions, _periods, _accounting, prompts = run_demand_economy(
+                households,
+                [default_demand_scenarios()[0]],
+                client,
+                period_count=4,
+                feedback_mode="closed_loop",
+            )
+        prompt_text = json.dumps(prompts[0]["prompt_payload"], sort_keys=True)
+
+        self.assertIn("period_0", prompt_text)
+        self.assertNotIn("survey_date", prompt_text)
+        self.assertNotIn("2026", prompt_text)
+        self.assertNotIn("2008", prompt_text)
+        self.assertNotIn("actual_", prompt_text)
+
+    def test_demand_economy_payload_fails_closed_when_type_missing(self):
+        households = build_fixture_demand_households(4)
+        initial = households.assign(
+            source="fixture_gpt-5.5",
+            labor_income=households["annual_income"] / 4.0,
+            baseline_consumption=households["baseline_consumption_annual"] / 4.0,
+            liquid_buffer_months=1.0,
+            job_loss_probability=households["baseline_job_loss_probability"],
+        ).to_dict(orient="records")
+        scenario = default_demand_scenarios()[0]
+        period_state = {
+            "period_id": "period_0",
+            "period_index": 0,
+            "output_gap_pct": 0.0,
+            "employment_rate": 0.955,
+            "inflation_rate": 2.0,
+            "policy_rate": 3.0,
+            "transfer_per_household": 0.0,
+            "policy_rate_shock_pp": 0.0,
+            "aggregate_job_loss_belief": 5.0,
+            "aggregate_liquid_buffer_months": 3.0,
+        }
+        payload = fixture_demand_payload(scenario, period_state, initial)
+        payload["household_decisions"] = payload["household_decisions"][:-1]
+
+        with self.assertRaises(LLMUnavailable):
+            normalize_demand_payload(initial, {"payload": payload})
+
+    def test_demand_economy_cli_fixture_writes_report(self):
+        with TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_economy",
+                    "--decision-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5",
+                    "--household-count",
+                    "6",
+                    "--period-count",
+                    "8",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
+            report = (Path(temp_dir) / "demand_economy_report.md").read_text(encoding="utf-8")
+            validation = pd.read_csv(Path(temp_dir) / "demand_validation_scores.csv")
+            prompts = (Path(temp_dir) / "demand_prompt_cards.jsonl").read_text(encoding="utf-8")
+            self.assertEqual(manifest["status"], "ok")
+            self.assertEqual(manifest["evidence"]["evidence_verdict"], "fixture_behavior_demand_economy_ready")
+            self.assertIn("first behavior-based macro gate", report)
+            self.assertTrue(validation["passed"].all())
+            self.assertIn("period_0", prompts)
+            self.assertNotIn("2026", prompts)
 
     def test_persona_belief_prompt_hides_heldout_responses(self):
         respondents = build_fixture_respondent_panel(respondent_count=6, survey_date="2026-01-01")

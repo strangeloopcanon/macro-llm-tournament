@@ -18,6 +18,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against a packaged public stimulus-response target catalog for aggregate MPC, liquidity gradients, debt repayment, liquid saving, directional debt/saving gradients by liquidity, and cell-level MPC-by-liquidity targets; unverified direct-target gaps stay unscored.
 - `src/macro_llm_tournament/persona_belief_panel.py` runs data-grounded persona belief panels and scores cross-sectional gradients, within-group spread, distribution distance, and common-core correlation.
 - `src/macro_llm_tournament/persona_ecology.py` runs respondent-seeded belief ecologies with profile, prior-expectation, external-information, behavior, and aggregate-feedback modules.
+- `src/macro_llm_tournament/demand_economy.py` runs the abstract behavior-based demand economy: households choose consume-vs-save parameters, aggregate demand feeds output, employment, income, sticky inflation, and policy, then that state feeds the next period.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
 
 ## Quick start
@@ -351,7 +352,21 @@ Use SCE first when possible because its rotating panel makes prior expectations 
 
 The ecology cap must cover `panel rows * models`, plus any retry headroom. With `--respondent-limit 1`, a 12-call cap covers one respondent across up to twelve periods for a single model, or fewer periods with retry headroom. The runner emits period-level score files in addition to aggregate diagnostics: `persona_ecology_period_scores.csv` scores each source/model by period, `persona_ecology_update_scores.csv` scores period-to-period belief changes, and `persona_ecology_action_period_summary.csv` summarizes model-chosen behavior by period. Behavior scores become empirical behavior evidence only when the CSV includes external behavior target columns; fixture behavior targets are labeled as synthetic self-consistency checks in the report.
 
-The next validation layer should be an abstract, date-free demand economy rather than a remembered historical episode. The minimal version is one good, no capital, Michigan/SCE-seeded household types choosing consume-vs-save each period. Aggregate demand feeds output, employment, income, sticky prices, and a Taylor-rule policy rate, which then feed the next household decision. That changes validation from single-path matching to dynamic tests: transfer-shock MPC and liquidity-gradient impulse responses, monetary-shock consumption shape, endogenous amplification from belief heterogeneity and feedback, and period-by-period accounting identities. This is the right contamination control because no real calendar episode is named.
+Run the abstract, date-free behavior demand economy:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
+  --decision-mode fixture \
+  --max-live-calls 0 \
+  --models gpt-5.5 \
+  --household-source fixture \
+  --household-count 6 \
+  --period-count 8 \
+  --feedback-mode closed_loop \
+  --output-dir outputs/demand_economy_fixture
+```
+
+This is the first behavior-based macro gate. The economy has one good, no capital, survey-style household types choosing consume-vs-save behavior each period, aggregate demand feeding output, employment, income, sticky inflation, and a Taylor-rule policy rate, and that macro state feeding the next household decision. Validation is dynamic: transfer-shock MPC, liquidity-gradient MPC, monetary-shock consumption response, no-shock belief-feedback amplification, and accounting identities every period. The fixture mode spends zero model calls and proves the harness; live mode reuses the same strict household-decision payload for LLM actors.
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 
