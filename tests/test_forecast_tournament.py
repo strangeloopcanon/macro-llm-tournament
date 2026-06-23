@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -68,10 +69,45 @@ from macro_llm_tournament.download_data import (
     extract_spf_download_links,
     summarize,
 )
-from macro_llm_tournament.forecast_llm import ForecastLLMClient, normalize_forecast_payload, run_llm_forecasts
+from macro_llm_tournament.forecast_llm import ForecastLLMClient, normalize_forecast_payload, run_llm_forecasts, _extract_json
 from macro_llm_tournament.forecast_scoring import score_forecast_slices, score_forecasts, verdict_from_scores
 from macro_llm_tournament.fred_vintage import approximate_spf_as_of_date, build_vintage_context_for_cards
 from macro_llm_tournament.llm_common import LLMUnavailable
+from macro_llm_tournament.persona_belief_panel import (
+    PersonaBeliefClient,
+    build_fixture_respondent_panel,
+    build_persona_cards,
+    classify_persona_evidence,
+    normalize_respondent_panel,
+    persona_belief_prompt,
+    run_persona_beliefs,
+    score_common_core,
+    score_distribution_distance,
+    score_gradient_match,
+    score_regression_gradient_match,
+    score_variance_flattening,
+    _client_mode_and_cap,
+    _sanitized_argv,
+)
+import macro_llm_tournament.persona_belief_panel as persona_belief_panel_module
+from macro_llm_tournament.persona_ecology import (
+    EcologyCard,
+    PersonaEcologyClient,
+    build_ecology_cards,
+    build_fixture_ecology_panel,
+    build_module_ablations,
+    classify_ecology_evidence,
+    normalize_persona_ecology_payload,
+    normalize_ecology_panel,
+    persona_ecology_prompt,
+    run_persona_ecology,
+    score_behavior_actions,
+    score_module_ablations,
+    score_period_levels,
+    score_period_updates,
+    score_temporal_dynamics,
+    summarize_period_actions,
+)
 from macro_llm_tournament.postcutoff_tournament import (
     DETAIL_FORECAST_SPECS,
     annualized_pct_change,
@@ -954,6 +990,1024 @@ class ForecastTournamentTests(unittest.TestCase):
         with self.assertRaises(LLMUnavailable):
             normalize_behavior_payload(scenario, type_cells, {"payload": payload})
 
+    def test_persona_belief_prompt_hides_heldout_responses(self):
+        respondents = build_fixture_respondent_panel(respondent_count=6, survey_date="2026-01-01")
+        card = build_persona_cards(respondents)[0]
+
+        prompt = persona_belief_prompt(card, target_fields=["expected_inflation_1y"])
+
+        self.assertIn("respondent_profile", prompt)
+        self.assertIn("synthetic fixture respondent", prompt)
+        self.assertNotIn("real survey respondent", prompt)
+        self.assertIn("expected_inflation_1y", prompt)
+        self.assertNotIn("actual_expected_inflation_1y", prompt)
+        self.assertNotIn("actual_expected_unemployment_rate", prompt)
+        self.assertNotIn("actual_expected_real_income_growth", prompt)
+        self.assertNotIn(str(round(card.targets["expected_inflation_1y"], 4)), prompt)
+
+    def test_persona_respondent_panel_respects_requested_count_and_scoreable_weights(self):
+        fixture = build_fixture_respondent_panel(respondent_count=60, survey_date="2026-01-01")
+
+        self.assertEqual(fixture.shape[0], 60)
+        self.assertAlmostEqual(float(fixture["weight"].sum()), 1.0)
+
+        raw = pd.DataFrame(
+            [
+                {
+                    "respondent_id": "a",
+                    "weight": 3,
+                    "age_group": "18_34",
+                    "income_group": "low",
+                    "education_group": "high_school_or_less",
+                    "gender": "female",
+                    "actual_expected_inflation_1y": 4.2,
+                },
+                {
+                    "respondent_id": "b",
+                    "weight": 1,
+                    "age_group": "55_plus",
+                    "income_group": "high",
+                    "education_group": "college_plus",
+                    "gender": "male",
+                    "actual_expected_inflation_1y": np.nan,
+                },
+            ]
+        )
+        normalized = normalize_respondent_panel(raw, target_fields=["expected_inflation_1y"])
+
+        self.assertEqual(list(normalized["respondent_id"]), ["a"])
+        self.assertAlmostEqual(float(normalized["weight"].sum()), 1.0)
+
+        zero_retained = raw.copy()
+        zero_retained.loc[zero_retained["respondent_id"] == "a", "weight"] = 0
+        normalized_zero = normalize_respondent_panel(zero_retained, target_fields=["expected_inflation_1y"])
+
+        self.assertEqual(list(normalized_zero["respondent_id"]), ["a"])
+        self.assertAlmostEqual(float(normalized_zero["weight"].sum()), 1.0)
+
+    def test_persona_regression_gradient_controls_for_confounded_demographics(self):
+        respondents = pd.DataFrame(
+            [
+                {
+                    "respondent_id": "low_hs",
+                    "weight": 49,
+                    "survey_source": "unit",
+                    "survey_date": "2026-01-01",
+                    "age_group": "18_34",
+                    "income_group": "low",
+                    "education_group": "high_school_or_less",
+                    "gender": "male",
+                    "region": "x",
+                    "employment_status": "employed",
+                    "homeownership": "renter",
+                    "liquid_wealth_group": "low",
+                    "actual_expected_inflation_1y": 10.0,
+                },
+                {
+                    "respondent_id": "low_college",
+                    "weight": 1,
+                    "survey_source": "unit",
+                    "survey_date": "2026-01-01",
+                    "age_group": "18_34",
+                    "income_group": "low",
+                    "education_group": "college_plus",
+                    "gender": "male",
+                    "region": "x",
+                    "employment_status": "employed",
+                    "homeownership": "renter",
+                    "liquid_wealth_group": "low",
+                    "actual_expected_inflation_1y": 0.0,
+                },
+                {
+                    "respondent_id": "high_hs",
+                    "weight": 1,
+                    "survey_source": "unit",
+                    "survey_date": "2026-01-01",
+                    "age_group": "18_34",
+                    "income_group": "high",
+                    "education_group": "high_school_or_less",
+                    "gender": "male",
+                    "region": "x",
+                    "employment_status": "employed",
+                    "homeownership": "owner",
+                    "liquid_wealth_group": "high",
+                    "actual_expected_inflation_1y": 18.0,
+                },
+                {
+                    "respondent_id": "high_college",
+                    "weight": 49,
+                    "survey_source": "unit",
+                    "survey_date": "2026-01-01",
+                    "age_group": "18_34",
+                    "income_group": "high",
+                    "education_group": "college_plus",
+                    "gender": "male",
+                    "region": "x",
+                    "employment_status": "employed",
+                    "homeownership": "owner",
+                    "liquid_wealth_group": "high",
+                    "actual_expected_inflation_1y": 8.0,
+                },
+            ]
+        )
+        respondents["weight"] = respondents["weight"] / respondents["weight"].sum()
+        predictions = pd.DataFrame(
+            [
+                {
+                    "respondent_id": row["respondent_id"],
+                    "source": "sim",
+                    "target_name": "expected_inflation_1y",
+                    "prediction": row["actual_expected_inflation_1y"],
+                }
+                for _, row in respondents.iterrows()
+            ]
+        )
+
+        contrasts = score_gradient_match(respondents, predictions, target_fields=["expected_inflation_1y"])
+        regressions = score_regression_gradient_match(respondents, predictions, target_fields=["expected_inflation_1y"])
+
+        income_contrast = contrasts[contrasts["dimension"] == "income_group"].iloc[0]
+        income_regression = regressions[regressions["dimension"] == "income_group"].iloc[0]
+        self.assertGreater(float(income_contrast["survey_gradient"]), 0.0)
+        self.assertLess(float(income_regression["survey_coefficient"]), 0.0)
+        self.assertTrue(bool(income_regression["sign_match"]))
+
+    def test_persona_distribution_ks_uses_survey_weights(self):
+        respondents = pd.DataFrame(
+            [
+                {
+                    "respondent_id": "mass",
+                    "weight": 0.98,
+                    "survey_source": "unit",
+                    "survey_date": "2026-01-01",
+                    "age_group": "18_34",
+                    "income_group": "low",
+                    "education_group": "college_plus",
+                    "gender": "male",
+                    "region": "x",
+                    "employment_status": "employed",
+                    "homeownership": "renter",
+                    "liquid_wealth_group": "low",
+                    "actual_expected_inflation_1y": 0.0,
+                },
+                {
+                    "respondent_id": "tail_a",
+                    "weight": 0.01,
+                    "survey_source": "unit",
+                    "survey_date": "2026-01-01",
+                    "age_group": "18_34",
+                    "income_group": "low",
+                    "education_group": "college_plus",
+                    "gender": "male",
+                    "region": "x",
+                    "employment_status": "employed",
+                    "homeownership": "renter",
+                    "liquid_wealth_group": "low",
+                    "actual_expected_inflation_1y": 100.0,
+                },
+                {
+                    "respondent_id": "tail_b",
+                    "weight": 0.01,
+                    "survey_source": "unit",
+                    "survey_date": "2026-01-01",
+                    "age_group": "18_34",
+                    "income_group": "low",
+                    "education_group": "college_plus",
+                    "gender": "male",
+                    "region": "x",
+                    "employment_status": "employed",
+                    "homeownership": "renter",
+                    "liquid_wealth_group": "low",
+                    "actual_expected_inflation_1y": 100.0,
+                },
+            ]
+        )
+        predictions = pd.DataFrame(
+            [
+                {"respondent_id": "mass", "source": "sim", "target_name": "expected_inflation_1y", "prediction": 0.0},
+                {"respondent_id": "tail_a", "source": "sim", "target_name": "expected_inflation_1y", "prediction": 0.0},
+                {"respondent_id": "tail_b", "source": "sim", "target_name": "expected_inflation_1y", "prediction": 100.0},
+            ]
+        )
+
+        distances = score_distribution_distance(respondents, predictions, target_fields=["expected_inflation_1y"])
+
+        self.assertLess(float(distances.iloc[0]["ks_stat"]), 0.02)
+
+    def test_persona_common_core_must_be_measured_to_clear_gate(self):
+        respondents = build_fixture_respondent_panel(respondent_count=12, survey_date="2026-01-01")
+        cards = build_persona_cards(respondents)
+        predictions = run_persona_beliefs(
+            cards,
+            PersonaBeliefClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0),
+            target_fields=["expected_inflation_1y"],
+        )
+        common_core = score_common_core(predictions, target_fields=["expected_inflation_1y"])
+        verdict = classify_persona_evidence(
+            pd.DataFrame({"sign_match": [True, True, True, True]}),
+            pd.DataFrame({"within_variance_ratio": [1.0, 1.1]}),
+            common_core,
+        )
+
+        self.assertEqual(int(common_core.iloc[0]["pair_count"]), 0)
+        self.assertFalse(bool(common_core.iloc[0]["common_core_tested"]))
+        self.assertEqual(verdict["evidence_verdict"], "incomplete_common_core_test")
+
+    def test_persona_live_call_cap_is_global_across_models(self):
+        self.assertEqual(_client_mode_and_cap("live", 10, 0), ("live", 10))
+        self.assertEqual(_client_mode_and_cap("live", 10, 7), ("live", 3))
+        self.assertEqual(_client_mode_and_cap("live", 10, 10), ("replay", 0))
+        self.assertEqual(_client_mode_and_cap("fixture", 0, 0), ("fixture", 0))
+
+    def test_persona_run_command_metadata_hides_local_module_path(self):
+        old_argv = sys.argv
+        try:
+            sys.argv = [str(Path(persona_belief_panel_module.__file__).resolve()), "--belief-mode", "fixture"]
+
+            argv = _sanitized_argv()
+
+            self.assertEqual(argv[:3], ["python3", "-m", "macro_llm_tournament.persona_belief_panel"])
+            self.assertNotIn(str(Path.home()), " ".join(argv))
+        finally:
+            sys.argv = old_argv
+
+    def test_persona_belief_panel_fixture_scores_distributional_structure(self):
+        respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="2026-01-01")
+        cards = build_persona_cards(respondents)
+        predictions = pd.concat(
+            [
+                run_persona_beliefs(
+                    cards,
+                    PersonaBeliefClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0),
+                    target_fields=["expected_inflation_1y", "expected_unemployment_rate", "expected_real_income_growth"],
+                ),
+                run_persona_beliefs(
+                    cards,
+                    PersonaBeliefClient("codex_cli", "gpt-5.4", Path("/tmp/unused"), mode="fixture", max_live_calls=0),
+                    target_fields=["expected_inflation_1y", "expected_unemployment_rate", "expected_real_income_growth"],
+                ),
+            ],
+            ignore_index=True,
+        )
+
+        regressions = score_regression_gradient_match(respondents, predictions)
+        gradients = score_gradient_match(respondents, predictions)
+        variances = score_variance_flattening(respondents, predictions)
+        distances = score_distribution_distance(respondents, predictions)
+        common_core = score_common_core(predictions)
+        verdict = classify_persona_evidence(regressions, variances, common_core, distances)
+
+        self.assertEqual(predictions["respondent_id"].nunique(), respondents.shape[0])
+        self.assertEqual(predictions["source"].nunique(), 2)
+        self.assertEqual(set(predictions["call_source"].unique()), {"fixture"})
+        self.assertFalse(predictions["cache_hit"].any())
+        self.assertFalse(regressions.empty)
+        self.assertFalse(gradients.empty)
+        self.assertFalse(variances.empty)
+        self.assertFalse(distances.empty)
+        self.assertFalse(common_core.empty)
+        inflation_income = gradients[
+            (gradients["target_name"] == "expected_inflation_1y")
+            & (gradients["dimension"] == "income_group")
+        ]
+        self.assertTrue(inflation_income["sign_match"].all())
+        self.assertGreater(float(inflation_income["survey_gradient"].mean()), 0.0)
+        self.assertGreater(float(inflation_income["simulated_gradient"].mean()), 0.0)
+        self.assertTrue(variances["within_variance_ratio"].map(np.isfinite).all())
+        self.assertTrue(distances["wasserstein_1"].ge(0).all())
+        self.assertTrue(common_core["pair_count"].ge(1).all())
+        self.assertEqual(verdict["evidence_verdict"], "partial_flattening_and_common_core_failure")
+        self.assertIn("distribution_clear", verdict)
+
+    def test_persona_variance_score_detects_flattened_within_group_spread(self):
+        respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="2026-01-01")
+        rows = []
+        for _, respondent in respondents.iterrows():
+            group = respondents[respondents["income_group"] == respondent["income_group"]]
+            group_mean = float(group["actual_expected_inflation_1y"].mean())
+            rows.append(
+                {
+                    "respondent_id": respondent["respondent_id"],
+                    "source": "flat_income_cell",
+                    "target_name": "expected_inflation_1y",
+                    "prediction": group_mean,
+                }
+            )
+
+        variances = score_variance_flattening(
+            respondents,
+            pd.DataFrame(rows),
+            target_fields=["expected_inflation_1y"],
+        )
+
+        income_row = variances[variances["dimension"] == "income_group"].iloc[0]
+        self.assertLess(float(income_row["within_variance_ratio"]), 0.05)
+        self.assertTrue(bool(income_row["flattening_flag"]))
+
+    def test_persona_ecology_prompt_hides_current_targets_and_exposes_modules(self):
+        panel = build_fixture_ecology_panel(respondent_count=6, period_count=2, survey_start="2026-01")
+        card = build_ecology_cards(panel)[0]
+        prompt = persona_ecology_prompt(
+            card,
+            target_fields=["expected_inflation_1y"],
+            prior_beliefs={"expected_inflation_1y": card.empirical_priors["expected_inflation_1y"]},
+            environment=card.environment,
+        )
+
+        self.assertIn("profile_module", prompt)
+        self.assertIn("prior_expectations_module", prompt)
+        self.assertIn("external_information_module", prompt)
+        self.assertIn("behavior_module", prompt)
+        self.assertIn("prior_beliefs", prompt)
+        self.assertIn("current_environment", prompt)
+        self.assertNotIn("actual_expected_inflation_1y", prompt)
+        self.assertNotIn(str(round(card.targets["expected_inflation_1y"], 4)), prompt)
+
+    def test_persona_ecology_relative_date_mode_hides_calendar_and_maps_display_id(self):
+        panel = build_fixture_ecology_panel(respondent_count=3, period_count=2, survey_start="2026-01")
+        base = build_ecology_cards(panel, target_fields=["expected_inflation_1y"])[0]
+        card = EcologyCard(
+            panel_row_id=f"{base.respondent_id}__2024:Q4",
+            respondent_id=base.respondent_id,
+            period_id="2024:Q4",
+            period_index=0,
+            survey_source=base.survey_source,
+            survey_date="2024-11-15",
+            weight=base.weight,
+            profile=base.profile,
+            empirical_priors=base.empirical_priors,
+            environment=base.environment,
+            targets=base.targets,
+        )
+        prompt = persona_ecology_prompt(
+            card,
+            target_fields=["expected_inflation_1y"],
+            prior_beliefs={"expected_inflation_1y": card.empirical_priors["expected_inflation_1y"]},
+            environment=card.environment,
+            date_mode="relative",
+        )
+        display_panel_row_id = f"{card.respondent_id}__period_0"
+        payload = {
+            "panel_row_id": display_panel_row_id,
+            "respondent_id": card.respondent_id,
+            "beliefs": {
+                "expected_inflation_1y": {
+                    "value": 3.1,
+                    "p10": 2.0,
+                    "p50": 3.1,
+                    "p90": 4.2,
+                }
+            },
+            "actions": {
+                "consumption_change_pct": 0.0,
+                "liquid_buffer_change_pct": 1.0,
+                "borrowing_desire_index": -0.5,
+                "portfolio_rebalance_to_liquid_pct": 0.0,
+                "job_search_intensity_index": 0.0,
+            },
+            "module_weights": {
+                "profile_weight": 0.2,
+                "prior_weight": 0.5,
+                "environment_weight": 0.25,
+                "aggregate_feedback_weight": 0.05,
+            },
+            "confidence": 0.6,
+            "uncertainty": 0.4,
+            "reason": "relative-period response",
+        }
+
+        normalized = normalize_persona_ecology_payload(
+            card,
+            {"payload": payload},
+            provider="codex_cli",
+            model="gpt-5.5",
+            target_fields=["expected_inflation_1y"],
+            date_mode="relative",
+        )
+
+        self.assertIn("period_0", prompt)
+        self.assertIn(display_panel_row_id, prompt)
+        self.assertNotIn("2024:Q4", prompt)
+        self.assertNotIn("2024-11-15", prompt)
+        self.assertNotIn(card.panel_row_id, prompt)
+        self.assertEqual(normalized["panel_row_id"], card.panel_row_id)
+        self.assertEqual(normalized["respondent_id"], card.respondent_id)
+
+    def test_persona_ecology_payload_fails_closed_when_required_behavior_fields_missing(self):
+        panel = build_fixture_ecology_panel(respondent_count=3, period_count=2, survey_start="2026-01")
+        card = build_ecology_cards(panel, target_fields=["expected_inflation_1y"])[0]
+        valid_payload = {
+            "panel_row_id": card.panel_row_id,
+            "respondent_id": card.respondent_id,
+            "beliefs": {
+                "expected_inflation_1y": {
+                    "value": 3.1,
+                    "p10": 2.0,
+                    "p50": 3.1,
+                    "p90": 4.2,
+                }
+            },
+            "actions": {
+                "consumption_change_pct": 0.0,
+                "liquid_buffer_change_pct": 1.0,
+                "borrowing_desire_index": -0.5,
+                "portfolio_rebalance_to_liquid_pct": 0.0,
+                "job_search_intensity_index": 0.0,
+            },
+            "module_weights": {
+                "profile_weight": 0.2,
+                "prior_weight": 0.5,
+                "environment_weight": 0.25,
+                "aggregate_feedback_weight": 0.05,
+            },
+            "confidence": 0.6,
+            "uncertainty": 0.4,
+            "reason": "schema-complete response",
+        }
+        missing_action = json.loads(json.dumps(valid_payload))
+        del missing_action["actions"]["consumption_change_pct"]
+        missing_module_weights = json.loads(json.dumps(valid_payload))
+        del missing_module_weights["module_weights"]
+        missing_confidence = json.loads(json.dumps(valid_payload))
+        del missing_confidence["confidence"]
+        missing_quantile = json.loads(json.dumps(valid_payload))
+        del missing_quantile["beliefs"]["expected_inflation_1y"]["p10"]
+
+        for payload in (missing_action, missing_module_weights, missing_confidence, missing_quantile):
+            with self.assertRaises(LLMUnavailable):
+                normalize_persona_ecology_payload(
+                    card,
+                    {"payload": payload},
+                    provider="codex_cli",
+                    model="gpt-5.5",
+                    target_fields=["expected_inflation_1y"],
+                )
+
+    def test_persona_ecology_relative_date_mode_hides_survey_source_calendar(self):
+        panel = build_fixture_ecology_panel(respondent_count=3, period_count=2, survey_start="2026-01")
+        base = build_ecology_cards(panel, target_fields=["expected_inflation_1y"])[0]
+        card = EcologyCard(
+            panel_row_id=f"{base.respondent_id}__2024:Q4",
+            respondent_id=base.respondent_id,
+            period_id="2024:Q4",
+            period_index=0,
+            survey_source="sce_2024_q4_public_panel",
+            survey_date="2024-11-15",
+            weight=base.weight,
+            profile=base.profile,
+            empirical_priors=base.empirical_priors,
+            environment=base.environment,
+            targets=base.targets,
+        )
+
+        prompt = persona_ecology_prompt(
+            card,
+            target_fields=["expected_inflation_1y"],
+            prior_beliefs={"expected_inflation_1y": card.empirical_priors["expected_inflation_1y"]},
+            environment=card.environment,
+            date_mode="relative",
+        )
+
+        self.assertIn('"survey_source": "survey_panel"', prompt)
+        self.assertNotIn("sce_2024", prompt)
+        self.assertNotIn("2024", prompt)
+        self.assertNotIn("q4", prompt.lower())
+
+    def test_persona_ecology_normalizes_sce_style_aliases_and_lagged_priors(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "userid": "u1",
+                    "yyyymm": "2026-01",
+                    "weight_final": 2.0,
+                    "age": 30,
+                    "hhinc": 40000,
+                    "educ": 12,
+                    "female": 1,
+                    "q9_mean": 4.0,
+                    "unemp_mean": 6.0,
+                    "earnings_mean": 1.0,
+                },
+                {
+                    "userid": "u1",
+                    "yyyymm": "2026-02",
+                    "weight_final": 2.0,
+                    "age": 30,
+                    "hhinc": 40000,
+                    "educ": 12,
+                    "female": 1,
+                    "q9_mean": 5.5,
+                    "unemp_mean": 6.5,
+                    "earnings_mean": 0.5,
+                },
+                {
+                    "userid": "u2",
+                    "yyyymm": "2026-01",
+                    "weight_final": 1.0,
+                    "age": 62,
+                    "hhinc": 180000,
+                    "educ": 18,
+                    "female": 0,
+                    "q9_mean": 2.0,
+                    "unemp_mean": 4.0,
+                    "earnings_mean": 2.0,
+                },
+                {
+                    "userid": "u2",
+                    "yyyymm": "2026-02",
+                    "weight_final": 1.0,
+                    "age": 62,
+                    "hhinc": 180000,
+                    "educ": 18,
+                    "female": 0,
+                    "q9_mean": 2.5,
+                    "unemp_mean": 4.5,
+                    "earnings_mean": 1.5,
+                },
+            ]
+        )
+
+        panel = normalize_ecology_panel(raw, survey_schema="sce")
+        second_u1 = panel[(panel["respondent_id"] == "u1") & (panel["period_index"] == 1)].iloc[0]
+
+        self.assertEqual(panel.shape[0], 4)
+        self.assertAlmostEqual(float(panel[panel["period_index"] == 0]["weight"].sum()), 1.0)
+        self.assertEqual(second_u1["age_group"], "18_34")
+        self.assertEqual(second_u1["education_group"], "high_school_or_less")
+        self.assertAlmostEqual(float(second_u1["prior_expected_inflation_1y"]), 4.0)
+        self.assertAlmostEqual(float(second_u1["actual_expected_inflation_1y"]), 5.5)
+
+    def test_persona_ecology_fixture_runs_dynamic_feedback_and_scores(self):
+        panel = build_fixture_ecology_panel(respondent_count=12, period_count=3, survey_start="2026-01")
+        cards = build_ecology_cards(panel)
+        client = PersonaEcologyClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0)
+
+        predictions, actions, environments, prompts = run_persona_ecology(
+            cards,
+            client,
+            target_fields=["expected_inflation_1y", "expected_unemployment_rate", "expected_real_income_growth"],
+            prior_mode="simulated",
+            feedback_mode="closed_loop",
+        )
+        temporal = score_temporal_dynamics(panel, predictions)
+        behavior = score_behavior_actions(panel, actions)
+        ablations = build_module_ablations(panel)
+        ablation_scores = score_module_ablations(panel, ablations)
+        scoring_panel = panel.copy()
+        scoring_panel["respondent_id"] = scoring_panel["panel_row_id"]
+        scoring_predictions = predictions.copy()
+        scoring_predictions["respondent_id"] = scoring_predictions["panel_row_id"]
+        regression = score_regression_gradient_match(scoring_panel, scoring_predictions)
+        variance = score_variance_flattening(scoring_panel, scoring_predictions)
+        common_core = score_common_core(scoring_predictions)
+        distance = score_distribution_distance(scoring_panel, scoring_predictions)
+        static = classify_persona_evidence(regression, variance, common_core, distance)
+        verdict = classify_ecology_evidence(
+            static,
+            temporal,
+            behavior,
+            environments,
+            {"period_count": 3, "feedback_mode": "closed_loop", "respondent_source": "fixture"},
+        )
+
+        self.assertEqual(predictions.shape[0], panel.shape[0] * 3)
+        self.assertEqual(actions.shape[0], panel.shape[0])
+        self.assertEqual(environments.shape[0], 3)
+        self.assertEqual(len(prompts), panel.shape[0])
+        self.assertFalse(temporal.empty)
+        self.assertFalse(behavior.empty)
+        self.assertFalse(ablation_scores.empty)
+        self.assertIn("ablation_prior_only", set(ablations["source"]))
+        self.assertTrue(environments["aggregate_demand_pressure"].abs().gt(0).any())
+        self.assertEqual(verdict["evidence_verdict"], "fixture_ecology_harness_ready")
+
+    def test_persona_ecology_one_target_closed_loop_keeps_prompt_environment_finite(self):
+        panel = build_fixture_ecology_panel(
+            respondent_count=4,
+            period_count=3,
+            survey_start="2026-01",
+            target_fields=["expected_inflation_1y"],
+        )
+        cards = build_ecology_cards(panel, target_fields=["expected_inflation_1y"])
+        client = PersonaEcologyClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0)
+
+        predictions, actions, environments, prompts = run_persona_ecology(
+            cards,
+            client,
+            target_fields=["expected_inflation_1y"],
+            prior_mode="simulated",
+            feedback_mode="closed_loop",
+            date_mode="relative",
+        )
+        prompt_environments = [row["prompt_payload"]["current_environment"] for row in prompts]
+        period_scores = score_period_levels(panel, predictions, target_fields=["expected_inflation_1y"])
+        update_scores = score_period_updates(panel, predictions, target_fields=["expected_inflation_1y"])
+        action_summary = summarize_period_actions(actions)
+
+        self.assertFalse(predictions.empty)
+        self.assertFalse(environments.empty)
+        self.assertFalse(period_scores.empty)
+        self.assertFalse(update_scores.empty)
+        self.assertFalse(action_summary.empty)
+        for environment in prompt_environments:
+            self.assertFalse(any(value is None for value in environment.values()))
+        self.assertNotIn("aggregate_expected_unemployment_rate", environments.columns)
+        self.assertIn("mean_seen_aggregate_expected_unemployment_rate", environments.columns)
+
+    def test_persona_ecology_simulated_prior_feeds_previous_model_belief(self):
+        panel = build_fixture_ecology_panel(respondent_count=3, period_count=2, survey_start="2026-01")
+        cards = build_ecology_cards(panel, target_fields=["expected_inflation_1y"])
+        client = PersonaEcologyClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0)
+
+        predictions, actions, _environments, _prompts = run_persona_ecology(
+            cards,
+            client,
+            target_fields=["expected_inflation_1y"],
+            prior_mode="simulated",
+            feedback_mode="none",
+        )
+
+        first = predictions[
+            (predictions["respondent_id"] == "fixture_resp_001") & (predictions["period_index"] == 0)
+        ].iloc[0]
+        second = predictions[
+            (predictions["respondent_id"] == "fixture_resp_001") & (predictions["period_index"] == 1)
+        ].iloc[0]
+        empirical_second = panel[
+            (panel["respondent_id"] == "fixture_resp_001") & (panel["period_index"] == 1)
+        ].iloc[0]
+
+        self.assertAlmostEqual(float(second["prior_prediction"]), float(first["prediction"]))
+        self.assertNotAlmostEqual(float(second["prior_prediction"]), float(empirical_second["prior_expected_inflation_1y"]))
+        self.assertEqual(actions["source"].nunique(), 1)
+
+    def test_persona_ecology_cli_fixture_writes_report(self):
+        with TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_ecology",
+                    "--ecology-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5,gpt-5.4",
+                    "--respondent-source",
+                    "fixture",
+                    "--respondent-count",
+                    "8",
+                    "--period-count",
+                    "2",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
+            manifest_text = (Path(temp_dir) / "manifest.json").read_text(encoding="utf-8")
+            report = (Path(temp_dir) / "persona_ecology_report.md").read_text(encoding="utf-8")
+            self.assertEqual(manifest["status"], "ok")
+            self.assertEqual(manifest["ecology_evidence"]["evidence_verdict"], "fixture_ecology_harness_ready")
+            self.assertIn("profile, priors, environment", report)
+            self.assertIn("persona_ecology_period_scores.csv", manifest["outputs"])
+            self.assertIn("persona_ecology_update_scores.csv", manifest["outputs"])
+            self.assertIn("persona_ecology_action_period_summary.csv", manifest["outputs"])
+            self.assertNotIn("NaN", manifest_text)
+            self.assertTrue((Path(temp_dir) / "persona_ecology_period_scores.csv").exists())
+            self.assertTrue((Path(temp_dir) / "persona_ecology_update_scores.csv").exists())
+            self.assertTrue((Path(temp_dir) / "persona_ecology_action_period_summary.csv").exists())
+
+    def test_persona_live_modes_require_fresh_cache_before_calls(self):
+        with TemporaryDirectory() as temp_dir:
+            belief = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_belief_panel",
+                    "--belief-mode",
+                    "live",
+                    "--max-live-calls",
+                    "1",
+                    "--models",
+                    "gpt-5.5",
+                    "--respondent-source",
+                    "fixture",
+                    "--respondent-count",
+                    "1",
+                    "--target-fields",
+                    "expected_inflation_1y",
+                    "--output-dir",
+                    str(Path(temp_dir) / "belief"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            ecology = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_ecology",
+                    "--ecology-mode",
+                    "live",
+                    "--max-live-calls",
+                    "1",
+                    "--models",
+                    "gpt-5.5",
+                    "--respondent-source",
+                    "fixture",
+                    "--respondent-count",
+                    "1",
+                    "--period-count",
+                    "1",
+                    "--target-fields",
+                    "expected_inflation_1y",
+                    "--output-dir",
+                    str(Path(temp_dir) / "ecology"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(belief.returncode, 0)
+            self.assertNotEqual(ecology.returncode, 0)
+            self.assertIn("--fresh-cache is required", belief.stderr)
+            self.assertIn("--fresh-cache is required", ecology.stderr)
+
+    def test_persona_ecology_csv_fixture_anonymizes_and_records_input_manifest(self):
+        with TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "holdout.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "respondent_id": "real_person_1",
+                        "period_id": "2026-01",
+                        "weight": 2.0,
+                        "age_group": "35_54",
+                        "income_group": "middle",
+                        "education_group": "college_plus",
+                        "gender": "female",
+                        "region": "northeast",
+                        "employment_status": "employed",
+                        "homeownership": "owner",
+                        "liquid_wealth_group": "middle",
+                        "actual_expected_inflation_1y": 3.2,
+                        "actual_consumption_change_pct": 0.4,
+                    },
+                    {
+                        "respondent_id": "real_person_1",
+                        "period_id": "2026-02",
+                        "weight": 2.0,
+                        "age_group": "35_54",
+                        "income_group": "middle",
+                        "education_group": "college_plus",
+                        "gender": "female",
+                        "region": "northeast",
+                        "employment_status": "employed",
+                        "homeownership": "owner",
+                        "liquid_wealth_group": "middle",
+                        "actual_expected_inflation_1y": 3.7,
+                        "actual_consumption_change_pct": 0.2,
+                    },
+                    {
+                        "respondent_id": "real_person_2",
+                        "period_id": "2026-01",
+                        "weight": 1.0,
+                        "age_group": "55_plus",
+                        "income_group": "high",
+                        "education_group": "college_plus",
+                        "gender": "male",
+                        "region": "west",
+                        "employment_status": "retired",
+                        "homeownership": "owner",
+                        "liquid_wealth_group": "high",
+                        "actual_expected_inflation_1y": 2.4,
+                        "actual_consumption_change_pct": -0.1,
+                    },
+                    {
+                        "respondent_id": "real_person_2",
+                        "period_id": "2026-02",
+                        "weight": 1.0,
+                        "age_group": "55_plus",
+                        "income_group": "high",
+                        "education_group": "college_plus",
+                        "gender": "male",
+                        "region": "west",
+                        "employment_status": "retired",
+                        "homeownership": "owner",
+                        "liquid_wealth_group": "high",
+                        "actual_expected_inflation_1y": 2.6,
+                        "actual_consumption_change_pct": -0.2,
+                    },
+                ]
+            ).to_csv(csv_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_ecology",
+                    "--ecology-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5",
+                    "--respondent-source",
+                    "csv",
+                    "--survey-schema",
+                    "normalized",
+                    "--respondent-csv",
+                    str(csv_path),
+                    "--respondent-limit",
+                    "1",
+                    "--target-fields",
+                    "expected_inflation_1y",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
+            prompt_cards = (Path(temp_dir) / "persona_ecology_prompt_cards.jsonl").read_text(encoding="utf-8")
+            panel = pd.read_csv(Path(temp_dir) / "persona_ecology_panel.csv")
+            self.assertEqual(manifest["respondent_input"]["source"], "csv")
+            self.assertEqual(manifest["respondent_input"]["raw_row_count"], 4)
+            self.assertEqual(manifest["respondent_input"]["normalized_respondent_count"], 1)
+            self.assertTrue(manifest["respondent_input"]["respondent_ids_anonymized"])
+            self.assertEqual(manifest["behavior_target_source"], "external_csv_targets")
+            self.assertNotIn("real_person", prompt_cards)
+            self.assertEqual(set(panel["respondent_id"]), {"respondent_00001"})
+
+    def test_prepare_persona_holdouts_uses_vintage_environment_and_marks_synthetic(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            survey_path = temp_path / "survey.csv"
+            origins_path = temp_path / "origins.csv"
+            vintage_path = temp_path / "vintage.csv"
+            output_dir = temp_path / "out"
+            pd.DataFrame(
+                [
+                    {
+                        "survey_source": "ny_fed_sce",
+                        "target_name": "median_expected_inflation",
+                        "date": "2024-11-01",
+                        "horizon_months": 12,
+                        "value": 3.4,
+                        "units": "percent",
+                        "source_url": "local",
+                    },
+                    {
+                        "survey_source": "ny_fed_sce",
+                        "target_name": "p25_expected_inflation",
+                        "date": "2024-11-01",
+                        "horizon_months": 12,
+                        "value": 2.1,
+                        "units": "percent",
+                        "source_url": "local",
+                    },
+                    {
+                        "survey_source": "ny_fed_sce",
+                        "target_name": "p75_expected_inflation",
+                        "date": "2024-11-01",
+                        "horizon_months": 12,
+                        "value": 5.2,
+                        "units": "percent",
+                        "source_url": "local",
+                    },
+                    {
+                        "survey_source": "ny_fed_sce",
+                        "target_name": "median_inflation_uncertainty",
+                        "date": "2024-11-01",
+                        "horizon_months": 12,
+                        "value": 2.2,
+                        "units": "percent",
+                        "source_url": "local",
+                    },
+                ]
+            ).to_csv(survey_path, index=False)
+            pd.DataFrame(
+                [
+                    {"origin": "2024:Q4", "as_of_date": "2024-11-15", "split": "test"},
+                    {"origin": "2025:Q1", "as_of_date": "2025-02-15", "split": "test"},
+                ]
+            ).to_csv(origins_path, index=False)
+            rows = []
+            for origin, as_of, latest_cpi, latest_gdp in [
+                ("2024:Q4", "2024-11-15", 309.0, 23000.0),
+                ("2025:Q1", "2025-02-15", 311.0, 23100.0),
+            ]:
+                for date, cpi, gdp in [
+                    ("2023-11-01", 300.0, 22500.0),
+                    ("2024-11-01", latest_cpi, latest_gdp),
+                ]:
+                    rows.append(
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "CPIAUCSL",
+                            "label": "CPI level",
+                            "observation_date": date,
+                            "value": cpi,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        }
+                    )
+                    rows.append(
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "GDPC1",
+                            "label": "Real GDP",
+                            "observation_date": date,
+                            "value": gdp,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        }
+                    )
+                rows.extend(
+                    [
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "UNRATE",
+                            "label": "Unemployment",
+                            "observation_date": "2024-11-01",
+                            "value": 4.2,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        },
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "FEDFUNDS",
+                            "label": "Fed funds",
+                            "observation_date": "2024-11-01",
+                            "value": 4.8,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        },
+                    ]
+                )
+            pd.DataFrame(rows).to_csv(vintage_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.prepare_persona_holdouts",
+                    "--survey-beliefs",
+                    str(survey_path),
+                    "--forecast-origins",
+                    str(origins_path),
+                    "--fred-vintage-context",
+                    str(vintage_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--respondent-count",
+                    "4",
+                    "--period-count",
+                    "2",
+                    "--start-as-of",
+                    "2024-10-01",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            static = pd.read_csv(output_dir / "sce_micro_holdout.csv")
+            panel = pd.read_csv(output_dir / "sce_panel_holdout.csv")
+            manifest = json.loads((output_dir / "persona_holdout_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(static.shape[0], 4)
+            self.assertEqual(panel.shape[0], 8)
+            self.assertEqual(manifest["panel_kind"], "synthetic_enriched_sce_vintage_v1")
+            self.assertTrue(panel["target_provenance"].str.contains("synthetic").all())
+            self.assertIn("observed_inflation_1y", panel)
+            self.assertEqual(panel["period_id"].nunique(), 2)
+
     def test_agent_economy_same_origin_cards_share_prior_state(self):
         cards = build_forecast_cards(
             spf_fixture(),
@@ -1191,6 +2245,82 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(fake_responses.last_kwargs["model"], "gpt-5")
         self.assertEqual(fake_responses.last_kwargs["reasoning"], {"effort": "low"})
 
+    def test_openai_responses_retries_malformed_json_without_caching_bad_payload(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=1,
+        )
+
+        class FakeResponse:
+            id = "resp_retry"
+            status = "completed"
+            model = "gpt-5"
+            usage = {"total_tokens": 123}
+
+            def __init__(self, output_text):
+                self.output_text = output_text
+
+        class FakeResponses:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return FakeResponse('{"point_forecast": 2.0')
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "point_forecast": 2.0,
+                            "p10": 1.0,
+                            "p50": 2.0,
+                            "p90": 3.0,
+                            "confidence": 0.5,
+                            "forecaster_draws": [
+                                {"forecaster_id": f"x{idx}", "forecast": 2.0 + idx * 0.01}
+                                for idx in range(8)
+                            ],
+                        }
+                    )
+                )
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.responses = fake_responses
+
+        fake_responses = FakeResponses()
+        with TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"OPENAI_API_KEY": "sk-test", "LLM_JSON_ATTEMPTS": "2"},
+            clear=False,
+        ):
+            client = ForecastLLMClient("openai_responses", "gpt-5", Path(tmp), mode="live", max_live_calls=2)
+            with patch("macro_llm_tournament.forecast_llm.OpenAI", FakeOpenAI):
+                first = client.forecast_card(cards[0])
+                cached = client.forecast_card(cards[0])
+
+            cache_files = list((Path(tmp) / "openai_responses").glob("*.json"))
+
+        self.assertEqual(fake_responses.calls, 2)
+        self.assertEqual(client.live_call_count, 2)
+        self.assertEqual(client.cache_hit_count, 1)
+        self.assertEqual(len(cache_files), 1)
+        self.assertEqual(first["payload"]["point_forecast"], 2.0)
+        self.assertEqual(first["json_attempt"], 2)
+        self.assertTrue(cached["cache_hit"])
+
+    def test_forecast_json_parser_rejects_prose_wrapped_payloads(self):
+        self.assertEqual(_extract_json('{"point_forecast": 2.0}'), {"point_forecast": 2.0})
+        self.assertEqual(_extract_json('```json\n{"point_forecast": 2.0}\n```'), {"point_forecast": 2.0})
+        with self.assertRaises(ValueError):
+            _extract_json('Here is the JSON: {"point_forecast": 2.0}')
+        with self.assertRaises(ValueError):
+            _extract_json('{"point_forecast": 2.0}\nDone.')
+
     def test_openai_responses_direct_recall_provider_uses_shared_router(self):
         prompt = json.dumps(
             {
@@ -1296,6 +2426,95 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(calls[0]["env"]["GEMINI_DEFAULT_AUTH_TYPE"], "gemini-api-key")
         self.assertTrue(calls[0]["env"]["GEMINI_CLI_SYSTEM_SETTINGS_PATH"].endswith("system_settings.json"))
         self.assertIn("Return only valid JSON", calls[0]["input"])
+
+    def test_antigravity_cli_forecast_provider_uses_agy_and_retries_malformed_json(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=1,
+        )
+        response_payload = {
+            "point_forecast": 2.0,
+            "p10": 1.0,
+            "p50": 2.0,
+            "p90": 3.0,
+            "confidence": 0.5,
+            "forecaster_draws": [
+                {"forecaster_id": f"x{idx}", "forecast": 2.0 + idx * 0.01}
+                for idx in range(8)
+            ],
+        }
+        calls = []
+
+        def fake_run(command, text, capture_output, cwd, timeout, check, env):
+            calls.append(
+                {
+                    "command": command,
+                    "cwd": cwd,
+                    "env": env,
+                    "settings_model": json.loads(settings_path.read_text())["model"],
+                }
+            )
+            log_path = Path(command[command.index("--log-file") + 1])
+            log_path.write_text(
+                'I0000 model.go: Propagating selected model override to backend: label="Gemini 3.1 Pro (High)"',
+                encoding="utf-8",
+            )
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout='{"point_forecast": 2.0', stderr="")
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=json.dumps(response_payload), stderr="")
+
+        with TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {
+                "ANTIGRAVITY_CLI_BIN": "/tmp/agy",
+                "LLM_JSON_ATTEMPTS": "2",
+            },
+            clear=False,
+        ):
+            execution_cwd = Path(tmp) / "isolated"
+            settings_path = Path(tmp) / "antigravity" / "settings.json"
+            lock_path = Path(tmp) / "antigravity" / "lock"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(json.dumps({"model": "Gemini 3.5 Flash (Medium)"}), encoding="utf-8")
+            client = ForecastLLMClient(
+                "antigravity_cli",
+                "gemini-3.1-pro-preview",
+                Path(tmp) / "cache",
+                mode="live",
+                max_live_calls=2,
+                execution_cwd=execution_cwd,
+            )
+            with (
+                patch("macro_llm_tournament.forecast_llm.ANTIGRAVITY_SETTINGS_PATH", settings_path),
+                patch("macro_llm_tournament.forecast_llm.ANTIGRAVITY_SETTINGS_LOCK_PATH", lock_path),
+                patch("macro_llm_tournament.forecast_llm.subprocess.run", side_effect=fake_run),
+            ):
+                first = client.forecast_card(cards[0])
+                cached = client.forecast_card(cards[0])
+
+            cache_files = list((Path(tmp) / "cache" / "antigravity_cli").glob("*.json"))
+            restored_settings = json.loads(settings_path.read_text())
+
+        self.assertEqual(client.live_call_count, 2)
+        self.assertEqual(client.cache_hit_count, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(cache_files), 1)
+        self.assertEqual(first["payload"]["point_forecast"], 2.0)
+        self.assertEqual(first["json_attempt"], 2)
+        self.assertEqual(first["provider_model_arg"], "gemini-3.1-pro")
+        self.assertEqual(first["provider_actual_label"], "Gemini 3.1 Pro (High)")
+        self.assertTrue(cached["cache_hit"])
+        self.assertNotIn("--model", calls[0]["command"])
+        self.assertEqual(calls[0]["settings_model"], "Gemini 3.1 Pro (High)")
+        self.assertEqual(restored_settings["model"], "Gemini 3.5 Flash (Medium)")
+        self.assertIn("--dangerously-skip-permissions", calls[0]["command"])
+        self.assertEqual(calls[0]["command"][calls[0]["command"].index("--sandbox") + 1], "read-only")
+        self.assertEqual(calls[0]["cwd"], str(execution_cwd.resolve()))
+        self.assertIn("Return only valid JSON", calls[0]["command"][calls[0]["command"].index("--print") + 1])
 
     def test_spf_download_link_extractor_preserves_xlsx_urls(self):
         page_url = "https://www.philadelphiafed.org/surveys-and-data/data-files/cpi"

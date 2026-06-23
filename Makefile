@@ -1,4 +1,4 @@
-.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -55,6 +55,48 @@ behavior-fixture:
 		--behavior-mode fixture \
 		--max-live-calls 0 \
 		--output-dir outputs/behavior_gate_fixture
+
+persona-holdouts:
+	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_persona_holdouts \
+		--respondent-count 36 \
+		--period-count 3 \
+		--start-as-of 2024-10-01 \
+		--output-dir work/persona_beliefs
+
+persona-belief-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.persona_belief_panel \
+		--belief-mode fixture \
+		--max-live-calls 0 \
+		--models gpt-5.5,gpt-5.4 \
+		--respondent-source fixture \
+		--respondent-count 54 \
+		--output-dir outputs/persona_belief_panel_fixture
+
+persona-ecology-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
+		--ecology-mode fixture \
+		--max-live-calls 0 \
+		--models gpt-5.5,gpt-5.4 \
+		--respondent-source fixture \
+		--respondent-count 60 \
+		--period-count 4 \
+		--prior-mode simulated \
+		--feedback-mode closed_loop \
+		--output-dir outputs/persona_ecology_fixture
+
+persona-ecology-relative-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
+		--ecology-mode fixture \
+		--max-live-calls 0 \
+		--models gpt-5.5 \
+		--respondent-source fixture \
+		--respondent-count 6 \
+		--period-count 3 \
+		--target-fields expected_inflation_1y \
+		--prior-mode simulated \
+		--feedback-mode closed_loop \
+		--date-mode relative \
+		--output-dir outputs/persona_ecology_fixture_relative_gate
 
 postcutoff-behavior-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_behavior_gate \
