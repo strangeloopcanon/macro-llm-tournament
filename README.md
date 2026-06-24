@@ -373,7 +373,7 @@ The fixture run spends zero model calls and validates the lab before live canari
 
 Validation is dynamic rather than a single-path fit: baseline steady state, transfer-shock aggregate MPC, MPC gradients by liquidity and income, monetary-shock consumption/output/employment/inflation responses, precautionary response to job-risk news before income moves, belief-feedback amplification, belief dispersion, and per-period accounting identities.
 
-Run a live belief-module sweep after the fixture gate passes:
+Run a full live belief-module sweep after the fixture gate passes:
 
 ```bash
 LLM_JSON_ATTEMPTS=1 CODEX_CLI_TIMEOUT_SECONDS=300 PYTHONPATH=src \
@@ -384,16 +384,18 @@ python3 -m macro_llm_tournament.demand_economy \
   --fresh-cache \
   --max-live-calls 100 \
   --household-source fixture \
-  --household-count 6 \
+  --household-count 12 \
   --period-count 20 \
   --variants representative,adaptive,llm_belief,naive_persona \
   --fixture-variants naive_persona \
   --feedback-mode closed_loop \
   --scenarios baseline,transfer_shock,rate_hike,job_risk_shock,belief_feedback \
-  --output-dir outputs/demand_economy_live_gpt55_p20_6cell
+  --output-dir outputs/demand_economy_live_gpt55_p20_12cell_full_v4
 ```
 
 `--fixture-variants naive_persona` keeps the intentionally bad direct-action baseline in the comparison table without spending live calls on it. The live comparison should be read from `demand_economy_report.md`: the LLM belief module is the actor under test, the adaptive and representative rows are structural baselines, and the naive persona row is a mechanical seed-echo stress test rather than a belief-forecasting baseline.
+
+Current verified live result: the 12-cell, 20-period, five-scenario GPT-5.5 run in `outputs/demand_economy_live_gpt55_p20_12cell_full_v4` returns `hank_lite_belief_lab_ready`. The LLM belief module passes all 19 validation metrics, clears all 54 required metrics across the ablation surface, holds accounting to numerical tolerance, and is the only variant in that run to pass belief-feedback amplification while preserving transfer MPC, liquidity/income MPC gradients, monetary-shock contraction, and job-risk precaution.
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 

@@ -1029,6 +1029,45 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertLess(float(metrics["rate_hike_mean_consumption_delta_6p"]), 0.0)
             self.assertGreater(float(metrics["belief_feedback_amplification_ratio"]), 1.1)
 
+    def test_demand_economy_subset_scenarios_do_not_clear_full_lab_gate(self):
+        validation = pd.DataFrame(
+            [
+                {
+                    "source": variant,
+                    "variant": variant,
+                    "metric": metric,
+                    "value": 1.0,
+                    "target_low": 0.0,
+                    "target_high": 2.0,
+                    "passed": True,
+                    "required": True,
+                }
+                for variant in ["representative", "adaptive", "llm_belief", "naive_persona"]
+                for metric in [
+                    "baseline_no_shock_output_gap_rms",
+                    "steady_state_final_output_gap_abs",
+                    "transfer_impact_mpc",
+                    "transfer_cumulative_mpc_4p",
+                    "belief_feedback_amplification_ratio",
+                    "max_accounting_abs_residual",
+                ]
+            ]
+        )
+        ablations = pd.DataFrame(
+            {
+                "variant": ["representative", "adaptive", "llm_belief", "naive_persona"],
+                "source": ["representative", "adaptive", "llm_belief", "naive_persona"],
+            }
+        )
+        evidence = classify_demand_economy_evidence(validation, ablations, mode="fixture")
+
+        self.assertEqual(evidence["evidence_verdict"], "hank_lite_metrics_pass_but_scenario_incomplete")
+        self.assertFalse(evidence["full_lab_passed"])
+        self.assertFalse(evidence["passed"])
+        self.assertFalse(evidence["full_lab_metric_surface_present"])
+        self.assertIn("rate_hike_mean_consumption_delta_6p", evidence["missing_full_lab_metrics"])
+        self.assertIn("job_risk_impact_consumption_delta", evidence["missing_full_lab_metrics"])
+
     def test_demand_economy_fixture_subsample_keeps_cross_sectional_cells(self):
         households = build_fixture_demand_households(6)
 
@@ -1064,6 +1103,8 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn("5 means normal precaution", prompt_text)
         self.assertIn("recently absorbed liquid buffer improvement", prompt_text)
         self.assertIn("elevated macro-feedback regime", prompt_text)
+        self.assertIn("Only in normal macro_feedback_regime", prompt_text)
+        self.assertIn("transfer-driven policy response", prompt_text)
 
         with TemporaryDirectory() as temp_dir:
             client = DemandEconomyClient("codex_cli", "gpt-5.5", Path(temp_dir), mode="fixture", max_live_calls=0)

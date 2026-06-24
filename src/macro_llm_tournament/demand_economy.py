@@ -19,7 +19,7 @@ from .llm_common import LLMUnavailable
 
 
 DEMAND_ECONOMY_VERSION = "hank_lite_belief_demand_economy_v2"
-DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v2"
+DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v4"
 NAIVE_PERSONA_PROMPT_VERSION = "hank_lite_naive_persona_direct_consumption_v1"
 BELIEF_MODES = ("fixture", "replay", "live")
 FEEDBACK_MODES = ("closed_loop", "none")
@@ -28,6 +28,27 @@ LLM_VARIANTS = {"llm_belief", "naive_persona"}
 NEUTRAL_POLICY_RATE = 3.0
 INFLATION_TARGET = 2.0
 STEADY_EMPLOYMENT_RATE = 0.955
+FULL_LAB_LLM_METRICS = {
+    "baseline_no_shock_output_gap_rms",
+    "belief_feedback_amplification_ratio",
+    "belief_inflation_dispersion_p1",
+    "high_liquidity_impact_mpc",
+    "income_mpc_gradient",
+    "job_risk_impact_consumption_delta",
+    "job_risk_impact_income_delta_abs",
+    "liquidity_mpc_gradient",
+    "low_liquidity_impact_mpc",
+    "max_accounting_abs_residual",
+    "rate_hike_late_inflation_delta",
+    "rate_hike_mean_consumption_delta_6p",
+    "rate_hike_mean_employment_delta_6p",
+    "rate_hike_mean_output_gap_delta_6p",
+    "steady_state_final_output_gap_abs",
+    "steady_state_tail_inflation_range",
+    "steady_state_tail_output_gap_range",
+    "transfer_cumulative_mpc_4p",
+    "transfer_impact_mpc",
+}
 
 
 @dataclass(frozen=True)
@@ -669,6 +690,8 @@ def belief_module_prompt_payload(
             "Under elevated dispersion or elevated macro-feedback conditions, preserve wider cross-cell belief differences and let fragile cells react more strongly.",
             "In an elevated macro-feedback regime, persistently weak output, lower employment, falling confidence, or rising job-risk beliefs should reinforce cautious beliefs; do not mean-revert fragile cells until the supplied current_environment improves.",
             "A current or recently absorbed liquid buffer improvement is balance-sheet information, not bad news. For low-liquidity cells, higher liquid_buffer_months after a cash-flow gain should usually reduce near-term precaution or sustain confidence for several periods unless job-risk or employment signals deteriorate.",
+            "Only in normal macro_feedback_regime with no active current shock: when output_gap_pct is already clearly positive, avoid extrapolating the expansion into steadily higher income expectations or steadily lower precaution; mean-revert toward the cell's survey-style priors.",
+            "After a transfer-driven policy response, do not treat policy_rate above neutral by itself as a job-risk or confidence shock when employment, output, and job-risk news are stable; low-liquidity cells can retain part of the recent buffer relief for a few relative periods.",
             "Treat precautionary_saving_score as a within-cell deviation index: 5 means normal precaution for that cell at its supplied prior state.",
             "Do not assign very low precaution merely because a cell has high liquid assets; only move below 5 when current abstract conditions improve versus that cell's own prior state.",
             "When output is only mildly above steady state and policy is responding, expected income growth should mean-revert toward the supplied prior rather than drift upward; do not convert temporary policy response after a cash transfer into a job-security scare by itself.",
@@ -1284,9 +1307,21 @@ def classify_demand_economy_evidence(validation: pd.DataFrame, ablations: pd.Dat
     required_variants = {"representative", "adaptive", "llm_belief", "naive_persona"}
     present_variants = set(ablations["variant"].astype(str)) if not ablations.empty and "variant" in ablations else set()
     all_required_present = required_variants.issubset(present_variants)
+    if {"variant", "metric"}.issubset(validation.columns):
+        llm_rows = validation["variant"].astype(str) == "llm_belief"
+        llm_metrics = set(validation.loc[llm_rows, "metric"].astype(str))
+    else:
+        llm_metrics = set()
+    missing_full_lab_metrics = sorted(FULL_LAB_LLM_METRICS - llm_metrics)
+    full_lab_metric_surface_present = not missing_full_lab_metrics
     all_passed = bool(passed.all())
-    canary_passed = bool(all_passed and mode == "live" and "llm_belief" in present_variants and not all_required_present)
-    full_lab_passed = bool(all_passed and all_required_present)
+    canary_passed = bool(
+        all_passed
+        and mode == "live"
+        and "llm_belief" in present_variants
+        and (not all_required_present or not full_lab_metric_surface_present)
+    )
+    full_lab_passed = bool(all_passed and all_required_present and full_lab_metric_surface_present)
     if full_lab_passed:
         verdict = "hank_lite_belief_lab_ready"
         if mode == "fixture":
@@ -1294,6 +1329,8 @@ def classify_demand_economy_evidence(validation: pd.DataFrame, ablations: pd.Dat
     elif all_passed:
         if mode == "live" and "llm_belief" in present_variants:
             verdict = "live_hank_lite_belief_canary_ready"
+        elif not full_lab_metric_surface_present:
+            verdict = "hank_lite_metrics_pass_but_scenario_incomplete"
         else:
             verdict = "hank_lite_metrics_pass_but_ablation_incomplete"
     else:
@@ -1308,6 +1345,8 @@ def classify_demand_economy_evidence(validation: pd.DataFrame, ablations: pd.Dat
         "passed_metric_count": int(validation["passed"].astype(bool).sum()),
         "metric_count": int(validation.shape[0]),
         "required_variants_present": all_required_present,
+        "full_lab_metric_surface_present": full_lab_metric_surface_present,
+        "missing_full_lab_metrics": missing_full_lab_metrics,
         "present_variants": sorted(present_variants),
         "failed_required_metrics": required_validation.loc[
             ~passed, ["source", "variant", "metric", "value", "target_low", "target_high"]
@@ -2333,7 +2372,7 @@ def _demand_bottom_line(
 ) -> str:
     evidence = manifest.get("evidence", {})
     verdict = evidence.get("evidence_verdict", "unknown")
-    if failed.empty and evidence.get("required_variants_present"):
+    if failed.empty and evidence.get("required_variants_present") and evidence.get("full_lab_metric_surface_present"):
         llm = _variant_summary_row(ablations, belief_targets, "llm_belief")
         adaptive = _variant_summary_row(ablations, belief_targets, "adaptive")
         representative = _variant_summary_row(ablations, belief_targets, "representative")
@@ -2362,6 +2401,15 @@ def _demand_bottom_line(
         return (
             f"`{verdict}`. The HANK-lite demand economy clears accounting, steady-state, transfer, monetary, "
             "job-risk, feedback, and ablation-coverage checks."
+        )
+    if failed.empty and not evidence.get("full_lab_metric_surface_present", True):
+        missing = evidence.get("missing_full_lab_metrics", [])
+        missing_text = ", ".join(str(metric) for metric in missing[:4])
+        if len(missing) > 4:
+            missing_text += f", plus {len(missing) - 4} more"
+        return (
+            f"`{verdict}`. The metrics included in this run pass, accounting identities hold, and the ablation "
+            f"surface is present, but this is not the full lab gate because missing metrics remain: {missing_text}."
         )
     if failed.empty:
         return f"`{verdict}`. Dynamic metrics pass, but the ablation surface is incomplete."
