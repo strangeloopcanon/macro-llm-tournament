@@ -395,7 +395,7 @@ python3 -m macro_llm_tournament.demand_economy \
 
 `--fixture-variants naive_persona` keeps the intentionally bad direct-action baseline in the comparison table without spending live calls on it. The live comparison should be read from `demand_economy_report.md`: the LLM belief module is the actor under test, the adaptive and representative rows are structural baselines, and the naive persona row is a mechanical seed-echo stress test rather than a belief-forecasting baseline.
 
-Current verified live result: the 12-cell, 20-period, five-scenario GPT-5.5 run in `outputs/demand_economy_live_gpt55_p20_12cell_full_v4` returns `hank_lite_belief_lab_ready`. The LLM belief module passes all 19 validation metrics, clears all 54 required metrics across the ablation surface, holds accounting to numerical tolerance, and is the only variant in that run to pass belief-feedback amplification while preserving transfer MPC, liquidity/income MPC gradients, monetary-shock contraction, and job-risk precaution.
+Current verified live result: the 12-cell, 20-period, five-scenario GPT-5.5 run in `outputs/demand_economy_live_gpt55_p20_12cell_full_v4` returns `hank_lite_belief_lab_ready`. The LLM belief module passes all 19 validation metrics, clears all 54 required metrics across the ablation surface, holds accounting to numerical tolerance, and is the only variant in that run to pass belief-feedback amplification while preserving transfer MPC, liquidity/income MPC gradients, monetary-shock contraction, and job-risk precaution. A sendable summary is in [`reports/hank_lite_belief_demand_economy_report.md`](reports/hank_lite_belief_demand_economy_report.md).
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 
