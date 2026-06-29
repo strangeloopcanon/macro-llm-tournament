@@ -30,6 +30,7 @@ macro-llm-prepare-persona-holdouts = "macro_llm_tournament.prepare_persona_holdo
 macro-llm-persona-belief-panel = "macro_llm_tournament.persona_belief_panel:main"
 macro-llm-persona-ecology = "macro_llm_tournament.persona_ecology:main"
 macro-llm-demand-economy = "macro_llm_tournament.demand_economy:main"
+macro-llm-macro-validity = "macro_llm_tournament.macro_validity:main"
 macro-llm-postcutoff-behavior-gate = "macro_llm_tournament.postcutoff_behavior_gate:main"
 macro-llm-forecast-audit = "macro_llm_tournament.forecast_audit:main"
 

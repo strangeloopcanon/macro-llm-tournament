@@ -1,4 +1,4 @@
-.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture demand-economy-fixture postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture demand-economy-fixture demand-economy-live-replay macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -100,14 +100,38 @@ persona-ecology-relative-fixture:
 
 demand-economy-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
-		--decision-mode fixture \
+		--belief-mode fixture \
 		--max-live-calls 0 \
 		--models gpt-5.5 \
 		--household-source fixture \
-		--household-count 6 \
-		--period-count 8 \
+		--household-count 24 \
+		--period-count 100 \
+		--variants representative,adaptive,llm_belief,naive_persona \
 		--feedback-mode closed_loop \
 		--output-dir outputs/demand_economy_fixture
+
+demand-economy-live-replay:
+	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
+		--provider codex_cli \
+		--models gpt-5.5 \
+		--belief-mode raw_replay \
+		--raw-records-json outputs/demand_economy_live_gpt55_p20_12cell_full_v4/demand_raw_records.json \
+		--max-live-calls 0 \
+		--household-source fixture \
+		--household-count 12 \
+		--period-count 20 \
+		--variants representative,adaptive,llm_belief,naive_persona \
+		--fixture-variants naive_persona \
+		--feedback-mode closed_loop \
+		--scenarios baseline,transfer_shock,rate_hike,job_risk_shock,belief_feedback \
+		--output-dir outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
+
+macro-validity-scorecard: demand-economy-live-replay
+	PYTHONPATH=src python3 -m macro_llm_tournament.macro_validity \
+		--demand-run-dir outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5 \
+		--vintage-panel-dir work/fred_vintage_panel \
+		--output-dir outputs/macro_validity_scorecard \
+		--report-path reports/macro_validity_scorecard_report.md
 
 postcutoff-behavior-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_behavior_gate \

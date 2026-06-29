@@ -18,7 +18,7 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against a packaged public stimulus-response target catalog for aggregate MPC, liquidity gradients, debt repayment, liquid saving, directional debt/saving gradients by liquidity, and cell-level MPC-by-liquidity targets; unverified direct-target gaps stay unscored.
 - `src/macro_llm_tournament/persona_belief_panel.py` runs data-grounded persona belief panels and scores cross-sectional gradients, within-group spread, distribution distance, and common-core correlation.
 - `src/macro_llm_tournament/persona_ecology.py` runs respondent-seeded belief ecologies with profile, prior-expectation, external-information, behavior, and aggregate-feedback modules.
-- `src/macro_llm_tournament/demand_economy.py` runs the abstract behavior-based demand economy: households choose consume-vs-save parameters, aggregate demand feeds output, employment, income, sticky inflation, and policy, then that state feeds the next period.
+- `src/macro_llm_tournament/demand_economy.py` runs the abstract HANK-lite demand economy: household belief modules form inflation, income, job-risk, confidence, and precautionary-saving beliefs; deterministic structural code converts those beliefs into budget-constrained consumption, aggregate demand, output, employment, sticky inflation, and policy feedback.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
 
 ## Quick start
@@ -356,17 +356,54 @@ Run the abstract, date-free behavior demand economy:
 
 ```bash
 PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
-  --decision-mode fixture \
+  --belief-mode fixture \
   --max-live-calls 0 \
   --models gpt-5.5 \
   --household-source fixture \
-  --household-count 6 \
-  --period-count 8 \
+  --household-count 24 \
+  --period-count 100 \
+  --variants representative,adaptive,llm_belief,naive_persona \
   --feedback-mode closed_loop \
   --output-dir outputs/demand_economy_fixture
 ```
 
-This is the first behavior-based macro gate. The economy has one good, no capital, survey-style household types choosing consume-vs-save behavior each period, aggregate demand feeding output, employment, income, sticky inflation, and a Taylor-rule policy rate, and that macro state feeding the next household decision. Validation is dynamic: transfer-shock MPC, liquidity-gradient MPC, monetary-shock consumption response, no-shock belief-feedback amplification, and accounting identities every period. The fixture mode spends zero model calls and proves the harness; live mode reuses the same strict household-decision payload for LLM actors.
+This is the first behavior-based macro gate. The economy has one good, no capital, a liquid safe-asset buffer, survey-style household cells, aggregate demand feeding output, employment, income, sticky inflation, and a Taylor-rule policy rate. The LLM-facing variant is deliberately a belief module: it predicts beliefs only. The code owns budgets, consumption, saving, aggregation, feedback, and accounting.
+
+The fixture run spends zero model calls and validates the lab before live canaries. It emits four variants: a representative-agent baseline, an adaptive heterogeneous baseline, the main belief-module architecture, and a naive direct consume-vs-save persona baseline. The required gate is the main belief architecture plus accounting and stability coverage across the baselines. Optional ablation misses remain in the report because they are evidence: the representative agent should lack HANK-style heterogeneity, and the naive persona baseline should fail some transfer-gradient checks.
+
+Validation is dynamic rather than a single-path fit: baseline steady state, transfer-shock aggregate MPC, MPC gradients by liquidity and income, monetary-shock consumption/output/employment/inflation responses, precautionary response to job-risk news before income moves, belief-feedback amplification, belief dispersion, and per-period accounting identities.
+
+Run a full live belief-module sweep after the fixture gate passes:
+
+```bash
+LLM_JSON_ATTEMPTS=1 CODEX_CLI_TIMEOUT_SECONDS=300 PYTHONPATH=src \
+python3 -m macro_llm_tournament.demand_economy \
+  --provider codex_cli \
+  --models gpt-5.5 \
+  --belief-mode live \
+  --fresh-cache \
+  --max-live-calls 100 \
+  --household-source fixture \
+  --household-count 12 \
+  --period-count 20 \
+  --variants representative,adaptive,llm_belief,naive_persona \
+  --fixture-variants naive_persona \
+  --feedback-mode closed_loop \
+  --scenarios baseline,transfer_shock,rate_hike,job_risk_shock,belief_feedback \
+  --output-dir outputs/demand_economy_live_gpt55_p20_12cell_full_v4
+```
+
+`--fixture-variants naive_persona` keeps the intentionally bad direct-action baseline in the comparison table without spending live calls on it. The live comparison should be read from `demand_economy_report.md`: the LLM belief module is the actor under test, the adaptive and representative rows are structural baselines, and the naive persona row is a mechanical seed-echo stress test rather than a belief-forecasting baseline.
+
+Current verified live result: the 12-cell, 20-period, five-scenario GPT-5.5 run in `outputs/demand_economy_live_gpt55_p20_12cell_full_v4` returns `hank_lite_belief_lab_ready`. The LLM belief module passes all 19 validation metrics, clears all 54 required metrics across the ablation surface, holds accounting to numerical tolerance, and is the only variant in that run to pass belief-feedback amplification while preserving transfer MPC, liquidity/income MPC gradients, monetary-shock contraction, and job-risk precaution.
+
+Replay the verified GPT-5.5 belief payloads through the current demand-economy mechanisms and run the macro-validity bridge scorecard:
+
+```bash
+make macro-validity-scorecard
+```
+
+This writes `outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5/`, `outputs/macro_validity_scorecard/`, and a tracked readable copy at [`reports/macro_validity_scorecard_report.md`](reports/macro_validity_scorecard_report.md). The replay spends zero new LLM calls: it uses the prior GPT-5.5 live belief payloads and reruns the deterministic structural economy. The current mechanism layer includes transfer windfall allocation across consumption, debt repayment, and liquid saving; debt-stock accounting; decaying buffer-relief support; and gradual rate pass-through. The scorecard separates three gates: micro behavior evidence, scenario-minus-baseline impulse-response shape, and vintage out-of-sample readiness. Vintage as-of context coverage is not counted as actual OOS performance until a date-free vintage card/target/scoring runner exists.
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 
