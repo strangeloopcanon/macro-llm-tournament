@@ -395,7 +395,15 @@ python3 -m macro_llm_tournament.demand_economy \
 
 `--fixture-variants naive_persona` keeps the intentionally bad direct-action baseline in the comparison table without spending live calls on it. The live comparison should be read from `demand_economy_report.md`: the LLM belief module is the actor under test, the adaptive and representative rows are structural baselines, and the naive persona row is a mechanical seed-echo stress test rather than a belief-forecasting baseline.
 
-Current verified live result: the 12-cell, 20-period, five-scenario GPT-5.5 run in `outputs/demand_economy_live_gpt55_p20_12cell_full_v4` returns `hank_lite_belief_lab_ready`. The LLM belief module passes all 19 validation metrics, clears all 54 required metrics across the ablation surface, holds accounting to numerical tolerance, and is the only variant in that run to pass belief-feedback amplification while preserving transfer MPC, liquidity/income MPC gradients, monetary-shock contraction, and job-risk precaution. A sendable summary is in [`reports/hank_lite_belief_demand_economy_report.md`](reports/hank_lite_belief_demand_economy_report.md).
+Current verified live result: the 12-cell, 20-period, five-scenario GPT-5.5 run in `outputs/demand_economy_live_gpt55_p20_12cell_full_v4` returns `hank_lite_belief_lab_ready`. The LLM belief module passes all 19 validation metrics, clears all 54 required metrics across the ablation surface, holds accounting to numerical tolerance, and is the only variant in that run to pass belief-feedback amplification while preserving transfer MPC, liquidity/income MPC gradients, monetary-shock contraction, and job-risk precaution.
+
+Replay the verified GPT-5.5 belief payloads through the current demand-economy mechanisms and run the macro-validity bridge scorecard:
+
+```bash
+make macro-validity-scorecard
+```
+
+This writes `outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5/`, `outputs/macro_validity_scorecard/`, and a tracked readable copy at [`reports/macro_validity_scorecard_report.md`](reports/macro_validity_scorecard_report.md). The replay spends zero new LLM calls: it uses the prior GPT-5.5 live belief payloads and reruns the deterministic structural economy. The current mechanism layer includes transfer windfall allocation across consumption, debt repayment, and liquid saving; debt-stock accounting; decaying buffer-relief support; and gradual rate pass-through. The scorecard separates three gates: micro behavior evidence, scenario-minus-baseline impulse-response shape, and vintage out-of-sample readiness. Vintage as-of context coverage is not counted as actual OOS performance until a date-free vintage card/target/scoring runner exists. The external-facing summary is [`reports/hank_lite_belief_demand_economy_report.md`](reports/hank_lite_belief_demand_economy_report.md).
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 

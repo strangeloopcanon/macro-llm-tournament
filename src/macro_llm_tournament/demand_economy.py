@@ -21,7 +21,7 @@ from .llm_common import LLMUnavailable
 DEMAND_ECONOMY_VERSION = "hank_lite_belief_demand_economy_v2"
 DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v4"
 NAIVE_PERSONA_PROMPT_VERSION = "hank_lite_naive_persona_direct_consumption_v1"
-BELIEF_MODES = ("fixture", "replay", "live")
+BELIEF_MODES = ("fixture", "replay", "live", "raw_replay")
 FEEDBACK_MODES = ("closed_loop", "none")
 MODEL_VARIANTS = ("representative", "adaptive", "llm_belief", "naive_persona")
 LLM_VARIANTS = {"llm_belief", "naive_persona"}
@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provider", choices=SUPPORTED_FORECAST_PROVIDERS, default="codex_cli")
     parser.add_argument("--models", default="gpt-5.5")
     parser.add_argument("--belief-mode", "--decision-mode", dest="belief_mode", choices=BELIEF_MODES, default="fixture")
+    parser.add_argument("--raw-records-json", default=None, help="Replay prior demand_raw_records.json payloads without prompt-cache lookup.")
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--household-source", choices=["fixture", "csv"], default="fixture")
@@ -133,11 +134,17 @@ def main() -> int:
             raise SystemExit("--household-csv is required when --household-source csv")
         if not Path(args.household_csv).exists():
             raise SystemExit(f"--household-csv does not exist: {args.household_csv}")
+    if args.belief_mode == "raw_replay":
+        if not args.raw_records_json:
+            raise SystemExit("--raw-records-json is required when --belief-mode raw_replay")
+        if not Path(args.raw_records_json).exists():
+            raise SystemExit(f"--raw-records-json does not exist: {args.raw_records_json}")
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_ROOT / f"demand_economy_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = output_dir / "fresh_demand_economy_cache" if args.fresh_cache else WORK_ROOT / "demand_economy_cache"
+    raw_replay_records = _load_raw_replay_records(Path(args.raw_records_json)) if args.belief_mode == "raw_replay" else []
     households = (
         normalize_demand_households(pd.read_csv(Path(args.household_csv)))
         if args.household_source == "csv"
@@ -162,6 +169,7 @@ def main() -> int:
             mode=client_mode,
             variant=variant,
             max_live_calls=max(0, int(args.max_live_calls) - live_used),
+            raw_replay_records=raw_replay_records,
         )
         initial, beliefs, decisions, periods, accounting, prompt_rows = run_demand_economy(
             households,
@@ -205,6 +213,7 @@ def main() -> int:
         "fixture_variants": sorted(fixture_variants),
         "belief_mode": args.belief_mode,
         "fresh_cache": bool(args.fresh_cache),
+        "raw_records_json": args.raw_records_json if args.belief_mode == "raw_replay" else None,
         "max_live_calls": int(args.max_live_calls),
         "live_call_count": int(live_used),
         "cache_hit_count": int(cache_hits),
@@ -274,6 +283,7 @@ class DemandEconomyClient:
         mode: str = "fixture",
         variant: str = "llm_belief",
         max_live_calls: int = 0,
+        raw_replay_records: list[dict[str, Any]] | None = None,
     ):
         if mode not in BELIEF_MODES:
             raise ValueError(f"Unsupported demand-economy mode: {mode}")
@@ -285,6 +295,7 @@ class DemandEconomyClient:
         self.mode = mode
         self.variant = variant
         self.raw_records: list[dict[str, Any]] = []
+        self._raw_replay_records = _raw_replay_record_map(raw_replay_records or [])
         llm_mode = mode if variant in LLM_VARIANTS else "fixture"
         self._llm = ForecastLLMClient(provider, model, cache_dir, mode=llm_mode, max_live_calls=max_live_calls)
 
@@ -299,7 +310,7 @@ class DemandEconomyClient:
     @property
     def source(self) -> str:
         if self.variant in LLM_VARIANTS:
-            prefix = "fixture" if self.mode == "fixture" else self.provider
+            prefix = "fixture" if self.mode == "fixture" else "raw_replay" if self.mode == "raw_replay" else self.provider
             return f"{self.variant}_{prefix}_{self.model}"
         return self.variant
 
@@ -351,6 +362,8 @@ class DemandEconomyClient:
                     "cache_hit": True,
                     "cache_path": None,
                 }
+            elif self.mode == "raw_replay":
+                data = self._raw_replay_payload(scenario, period_state)
             else:
                 prompt_text = belief_module_prompt(scenario, period_state, household_states, variant=self.variant)
                 cache_name = f"demand_belief_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt_payload})}"
@@ -371,6 +384,22 @@ class DemandEconomyClient:
             }
         )
         return normalized
+
+    def _raw_replay_payload(self, scenario: DemandScenario, period_state: dict[str, Any]) -> dict[str, Any]:
+        key = (self.variant, scenario.scenario_id, int(period_state["period_index"]))
+        record = self._raw_replay_records.get(key)
+        if record is None:
+            raise LLMUnavailable(
+                f"Raw replay record missing for variant={self.variant}, scenario={scenario.scenario_id}, "
+                f"period={int(period_state['period_index'])}"
+            )
+        return {
+            "provider": record.get("provider", self.provider),
+            "model": record.get("model", self.model),
+            "payload": record.get("payload", record),
+            "cache_hit": True,
+            "cache_path": f"raw_records:{scenario.scenario_id}:{int(period_state['period_index'])}",
+        }
 
     def decision_panel(
         self,
@@ -419,6 +448,28 @@ def default_demand_scenarios() -> list[DemandScenario]:
             notes="Tests whether heterogeneous beliefs plus feedback amplify fluctuations.",
         ),
     ]
+
+
+def _load_raw_replay_records(path: Path) -> list[dict[str, Any]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise SystemExit("--raw-records-json must contain a list of demand raw records")
+    return [record for record in data if isinstance(record, dict)]
+
+
+def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str, int], dict[str, Any]]:
+    mapped: dict[tuple[str, str, int], dict[str, Any]] = {}
+    for record in records:
+        variant = str(record.get("variant", ""))
+        scenario_id = str(record.get("scenario_id", ""))
+        try:
+            period_index = int(record.get("period_index"))
+        except (TypeError, ValueError):
+            continue
+        if not variant or not scenario_id:
+            continue
+        mapped[(variant, scenario_id, period_index)] = record
+    return mapped
 
 
 def build_fixture_demand_households(household_count: int = 24) -> pd.DataFrame:
@@ -1504,6 +1555,7 @@ def _initial_household_states(households: pd.DataFrame, *, source: str, variant:
                 "income_volatility": float(row["income_volatility"]),
                 "subsistence_floor_share": float(row["subsistence_floor_share"]),
                 "liquid_buffer_months": _buffer_months(float(row["liquid_assets"]), baseline_consumption),
+                "transfer_buffer_relief": 0.0,
             }
         )
     return pd.DataFrame(rows).sort_values("type_id").reset_index(drop=True)
@@ -1573,12 +1625,17 @@ def _realize_household_period(
         cash_available = liquid_before + labor_income + transfer
         baseline_consumption = float(state["baseline_consumption"])
         current_buffer = _buffer_months(liquid_before, baseline_consumption)
+        transfer_buffer_relief_before = float(state.get("transfer_buffer_relief", 0.0))
         if direct is not None:
             desired_consumption = baseline_consumption * (1.0 + float(direct["desired_consumption_change_pct"]) / 100.0)
             mpc = float(static["base_mpc"])
             desired_buffer = float(state["target_buffer_months"])
             desired_saving_rate = float(state["base_saving_rate"])
             real_rate = float(period_state["policy_rate"]) - float(belief["expected_inflation_next_period"])
+            transfer_consumption_amount = transfer
+            transfer_debt_repayment_amount = 0.0
+            transfer_liquid_saving_amount = 0.0
+            debt_repayment = 0.0
         else:
             policy = _structural_consumption_policy(
                 static,
@@ -1592,11 +1649,30 @@ def _realize_household_period(
             desired_buffer = policy["target_buffer_months"]
             desired_saving_rate = policy["desired_saving_rate"]
             real_rate = policy["real_rate"]
+            transfer_consumption_amount = policy["transfer_consumption_amount"]
+            transfer_debt_repayment_amount = policy["transfer_debt_repayment_amount"]
+            transfer_liquid_saving_amount = policy["transfer_liquid_saving_amount"]
+            debt_repayment = policy["debt_repayment"]
+        debt_before = float(state["debt"])
         floor_consumption = min(cash_available, float(static["subsistence_floor_share"]) * baseline_consumption)
-        consumption = float(np.clip(desired_consumption, floor_consumption, cash_available))
-        saving_flow = labor_income + transfer - consumption
+        max_debt_repayment = max(0.0, min(debt_before, cash_available - floor_consumption))
+        debt_repayment = float(np.clip(debt_repayment, 0.0, max_debt_repayment))
+        consumption_ceiling = max(0.0, cash_available - debt_repayment)
+        floor_consumption = min(floor_consumption, consumption_ceiling)
+        consumption = float(np.clip(desired_consumption, floor_consumption, consumption_ceiling))
+        saving_flow = labor_income + transfer - consumption - debt_repayment
         liquid_after = liquid_before + saving_flow
-        budget_residual = liquid_before + labor_income + transfer - consumption - liquid_after
+        debt_after = max(0.0, debt_before - debt_repayment)
+        if transfer > 0:
+            transfer_debt_repayment_amount = min(transfer_debt_repayment_amount, debt_repayment)
+            transfer_consumption_amount = float(np.clip(transfer_consumption_amount, 0.0, max(0.0, transfer - transfer_debt_repayment_amount)))
+            transfer_liquid_saving_amount = max(0.0, transfer - transfer_consumption_amount - transfer_debt_repayment_amount)
+        else:
+            transfer_consumption_amount = 0.0
+            transfer_debt_repayment_amount = 0.0
+            transfer_liquid_saving_amount = 0.0
+        transfer_buffer_relief_after = 0.55 * transfer_buffer_relief_before + transfer_liquid_saving_amount
+        budget_residual = liquid_before + labor_income + transfer - consumption - debt_repayment - liquid_after
         rows.append(
             {
                 "schema_version": DEMAND_ECONOMY_VERSION,
@@ -1618,6 +1694,9 @@ def _realize_household_period(
                 "consumption": consumption,
                 "desired_consumption": float(desired_consumption),
                 "saving_flow": saving_flow,
+                "debt_before": debt_before,
+                "debt_repayment": debt_repayment,
+                "debt_after": debt_after,
                 "liquid_assets_before": liquid_before,
                 "liquid_assets_after": liquid_after,
                 "safe_asset_absorption": saving_flow,
@@ -1625,7 +1704,15 @@ def _realize_household_period(
                 "liquid_buffer_months_after": _buffer_months(liquid_after, baseline_consumption),
                 "base_mpc": float(static["base_mpc"]),
                 "effective_mpc": mpc,
-                "realized_mpc_from_transfer": consumption / transfer if transfer > 0 else np.nan,
+                "realized_mpc_from_transfer": transfer_consumption_amount / transfer if transfer > 0 else np.nan,
+                "transfer_consumption_amount": transfer_consumption_amount,
+                "transfer_debt_repayment_amount": transfer_debt_repayment_amount,
+                "transfer_liquid_saving_amount": transfer_liquid_saving_amount,
+                "transfer_consumption_share": transfer_consumption_amount / transfer if transfer > 0 else np.nan,
+                "transfer_debt_repayment_share": transfer_debt_repayment_amount / transfer if transfer > 0 else np.nan,
+                "transfer_liquid_saving_share": transfer_liquid_saving_amount / transfer if transfer > 0 else np.nan,
+                "transfer_buffer_relief_before": transfer_buffer_relief_before,
+                "transfer_buffer_relief_after": transfer_buffer_relief_after,
                 "desired_saving_rate": desired_saving_rate,
                 "target_buffer_months": desired_buffer,
                 "expected_inflation_next_period": float(belief["expected_inflation_next_period"]),
@@ -1703,15 +1790,35 @@ def _structural_consumption_policy(
     buffer_drag = 0.065 * (buffer_gap - baseline_buffer_gap)
     saving_rate_gap = desired_saving_rate - float(static["base_saving_rate"])
     precaution_drag = saving_rate_gap * labor_income * float(static["precautionary_sensitivity"])
-    rate_drag = max(0.0, real_rate_gap) * float(static["rate_sensitivity"]) * baseline_consumption * 0.060
+    rate_drag = (
+        max(0.0, real_rate_gap)
+        * float(static["rate_sensitivity"])
+        * baseline_consumption
+        * 0.060
+        * _rate_pass_through_factor(period_state)
+    )
     income_effect = income_gap * float(static["income_sensitivity"]) * baseline_consumption
     expected_income_effect = income_expectation_gap * baseline_consumption * 0.012
     drawdown = 0.0
+    buffer_relief_support = 0.030 * max(0.0, float(state.get("transfer_buffer_relief", 0.0)))
+    transfer_allocation = _transfer_windfall_allocation(
+        static,
+        state,
+        belief,
+        target_buffer_months=target_buffer,
+        desired_saving_rate=desired_saving_rate,
+        real_rate=real_rate,
+        representative_mpc=representative_mpc,
+    )
+    transfer_consumption_amount = float(transfer_allocation["consumption_share"] * transfer)
+    transfer_debt_repayment_amount = float(min(float(state["debt"]), transfer_allocation["debt_repayment_share"] * transfer))
+    transfer_liquid_saving_amount = max(0.0, transfer - transfer_consumption_amount - transfer_debt_repayment_amount)
     desired_consumption = (
         baseline_consumption
-        + mpc * transfer
+        + transfer_consumption_amount
         + income_effect
         + expected_income_effect
+        + buffer_relief_support
         + drawdown
         - buffer_drag
         - precaution_drag
@@ -1719,11 +1826,92 @@ def _structural_consumption_policy(
     )
     return {
         "desired_consumption": float(desired_consumption),
-        "effective_mpc": mpc,
+        "effective_mpc": transfer_allocation["consumption_share"] if transfer > 0 else mpc,
         "target_buffer_months": target_buffer,
         "desired_saving_rate": desired_saving_rate,
         "real_rate": real_rate,
+        "transfer_consumption_amount": transfer_consumption_amount,
+        "transfer_debt_repayment_amount": transfer_debt_repayment_amount,
+        "transfer_liquid_saving_amount": transfer_liquid_saving_amount,
+        "debt_repayment": transfer_debt_repayment_amount,
     }
+
+
+def _transfer_windfall_allocation(
+    static: pd.Series,
+    state: dict[str, Any],
+    belief: dict[str, Any],
+    *,
+    target_buffer_months: float,
+    desired_saving_rate: float,
+    real_rate: float,
+    representative_mpc: float | None,
+) -> dict[str, float]:
+    if representative_mpc is not None:
+        consumption_share = float(np.clip(representative_mpc, 0.08, 0.55))
+    else:
+        base_mpc = float(static["base_mpc"])
+        low_liquid = str(state["liquidity_group"]).lower() == "low"
+        low_income = str(state["income_group"]).lower() == "low"
+        high_income = str(state["income_group"]).lower() == "high"
+        high_risk = str(state["job_loss_risk_type"]).lower() == "high"
+        baseline_confidence = float(static["confidence_index"])
+        confidence_gap = float(belief["confidence_index"]) - baseline_confidence
+        precaution_gap = float(belief["precautionary_saving_score"]) - 5.0
+        neutral_real_rate = NEUTRAL_POLICY_RATE - INFLATION_TARGET
+        real_rate_gap = float(real_rate) - neutral_real_rate
+        current_buffer = _buffer_months(float(state["liquid_assets"]), float(state["baseline_consumption"]))
+        buffer_gap_months = max(0.0, float(target_buffer_months) - current_buffer)
+        if low_liquid:
+            consumption_share = 0.56 + 0.35 * (base_mpc - 0.72)
+            consumption_share += 0.025 if low_income else -0.025 if high_income else 0.0
+            consumption_share += 0.015 if high_risk else 0.0
+            consumption_share += 0.0015 * confidence_gap
+            consumption_share -= 0.012 * max(0.0, precaution_gap)
+            consumption_share -= 0.010 * max(0.0, real_rate_gap)
+            consumption_share -= 0.008 * min(buffer_gap_months, 4.0)
+            consumption_share = float(np.clip(consumption_share, 0.42, 0.68))
+        else:
+            consumption_share = 0.108 + 0.32 * (base_mpc - 0.18)
+            consumption_share += 0.020 if low_income else -0.015 if high_income else 0.0
+            consumption_share += 0.010 if high_risk else 0.0
+            consumption_share += 0.0010 * confidence_gap
+            consumption_share -= 0.010 * max(0.0, precaution_gap)
+            consumption_share -= 0.010 * max(0.0, real_rate_gap)
+            consumption_share -= 0.006 * min(buffer_gap_months, 4.0)
+            consumption_share = float(np.clip(consumption_share, 0.05, 0.15))
+    non_consumed_share = max(0.0, 1.0 - consumption_share)
+    debt_service = float(static["debt_service_burden"])
+    debt_share = 0.32 + 0.50 * (debt_service - 0.12)
+    income_group = str(state["income_group"]).lower()
+    liquidity_group = str(state["liquidity_group"]).lower()
+    job_risk = str(state["job_loss_risk_type"]).lower()
+    debt_share += 0.030 if income_group == "low" else -0.020 if income_group == "high" else 0.0
+    debt_share += 0.025 if job_risk == "high" else 0.0
+    debt_share -= 0.015 if liquidity_group == "high" else 0.0
+    debt_share -= 0.035 * max(0.0, float(desired_saving_rate) - float(static["base_saving_rate"]))
+    debt_share = float(np.clip(debt_share, 0.22, 0.42))
+    debt_share = min(debt_share, non_consumed_share)
+    liquid_saving_share = max(0.0, 1.0 - consumption_share - debt_share)
+    total = consumption_share + debt_share + liquid_saving_share
+    if total <= 0:
+        return {"consumption_share": 0.0, "debt_repayment_share": 0.0, "liquid_saving_share": 0.0}
+    return {
+        "consumption_share": float(consumption_share / total),
+        "debt_repayment_share": float(debt_share / total),
+        "liquid_saving_share": float(liquid_saving_share / total),
+    }
+
+
+def _rate_pass_through_factor(period_state: dict[str, Any]) -> float:
+    if float(period_state.get("policy_rate_shock_pp", 0.0)) <= 0.0:
+        return 1.0
+    period_index = int(period_state.get("period_index", 0))
+    if period_index <= 1:
+        return 0.45
+    if period_index == 2:
+        return 0.75
+    return 1.0
 
 
 def _aggregate_period(
@@ -1738,10 +1926,15 @@ def _aggregate_period(
     aggregate_income = _weighted(realized, "labor_income")
     aggregate_transfer = _weighted(realized, "transfer")
     aggregate_saving = _weighted(realized, "saving_flow")
+    aggregate_debt_repayment = _weighted(realized, "debt_repayment")
     aggregate_liquid_assets = _weighted(realized, "liquid_assets_after")
+    aggregate_debt = _weighted(realized, "debt_after")
     aggregate_job_loss = _weighted(realized, "job_loss_probability")
     aggregate_confidence = _weighted(realized, "confidence_index")
     aggregate_buffer = _weighted(realized, "liquid_buffer_months_after")
+    aggregate_transfer_consumption = _weighted(realized, "transfer_consumption_amount")
+    aggregate_transfer_debt_repayment = _weighted(realized, "transfer_debt_repayment_amount")
+    aggregate_transfer_liquid_saving = _weighted(realized, "transfer_liquid_saving_amount")
     baseline = float(period_state["baseline_aggregate_consumption"])
     output = aggregate_consumption
     output_gap = 100.0 * (output / max(baseline, 1e-9) - 1.0)
@@ -1757,11 +1950,19 @@ def _aggregate_period(
         "aggregate_income": aggregate_income,
         "aggregate_transfer": aggregate_transfer,
         "aggregate_saving": aggregate_saving,
+        "aggregate_debt_repayment": aggregate_debt_repayment,
         "safe_asset_absorption": aggregate_saving,
         "aggregate_liquid_assets": aggregate_liquid_assets,
+        "aggregate_debt": aggregate_debt,
         "aggregate_job_loss_belief": aggregate_job_loss,
         "aggregate_confidence_index": aggregate_confidence,
         "aggregate_liquid_buffer_months": aggregate_buffer,
+        "aggregate_transfer_consumption": aggregate_transfer_consumption,
+        "aggregate_transfer_debt_repayment": aggregate_transfer_debt_repayment,
+        "aggregate_transfer_liquid_saving": aggregate_transfer_liquid_saving,
+        "aggregate_transfer_consumption_share": aggregate_transfer_consumption / aggregate_transfer if aggregate_transfer > 0 else np.nan,
+        "aggregate_transfer_debt_repayment_share": aggregate_transfer_debt_repayment / aggregate_transfer if aggregate_transfer > 0 else np.nan,
+        "aggregate_transfer_liquid_saving_share": aggregate_transfer_liquid_saving / aggregate_transfer if aggregate_transfer > 0 else np.nan,
         "output": output,
         "output_gap_pct": output_gap,
         "employment_rate": float(period_state["employment_rate"]),
@@ -1808,7 +2009,7 @@ def _next_household_states(
                 "labor_income": float(labor_income),
                 "baseline_consumption": baseline_consumption,
                 "liquid_assets": float(row["liquid_assets_after"]),
-                "debt": float(static["debt"]),
+                "debt": float(row.get("debt_after", static["debt"])),
                 "debt_service_burden": float(static["debt_service_burden"]),
                 "base_mpc": float(static["base_mpc"]),
                 "base_saving_rate": float(static["base_saving_rate"]),
@@ -1827,6 +2028,7 @@ def _next_household_states(
                 "income_volatility": float(static["income_volatility"]),
                 "subsistence_floor_share": float(static["subsistence_floor_share"]),
                 "liquid_buffer_months": _buffer_months(float(row["liquid_assets_after"]), baseline_consumption),
+                "transfer_buffer_relief": float(row.get("transfer_buffer_relief_after", 0.0)),
             }
         )
     return rows
@@ -1893,6 +2095,21 @@ def _accounting_rows(realized: list[dict[str, Any]], aggregate: dict[str, Any]) 
         }
         for row in realized
     ]
+    rows.extend(
+        {
+            "source": row["source"],
+            "variant": row["variant"],
+            "scenario_id": row["scenario_id"],
+            "period_id": row["period_id"],
+            "period_index": int(row["period_index"]),
+            "unit": row["type_id"],
+            "identity": "household_debt_stock",
+            "residual": float(row["debt_before"] - row["debt_repayment"] - row["debt_after"]),
+            "abs_residual": abs(float(row["debt_before"] - row["debt_repayment"] - row["debt_after"])),
+            "passed": abs(float(row["debt_before"] - row["debt_repayment"] - row["debt_after"])) <= ACCOUNTING_TOLERANCE,
+        }
+        for row in realized
+    )
     residual = float(aggregate["goods_market_residual"])
     rows.append(
         {
@@ -1961,6 +2178,12 @@ def _client_specs(
     fixture_variants = fixture_variants or set()
     specs: list[tuple[str, str, str]] = []
     for variant in variants:
+        if variant in fixture_variants:
+            if variant in LLM_VARIANTS:
+                specs.extend((variant, model, "fixture") for model in models)
+            else:
+                specs.append((variant, "structural", "fixture"))
+            continue
         if belief_mode != "live":
             mode = belief_mode if variant in LLM_VARIANTS else "fixture"
             if variant in LLM_VARIANTS:

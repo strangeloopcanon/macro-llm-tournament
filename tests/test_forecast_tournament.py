@@ -47,6 +47,12 @@ from macro_llm_tournament.demand_economy import (
     run_demand_economy,
     score_demand_economy_validation,
 )
+from macro_llm_tournament.macro_validity import (
+    build_macro_validity_scorecard,
+    load_demand_run,
+    score_demand_irf_shape,
+    write_macro_validity_outputs,
+)
 from macro_llm_tournament.forecast_audit import (
     DirectRecallClient,
     build_belief_structure_audit,
@@ -1015,6 +1021,21 @@ class ForecastTournamentTests(unittest.TestCase):
             validation = score_demand_economy_validation(periods, decisions, beliefs, accounting)
             verdict = classify_demand_economy_evidence(validation, mode="fixture")
             metrics = validation.set_index("metric")["value"].to_dict()
+            llm_source = "llm_belief_fixture_gpt-5.5"
+            transfer_rows = decisions[
+                (decisions["source"] == llm_source)
+                & (decisions["scenario_id"] == "transfer_shock")
+                & (decisions["period_index"] == 1)
+            ].copy()
+            transfer_weight = transfer_rows["population_weight"].astype(float) * transfer_rows["transfer"].astype(float)
+            debt_share = float((transfer_weight * transfer_rows["transfer_debt_repayment_share"].astype(float)).sum() / transfer_weight.sum())
+            liquid_saving_share = float((transfer_weight * transfer_rows["transfer_liquid_saving_share"].astype(float)).sum() / transfer_weight.sum())
+            allocation_residual = (
+                transfer_rows["transfer_consumption_share"].astype(float)
+                + transfer_rows["transfer_debt_repayment_share"].astype(float)
+                + transfer_rows["transfer_liquid_saving_share"].astype(float)
+                - 1.0
+            ).abs().max()
 
             self.assertEqual(initial["type_id"].nunique(), 24)
             self.assertEqual(periods.groupby("scenario_id")["period_index"].nunique().min(), 100)
@@ -1028,6 +1049,11 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertGreater(float(metrics["liquidity_mpc_gradient"]), 0.2)
             self.assertLess(float(metrics["rate_hike_mean_consumption_delta_6p"]), 0.0)
             self.assertGreater(float(metrics["belief_feedback_amplification_ratio"]), 1.1)
+            self.assertLessEqual(float(allocation_residual), 1e-9)
+            self.assertGreaterEqual(debt_share, 0.30)
+            self.assertLessEqual(debt_share, 0.40)
+            self.assertGreaterEqual(liquid_saving_share, 0.31)
+            self.assertLessEqual(liquid_saving_share, 0.41)
 
     def test_demand_economy_subset_scenarios_do_not_clear_full_lab_gate(self):
         validation = pd.DataFrame(
@@ -1223,6 +1249,72 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertNotIn("survey_date", prompts)
             self.assertNotIn("actual_", prompts)
 
+    def test_macro_validity_scorecard_writes_three_gate_report(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_dir = root / "demand_run"
+            vintage_dir = root / "vintage_panel"
+            output_dir = root / "macro_validity"
+            report_path = root / "reports" / "macro_validity_scorecard_report.md"
+            self._write_macro_validity_synthetic_demand_run(run_dir)
+            self._write_macro_validity_synthetic_vintage_panel(vintage_dir)
+
+            result = build_macro_validity_scorecard(load_demand_run(run_dir), vintage_panel_dir=vintage_dir)
+            write_macro_validity_outputs(result, output_dir=output_dir, report_path=report_path)
+
+            scorecard = pd.read_csv(output_dir / "macro_validity_scorecard.csv")
+            micro = pd.read_csv(output_dir / "macro_validity_micro_behavior_scores.csv")
+            irf = pd.read_csv(output_dir / "macro_validity_irf_scores.csv")
+            vintage = pd.read_csv(output_dir / "macro_validity_vintage_readiness.csv")
+            report = report_path.read_text(encoding="utf-8")
+
+            statuses = dict(zip(scorecard["gate"], scorecard["status"]))
+            self.assertEqual(statuses["micro_behavior"], "partial")
+            self.assertEqual(statuses["impulse_response"], "pass")
+            self.assertEqual(statuses["vintage_oos"], "partial")
+            self.assertIn("debt_repayment_action_target", set(micro["metric"]))
+            self.assertTrue(irf.loc[irf["status"] == "fail"].empty)
+            self.assertIn("demand_vintage_oos_scores_available", set(vintage["metric"]))
+            self.assertIn("Macro Validity Scorecard", report)
+            self.assertEqual(result["manifest"]["overall_verdict"], "macro_validity_bridge_ready_but_behavior_and_oos_need_work")
+
+    def test_macro_validity_irf_shape_fails_when_rate_hike_expands_output(self):
+        source = "llm_belief_fixture_gpt-5.5"
+        irfs = pd.DataFrame(
+            [
+                {
+                    "source": source,
+                    "variant": "llm_belief",
+                    "scenario_id": "rate_hike",
+                    "period_index": period,
+                    "period_id": f"period_{period}",
+                    "variable": variable,
+                    "baseline_value": 0.0,
+                    "scenario_value": 1.0,
+                    "response": 1.0,
+                    "shock_scale": 1.0,
+                }
+                for period in range(1, 9)
+                for variable in ["output_gap_pct", "aggregate_consumption", "inflation_rate"]
+            ]
+        )
+        validation = pd.DataFrame(
+            [
+                {
+                    "source": source,
+                    "variant": "llm_belief",
+                    "metric": "belief_feedback_amplification_ratio",
+                    "value": 0.8,
+                }
+            ]
+        )
+
+        scores = score_demand_irf_shape(irfs, validation, expected_sources=[source])
+        by_metric = scores.set_index("metric")
+
+        self.assertEqual(by_metric.loc["rate_hike_output_negative_share_p1_p8", "status"], "fail")
+        self.assertEqual(by_metric.loc["belief_feedback_output_rms_ratio", "status"], "fail")
+
     def test_demand_economy_live_mode_can_force_fixture_baseline_variants(self):
         with TemporaryDirectory() as temp_dir:
             result = subprocess.run(
@@ -1264,6 +1356,123 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertEqual(manifest["live_call_count"], 0)
             self.assertEqual(set(beliefs["source"]), {"naive_persona_fixture_gpt-5.5"})
             self.assertEqual(manifest["verdict"], manifest["evidence"]["evidence_verdict"])
+
+    def _write_macro_validity_synthetic_demand_run(self, run_dir: Path) -> None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        source = "llm_belief_fixture_gpt-5.5"
+        periods = []
+        for scenario_id in ["baseline", "transfer_shock", "rate_hike", "job_risk_shock", "belief_feedback"]:
+            for period in range(13):
+                row = {
+                    "source": source,
+                    "variant": "llm_belief",
+                    "scenario_id": scenario_id,
+                    "period_id": f"period_{period}",
+                    "period_index": period,
+                    "aggregate_consumption": 1000.0,
+                    "aggregate_income": 1500.0,
+                    "output_gap_pct": 0.0,
+                    "employment_rate": 0.955,
+                    "inflation_rate": 2.0,
+                    "policy_rate": 3.0,
+                    "transfer_per_household": 0.0,
+                    "policy_rate_shock_pp": 0.0,
+                    "job_risk_shock_pp": 0.0,
+                }
+                if scenario_id == "transfer_shock":
+                    responses = {1: 450.0, 2: 250.0, 3: 120.0, 4: 50.0}
+                    response = responses.get(period, 20.0 if period > 4 else 0.0)
+                    row["aggregate_consumption"] += response
+                    row["output_gap_pct"] += response / 100.0
+                    row["transfer_per_household"] = 1000.0 if period == 1 else 0.0
+                elif scenario_id == "rate_hike":
+                    response = -100.0 - 20.0 * min(period, 4) if period >= 1 else 0.0
+                    row["aggregate_consumption"] += response
+                    row["output_gap_pct"] += response / 100.0
+                    row["employment_rate"] -= 0.001 * min(period, 4) if period >= 1 else 0.0
+                    row["inflation_rate"] -= 0.05 * max(0, period - 3)
+                    row["policy_rate_shock_pp"] = 1.0 if 1 <= period <= 4 else 0.0
+                elif scenario_id == "job_risk_shock":
+                    response = -150.0 if 1 <= period <= 4 else -50.0 if period > 4 else 0.0
+                    row["aggregate_consumption"] += response
+                    row["output_gap_pct"] += response / 100.0
+                    row["job_risk_shock_pp"] = 8.0 if 1 <= period <= 4 else 0.0
+                elif scenario_id == "belief_feedback":
+                    row["output_gap_pct"] = -2.0 if period >= 1 else 0.0
+                    row["aggregate_consumption"] -= 200.0 if period >= 1 else 0.0
+                periods.append(row)
+        pd.DataFrame(periods).to_csv(run_dir / "demand_periods.csv", index=False)
+        validation_rows = [
+            ("transfer_impact_mpc", 0.45, 0.20, 0.85),
+            ("low_liquidity_impact_mpc", 0.50, 0.35, 1.00),
+            ("high_liquidity_impact_mpc", 0.10, 0.03, 0.55),
+            ("liquidity_mpc_gradient", 0.40, 0.15, 1.00),
+            ("income_mpc_gradient", 0.25, 0.05, 0.80),
+            ("job_risk_impact_consumption_delta", -150.0, -np.inf, -1e-6),
+            ("job_risk_impact_income_delta_abs", 0.0, 0.0, 1e-6),
+            ("max_accounting_abs_residual", 0.0, 0.0, 1e-6),
+            ("belief_feedback_amplification_ratio", 2.0, 1.05, np.inf),
+        ]
+        pd.DataFrame(
+            [
+                {
+                    "source": source,
+                    "variant": "llm_belief",
+                    "metric": metric,
+                    "value": value,
+                    "target_low": low,
+                    "target_high": high,
+                    "passed": True,
+                    "required": True,
+                }
+                for metric, value, low, high in validation_rows
+            ]
+        ).to_csv(run_dir / "demand_validation_scores.csv", index=False)
+        pd.DataFrame().to_csv(run_dir / "demand_household_decisions.csv", index=False)
+        pd.DataFrame().to_csv(run_dir / "demand_accounting.csv", index=False)
+        (run_dir / "manifest.json").write_text(
+            json.dumps({"verdict": "synthetic_hank_lite_ready", "evidence": {"evidence_verdict": "synthetic_hank_lite_ready"}}),
+            encoding="utf-8",
+        )
+
+    def _write_macro_validity_synthetic_vintage_panel(self, vintage_dir: Path) -> None:
+        vintage_dir.mkdir(parents=True, exist_ok=True)
+        origins = pd.DataFrame(
+            [
+                {"origin": f"202{i}:Q1", "as_of_date": f"202{i}-02-15", "split": "train"}
+                for i in range(0, 4)
+            ]
+            + [
+                {"origin": f"202{i}:Q2", "as_of_date": f"202{i}-05-15", "split": "test"}
+                for i in range(0, 10)
+            ]
+            + [
+                {"origin": f"202{i}:Q3", "as_of_date": f"202{i}-08-15", "split": "val"}
+                for i in range(0, 12)
+            ]
+        )
+        origins.to_csv(vintage_dir / "forecast_origins_for_vintage_context.csv", index=False)
+        series_ids = ["PCECC96", "PSAVERT", "RSXFS", "CPIAUCSL", "UNRATE", "FEDFUNDS", "UMCSENT", "DSPIC96", "GDPC1"]
+        context = pd.DataFrame(
+            [
+                {
+                    "origin": origins["origin"].iloc[0],
+                    "as_of_date": origins["as_of_date"].iloc[0],
+                    "series_id": series_id,
+                    "label": series_id,
+                    "observation_date": "2020-01-01",
+                    "value": 1.0,
+                    "realtime_start": origins["as_of_date"].iloc[0],
+                    "realtime_end": origins["as_of_date"].iloc[0],
+                }
+                for series_id in series_ids
+            ]
+        )
+        context.to_csv(vintage_dir / "fred_vintage_context.csv", index=False)
+        (vintage_dir / "fred_vintage_status.json").write_text(
+            json.dumps({"status": "partial", "origin_count": int(origins.shape[0]), "series_ids": series_ids}),
+            encoding="utf-8",
+        )
 
     def test_persona_belief_prompt_hides_heldout_responses(self):
         respondents = build_fixture_respondent_panel(respondent_count=6, survey_date="2026-01-01")
