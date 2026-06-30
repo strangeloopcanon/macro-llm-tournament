@@ -134,7 +134,8 @@ def build_macro_performance_gate(
     scores = score_performance_targets(catalog, score_inputs)
     variant_summary = summarize_variant_performance(scores)
     attribution = build_performance_attribution(variant_summary, scores=scores)
-    vintage_readiness = score_vintage_oos_readiness(vintage_panel_dir)
+    oos_pairwise = build_oos_pairwise_comparison(vintage_oos_dir)
+    vintage_readiness = build_performance_vintage_readiness(vintage_panel_dir, vintage_oos_dir)
     manifest = build_macro_performance_manifest(
         artifacts_manifest=artifacts.manifest,
         demand_run_dir=demand_run_dir,
@@ -146,15 +147,17 @@ def build_macro_performance_gate(
         scores=scores,
         variant_summary=variant_summary,
         attribution=attribution,
+        oos_pairwise=oos_pairwise,
         vintage_readiness=vintage_readiness,
     )
-    report = build_macro_performance_report(manifest, variant_summary, attribution, scores, vintage_readiness)
+    report = build_macro_performance_report(manifest, variant_summary, attribution, oos_pairwise, scores, vintage_readiness)
     return {
         "manifest": manifest,
         "target_catalog": catalog,
         "scores": scores,
         "variant_summary": variant_summary,
         "attribution": attribution,
+        "oos_pairwise": oos_pairwise,
         "vintage_readiness": vintage_readiness,
         "report": report,
     }
@@ -175,6 +178,36 @@ def build_score_input_frames(artifacts: Any, *, vintage_oos_dir: Path) -> dict[s
         "micro_metric": micro_scores,
         "vintage_oos_summary_metric": vintage_scores,
     }
+
+
+def build_performance_vintage_readiness(vintage_panel_dir: Path, vintage_oos_dir: Path) -> pd.DataFrame:
+    readiness = score_vintage_oos_readiness(vintage_panel_dir).copy()
+    if readiness.empty:
+        return readiness
+    runner_files = [
+        "demand_vintage_oos_cards.csv",
+        "demand_vintage_oos_targets.csv",
+        "demand_vintage_oos_scores.csv",
+    ]
+    for filename in runner_files:
+        metric = filename.replace(".csv", "_available")
+        exists = (vintage_oos_dir / filename).exists()
+        mask = readiness["metric"].astype(str) == metric
+        if not mask.any():
+            continue
+        readiness.loc[mask, "source"] = str(vintage_oos_dir)
+        readiness.loc[mask, "value"] = 1.0 if exists else np.nan
+        readiness.loc[mask, "target_low"] = 1.0
+        readiness.loc[mask, "target_high"] = 1.0
+        readiness.loc[mask, "status"] = "pass" if exists else "gap"
+        readiness.loc[mask, "passed"] = bool(exists)
+        readiness.loc[mask, "target_kind"] = "scored_oos_artifact"
+        readiness.loc[mask, "interpretation"] = (
+            f"Scored date-free demand-vintage OOS artifact is present: {filename}."
+            if exists
+            else f"Scored date-free demand-vintage OOS artifact is not present yet: {filename}."
+        )
+    return readiness
 
 
 def score_performance_targets(catalog: pd.DataFrame, inputs: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -312,6 +345,84 @@ def _oos_raw_attribution_rows(
     }
 
 
+def build_oos_pairwise_comparison(vintage_oos_dir: Path, *, bootstrap_samples: int = 10000, seed: int = 20260630) -> pd.DataFrame:
+    joined_path = vintage_oos_dir / "demand_vintage_oos_joined_errors.csv"
+    if not joined_path.exists():
+        return pd.DataFrame()
+    joined = pd.read_csv(joined_path)
+    required = {"source", "variant", "origin_id", "card_id", "normalized_abs_error"}
+    if joined.empty or not required.issubset(set(joined.columns)):
+        return pd.DataFrame()
+    joined = joined.copy()
+    joined["normalized_abs_error"] = pd.to_numeric(joined["normalized_abs_error"], errors="coerce")
+    joined = joined.dropna(subset=["normalized_abs_error", "origin_id", "card_id"])
+    llm_sources = sorted(joined.loc[joined["variant"].astype(str) == LLM_VARIANT, "source"].astype(str).unique().tolist())
+    baselines = joined[joined["variant"].astype(str).isin(VINTAGE_OOS_BASELINE_VARIANTS)].copy()
+    if not llm_sources or baselines.empty:
+        return pd.DataFrame()
+    baseline_losses = (
+        baselines.groupby(["source", "variant"], as_index=False)["normalized_abs_error"]
+        .mean()
+        .sort_values(["normalized_abs_error", "source"])
+    )
+    if baseline_losses.empty:
+        return pd.DataFrame()
+    best_baseline_source = str(baseline_losses.iloc[0]["source"])
+    best_baseline_variant = str(baseline_losses.iloc[0]["variant"])
+    best_baseline = baselines[baselines["source"].astype(str) == best_baseline_source][
+        ["card_id", "origin_id", "normalized_abs_error"]
+    ].rename(columns={"normalized_abs_error": "baseline_loss"})
+    rows: list[dict[str, Any]] = []
+    for llm_source in llm_sources:
+        llm = joined[joined["source"].astype(str) == llm_source][["card_id", "origin_id", "normalized_abs_error"]].rename(
+            columns={"normalized_abs_error": "llm_loss"}
+        )
+        paired = llm.merge(best_baseline, on=["card_id", "origin_id"], how="inner")
+        if paired.empty:
+            continue
+        origin_diffs = (
+            paired.assign(loss_reduction=paired["baseline_loss"] - paired["llm_loss"])
+            .groupby("origin_id", as_index=False)
+            .agg(
+                llm_loss=("llm_loss", "mean"),
+                baseline_loss=("baseline_loss", "mean"),
+                loss_reduction=("loss_reduction", "mean"),
+            )
+        )
+        diffs = pd.to_numeric(origin_diffs["loss_reduction"], errors="coerce").dropna().to_numpy(dtype=float)
+        if len(diffs) == 0:
+            continue
+        boot = _bootstrap_mean(diffs, samples=bootstrap_samples, seed=seed)
+        mean_llm_loss = float(origin_diffs["llm_loss"].mean())
+        mean_baseline_loss = float(origin_diffs["baseline_loss"].mean())
+        mean_reduction = float(np.mean(diffs))
+        rows.append(
+            {
+                "llm_source": llm_source,
+                "best_baseline_source": best_baseline_source,
+                "best_baseline_variant": best_baseline_variant,
+                "n_clusters": int(len(diffs)),
+                "mean_llm_loss": mean_llm_loss,
+                "mean_baseline_loss": mean_baseline_loss,
+                "mean_loss_reduction": mean_reduction,
+                "improvement_pct": 100.0 * mean_reduction / mean_baseline_loss if mean_baseline_loss > 0 else np.nan,
+                "bootstrap_mean_ci_low": float(np.quantile(boot, 0.025)) if len(boot) else np.nan,
+                "bootstrap_mean_ci_high": float(np.quantile(boot, 0.975)) if len(boot) else np.nan,
+                "bootstrap_share_positive": float(np.mean(boot > 0.0)) if len(boot) else np.nan,
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["mean_loss_reduction", "llm_source"], ascending=[False, True]).reset_index(drop=True)
+
+
+def _bootstrap_mean(values: np.ndarray, *, samples: int, seed: int) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return np.asarray([], dtype=float)
+    rng = np.random.default_rng(seed)
+    draws = rng.choice(values, size=(max(1, int(samples)), values.size), replace=True)
+    return draws.mean(axis=1)
+
+
 def build_macro_performance_manifest(
     *,
     artifacts_manifest: dict[str, Any],
@@ -324,6 +435,7 @@ def build_macro_performance_manifest(
     scores: pd.DataFrame,
     variant_summary: pd.DataFrame,
     attribution: pd.DataFrame,
+    oos_pairwise: pd.DataFrame,
     vintage_readiness: pd.DataFrame,
 ) -> dict[str, Any]:
     oos_available = _oos_scores_available(vintage_oos_dir)
@@ -359,12 +471,15 @@ def build_macro_performance_manifest(
         "target_catalog_sha256": target_catalog_hash,
         "target_rows": int(scores.shape[0]),
         "variant_summary_rows": int(variant_summary.shape[0]),
+        "oos_pairwise_rows": int(oos_pairwise.shape[0]),
+        "oos_pairwise_best_bootstrap_share_positive": _best_oos_pairwise_share_positive(oos_pairwise),
         "vintage_readiness_status": _scorecard_status(vintage_readiness),
         "outputs": [
             "macro_performance_target_catalog.csv",
             "macro_performance_scores.csv",
             "macro_performance_variant_summary.csv",
             "macro_performance_attribution.csv",
+            "macro_performance_oos_pairwise.csv",
             "macro_performance_vintage_readiness.csv",
             "macro_performance_report.md",
             "manifest.json",
@@ -416,6 +531,7 @@ def build_macro_performance_report(
     manifest: dict[str, Any],
     variant_summary: pd.DataFrame,
     attribution: pd.DataFrame,
+    oos_pairwise: pd.DataFrame,
     scores: pd.DataFrame,
     vintage_readiness: pd.DataFrame,
 ) -> str:
@@ -431,6 +547,9 @@ def build_macro_performance_report(
         "",
         "## Baseline Comparison",
         markdown_table(attribution),
+        "",
+        "## OOS Paired Comparison",
+        markdown_table(oos_pairwise),
         "",
         "## Blocking Target Misses",
         markdown_table(failed.head(40) if not failed.empty else failed),
@@ -456,6 +575,7 @@ def write_macro_performance_outputs(result: dict[str, Any], output_dir: Path) ->
     result.get("scores", pd.DataFrame()).to_csv(output_dir / "macro_performance_scores.csv", index=False)
     result.get("variant_summary", pd.DataFrame()).to_csv(output_dir / "macro_performance_variant_summary.csv", index=False)
     result.get("attribution", pd.DataFrame()).to_csv(output_dir / "macro_performance_attribution.csv", index=False)
+    result.get("oos_pairwise", pd.DataFrame()).to_csv(output_dir / "macro_performance_oos_pairwise.csv", index=False)
     result.get("vintage_readiness", pd.DataFrame()).to_csv(output_dir / "macro_performance_vintage_readiness.csv", index=False)
     (output_dir / "macro_performance_report.md").write_text(result.get("report", ""), encoding="utf-8")
     (output_dir / "manifest.json").write_text(json.dumps(_jsonable(result["manifest"]), indent=2, sort_keys=True), encoding="utf-8")
@@ -636,16 +756,26 @@ def _vintage_oos_provenance(vintage_oos_dir: Path) -> dict[str, Any]:
         "verdict": data.get("verdict"),
         "passed": bool(data.get("passed", False)),
         "schema_version": data.get("schema_version"),
+        "live_call_count": int(data.get("live_call_count", 0) or 0),
+        "cache_hit_count": int(data.get("cache_hit_count", 0) or 0),
     }
 
 
 def _vintage_oos_empirical_eligible(provenance: dict[str, Any]) -> bool:
-    return bool(
+    forecast_mode = str(provenance.get("forecast_mode") or "")
+    base_eligible = bool(
         provenance.get("passed")
         and provenance.get("mode") not in {None, "", "fixture"}
-        and provenance.get("forecast_mode") not in {None, "", "fixture"}
+        and forecast_mode not in {"", "fixture"}
         and provenance.get("verdict") == "demand_vintage_oos_scored"
     )
+    if not base_eligible:
+        return False
+    if forecast_mode == "live":
+        return int(provenance.get("live_call_count", 0) or 0) > 0 and int(provenance.get("cache_hit_count", 0) or 0) == 0
+    if forecast_mode == "replay":
+        return int(provenance.get("cache_hit_count", 0) or 0) > 0
+    return False
 
 
 def _oos_llm_beats_baseline(attribution: pd.DataFrame | None) -> bool:
@@ -672,6 +802,15 @@ def _oos_loss_improvement_pct(attribution: pd.DataFrame | None) -> float | None:
     return float(values.iloc[0])
 
 
+def _best_oos_pairwise_share_positive(oos_pairwise: pd.DataFrame | None) -> float | None:
+    if oos_pairwise is None or oos_pairwise.empty:
+        return None
+    values = pd.to_numeric(oos_pairwise.get("bootstrap_share_positive"), errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.max())
+
+
 def _scorecard_status(scores: pd.DataFrame) -> str:
     if scores.empty:
         return "missing"
@@ -693,7 +832,14 @@ def _bottom_line(manifest: dict[str, Any], failed: pd.DataFrame) -> str:
         if manifest.get("vintage_oos_scores_available") and not manifest.get("vintage_oos_empirical_eligible"):
             cap = " Vintage OOS scores are present as diagnostics, but their provenance is fixture/non-empirical."
         elif manifest.get("vintage_oos_scores_available") and manifest.get("vintage_oos_empirical_eligible"):
-            cap = " Vintage OOS scores are present, but the LLM forecast has not beaten the strongest deterministic OOS baseline yet."
+            improvement = _finite_or_nan(manifest.get("vintage_oos_llm_baseline_improvement_pct"))
+            if np.isfinite(improvement) and improvement > 0.0:
+                cap = (
+                    " Vintage OOS scores are present and the LLM forecast beats the strongest deterministic baseline, "
+                    "but the absolute OOS target is still missed."
+                )
+            else:
+                cap = " Vintage OOS scores are present, but the LLM forecast has not beaten the strongest deterministic OOS baseline yet."
         elif manifest.get("vintage_oos_scores_available"):
             cap = " Vintage OOS scores are present as diagnostics."
         else:
@@ -725,7 +871,8 @@ def _live_blocked_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "variant_summary": pd.DataFrame(),
         "attribution": pd.DataFrame(),
         "vintage_readiness": pd.DataFrame(),
-        "report": build_macro_performance_report(manifest, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
+        "oos_pairwise": pd.DataFrame(),
+        "report": build_macro_performance_report(manifest, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
     }
 
 

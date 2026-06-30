@@ -4,7 +4,7 @@
 
 The project now has a playable, date-free macro simulation engine and a live out-of-sample forecast test.
 
-The new result is positive but bounded: live GPT models beat simple deterministic baselines on held-out, date-free vintage macro cards, but the absolute forecast errors are still too large for the stricter empirical-ready gate. In plain English: there is real predictive signal in the LLM belief layer, but it is not yet a strong macro-prediction engine.
+The new result is positive but bounded: live GPT models beat simple deterministic baselines on held-out, date-free vintage macro cards, but the absolute forecast errors are still too large for the stricter empirical-ready gate. In plain English: the LLM belief layer now has a credible relative out-of-sample result in this run, while the full system remains short of a strong macro-prediction engine.
 
 ## What The Ecology Does
 
@@ -89,6 +89,13 @@ Weighted normalized absolute error on the held-out test split:
 
 The live models beat all simple baselines overall. GPT-5.4 is best overall; GPT-5.5 wins more individual target families but by smaller margins.
 
+A paired origin-cluster bootstrap keeps the mean loss reduction positive in most resamples, but the 95% interval still touches small negative reductions. That makes the right reading directional rather than triumphant: the LLM forecasts improve on the simple baselines in this test split, and the next run needs tighter absolute error plus stronger uncertainty evidence.
+
+| Source | Mean Loss Reduction vs Rolling Trend | Bootstrap Share Positive | 95% Bootstrap Interval |
+| --- | ---: | ---: | ---: |
+| GPT-5.4 LLM belief | `0.3116` | `96.7%` | `[-0.0079, 0.8319]` |
+| GPT-5.5 LLM belief | `0.2450` | `91.9%` | `[-0.0577, 0.6970]` |
+
 GPT-5.5 beats the best baseline on 6 of 7 target families, losing only inflation. GPT-5.4 beats the best baseline on 5 of 7 target families, losing inflation and sentiment.
 
 | Target Family | GPT-5.5 vs Best Baseline | GPT-5.4 vs Best Baseline |
@@ -105,9 +112,9 @@ The macro performance gate still reports `empirical_ready: false` because the ab
 
 ## What We Can Say Now
 
-We can now say that the LLM belief layer contains useful out-of-sample macro signal under date-free, hidden-target conditions. That is new.
+We can now say that the LLM belief layer produced a positive relative out-of-sample result under date-free, hidden-target conditions. That is new.
 
-We cannot yet say that the full simulated economy is empirically predictive in the strong sense. The live forecast layer beats baselines, but the misses are large in volatile consumption/output periods. The system has crossed from "playable sandbox" to "promising predictive signal"; it has not crossed to "strong macro validity."
+The full simulated economy still falls short of strong empirical prediction. The live forecast layer beats baselines, but the misses are large in volatile consumption/output periods. The system has crossed from "playable sandbox" to "promising predictive signal"; it has not crossed to "strong macro validity."
 
 ## Current Limit
 

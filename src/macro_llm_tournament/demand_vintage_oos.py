@@ -139,6 +139,11 @@ def build_demand_vintage_oos(
     if max_origins and max_origins > 0:
         origins = _balanced_origin_sample(origins, max_origins)
     cards, targets = build_vintage_cards_and_targets(origins, context, history_periods=history_periods)
+    if forecast_mode == "live" and fresh_cache and _cache_json_count(cache_dir) > 0:
+        raise LLMUnavailable(
+            "--fresh-cache live vintage OOS runs require an empty cache directory; "
+            f"found existing cached JSON under {cache_dir}"
+        )
     if forecast_mode == "live":
         required_live_calls = int(cards.shape[0]) * len(models)
         if int(max_live_calls) < required_live_calls:
@@ -182,6 +187,7 @@ def build_demand_vintage_oos(
         "cache_dir": str(cache_dir) if forecast_mode in {"replay", "live"} else None,
         "fresh_cache": bool(fresh_cache),
         "origin_count": int(origins.shape[0]),
+        "scored_origin_count": int(cards["origin_id"].nunique()) if "origin_id" in cards else 0,
         "card_count": int(cards.shape[0]),
         "target_rows": int(targets.shape[0]),
         "forecast_rows": int(forecasts.shape[0]),
@@ -771,6 +777,12 @@ def _finite_payload_float(value: Any, field_name: str) -> float:
     if not np.isfinite(numeric):
         raise LLMUnavailable(f"Vintage OOS forecast payload field {field_name} must be finite")
     return float(numeric)
+
+
+def _cache_json_count(cache_dir: Path) -> int:
+    if not cache_dir.exists():
+        return 0
+    return sum(1 for path in cache_dir.rglob("*.json") if path.is_file())
 
 
 def _vintage_bottom_line(manifest: dict[str, Any]) -> str:

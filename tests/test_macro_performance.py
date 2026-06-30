@@ -11,7 +11,11 @@ import pandas as pd
 
 from macro_llm_tournament.macro_performance_gate import (
     DEFAULT_TARGET_CATALOG,
+    _bottom_line,
+    _vintage_oos_empirical_eligible,
+    build_oos_pairwise_comparison,
     build_performance_attribution,
+    build_performance_vintage_readiness,
     catalog_sha256,
     load_performance_target_catalog,
     macro_performance_verdict,
@@ -183,6 +187,41 @@ class MacroPerformanceTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("--max-live-calls must be at least", result.stderr)
+
+    def test_demand_vintage_oos_live_fresh_cache_rejects_existing_cache_json(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache_dir = root / "cache"
+            (cache_dir / "codex_cli").mkdir(parents=True)
+            (cache_dir / "codex_cli" / "stale.json").write_text("{}", encoding="utf-8")
+
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--forecast-mode",
+                    "live",
+                    "--provider",
+                    "codex_cli",
+                    "--models",
+                    "gpt-5.5",
+                    "--fresh-cache",
+                    "--cache-dir",
+                    str(cache_dir),
+                    "--max-live-calls",
+                    "100",
+                    "--max-origins",
+                    "8",
+                    "--output-dir",
+                    str(root / "out"),
+                ]
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("require an empty cache directory", result.stderr)
 
     def test_macro_performance_fixture_scores_lab_without_empirical_overclaim(self):
         with TemporaryDirectory() as temp_dir:
@@ -394,6 +433,116 @@ class MacroPerformanceTests(unittest.TestCase):
         self.assertEqual(attribution.loc[0, "llm_weighted_loss"], 2.0)
         self.assertEqual(attribution.loc[0, "best_baseline_weighted_loss"], 3.0)
         self.assertAlmostEqual(float(attribution.loc[0, "loss_improvement_pct"]), 33.3333333333)
+
+    def test_oos_pairwise_comparison_clusters_by_origin_against_best_baseline(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rows = []
+            for origin_id in ["origin_a", "origin_b"]:
+                for card_idx in range(2):
+                    card_id = f"{origin_id}_card_{card_idx}"
+                    for source, variant, loss in [
+                        ("llm_live", "llm_belief", 1.0),
+                        ("rolling_trend", "rolling_trend", 3.0),
+                        ("rolling_mean", "rolling_mean", 4.0),
+                        ("no_change", "no_change", 5.0),
+                    ]:
+                        rows.append(
+                            {
+                                "source": source,
+                                "variant": variant,
+                                "origin_id": origin_id,
+                                "card_id": card_id,
+                                "normalized_abs_error": loss,
+                            }
+                        )
+            pd.DataFrame(rows).to_csv(root / "demand_vintage_oos_joined_errors.csv", index=False)
+
+            pairwise = build_oos_pairwise_comparison(root, bootstrap_samples=200, seed=7)
+
+            self.assertEqual(pairwise.loc[0, "llm_source"], "llm_live")
+            self.assertEqual(pairwise.loc[0, "best_baseline_source"], "rolling_trend")
+            self.assertEqual(int(pairwise.loc[0, "n_clusters"]), 2)
+            self.assertEqual(pairwise.loc[0, "mean_loss_reduction"], 2.0)
+            self.assertAlmostEqual(float(pairwise.loc[0, "improvement_pct"]), 66.6666666667)
+            self.assertEqual(pairwise.loc[0, "bootstrap_share_positive"], 1.0)
+
+    def test_vintage_readiness_uses_configured_oos_artifact_dir(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            panel_dir = root / "panel"
+            oos_dir = root / "oos"
+            panel_dir.mkdir()
+            oos_dir.mkdir()
+            (panel_dir / "fred_vintage_status.json").write_text(
+                json.dumps({"origin_count": 24, "series_ids": ["PCECC96", "PSAVERT", "CPIAUCSL", "UNRATE", "FEDFUNDS", "UMCSENT", "GDPC1"]}),
+                encoding="utf-8",
+            )
+            pd.DataFrame({"origin": [f"origin_{idx}" for idx in range(8)], "split": ["test"] * 8}).to_csv(
+                panel_dir / "forecast_origins_for_vintage_context.csv",
+                index=False,
+            )
+            pd.DataFrame(
+                {
+                    "as_of_date": ["2026-01-01"],
+                    "realtime_start": ["2026-01-01"],
+                    "realtime_end": ["2026-01-01"],
+                    "observation_date": ["2025-10-01"],
+                    "series_id": ["PCECC96"],
+                }
+            ).to_csv(panel_dir / "fred_vintage_context.csv", index=False)
+            for filename in [
+                "demand_vintage_oos_cards.csv",
+                "demand_vintage_oos_targets.csv",
+                "demand_vintage_oos_scores.csv",
+            ]:
+                (oos_dir / filename).write_text("ok\n", encoding="utf-8")
+
+            readiness = build_performance_vintage_readiness(panel_dir, oos_dir)
+            artifact_rows = readiness[readiness["metric"].astype(str).str.startswith("demand_vintage_oos_")]
+
+            self.assertEqual(set(artifact_rows["status"]), {"pass"})
+            self.assertEqual(set(artifact_rows["source"]), {str(oos_dir)})
+
+    def test_live_oos_empirical_eligibility_rejects_cache_hits(self):
+        base = {
+            "passed": True,
+            "mode": "panel",
+            "forecast_mode": "live",
+            "verdict": "demand_vintage_oos_scored",
+            "live_call_count": 10,
+            "cache_hit_count": 0,
+        }
+
+        self.assertTrue(_vintage_oos_empirical_eligible(base))
+        self.assertFalse(_vintage_oos_empirical_eligible({**base, "cache_hit_count": 1}))
+        self.assertFalse(_vintage_oos_empirical_eligible({**base, "live_call_count": 0}))
+        self.assertTrue(
+            _vintage_oos_empirical_eligible(
+                {
+                    "passed": True,
+                    "mode": "panel",
+                    "forecast_mode": "replay",
+                    "verdict": "demand_vintage_oos_scored",
+                    "live_call_count": 0,
+                    "cache_hit_count": 10,
+                }
+            )
+        )
+
+    def test_performance_report_distinguishes_oos_baseline_win_from_empirical_pass(self):
+        manifest = {
+            "verdict": "macro_lab_performance_ready",
+            "vintage_oos_scores_available": True,
+            "vintage_oos_empirical_eligible": True,
+            "vintage_oos_llm_baseline_improvement_pct": 9.8,
+        }
+
+        text = _bottom_line(manifest, pd.DataFrame())
+
+        self.assertIn("beats the strongest deterministic baseline", text)
+        self.assertIn("absolute OOS target is still missed", text)
+        self.assertNotIn("has not beaten", text)
 
     def test_macro_performance_live_mode_blocks_without_spending_calls(self):
         with TemporaryDirectory() as temp_dir:
