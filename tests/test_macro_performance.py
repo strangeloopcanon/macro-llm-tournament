@@ -11,6 +11,7 @@ import pandas as pd
 
 from macro_llm_tournament.macro_performance_gate import (
     DEFAULT_TARGET_CATALOG,
+    build_performance_attribution,
     catalog_sha256,
     load_performance_target_catalog,
     macro_performance_verdict,
@@ -345,6 +346,54 @@ class MacroPerformanceTests(unittest.TestCase):
             macro_performance_verdict(scores, summary, better_attribution, mode="replay", oos_empirical_eligible=True),
             "macro_empirical_oos_ready",
         )
+
+    def test_oos_attribution_uses_raw_error_when_target_loss_is_clipped(self):
+        summary = pd.DataFrame(
+            [
+                {
+                    "source": "llm_live",
+                    "variant": "llm_belief",
+                    "split": "oos",
+                    "weighted_normalized_loss": 1.0,
+                    "macro_performance_score": 0.0,
+                },
+                {
+                    "source": "rolling_trend",
+                    "variant": "rolling_trend",
+                    "split": "oos",
+                    "weighted_normalized_loss": 1.0,
+                    "macro_performance_score": 0.0,
+                },
+            ]
+        )
+        scores = pd.DataFrame(
+            [
+                {
+                    "source": "llm_live",
+                    "variant": "llm_belief",
+                    "split": "oos",
+                    "metric": "weighted_normalized_abs_error",
+                    "status": "fail",
+                    "value": 2.0,
+                    "normalized_loss": 1.0,
+                },
+                {
+                    "source": "rolling_trend",
+                    "variant": "rolling_trend",
+                    "split": "oos",
+                    "metric": "weighted_normalized_abs_error",
+                    "status": "fail",
+                    "value": 3.0,
+                    "normalized_loss": 1.0,
+                },
+            ]
+        )
+
+        attribution = build_performance_attribution(summary, scores=scores)
+
+        self.assertEqual(attribution.loc[0, "llm_weighted_loss"], 2.0)
+        self.assertEqual(attribution.loc[0, "best_baseline_weighted_loss"], 3.0)
+        self.assertAlmostEqual(float(attribution.loc[0, "loss_improvement_pct"]), 33.3333333333)
 
     def test_macro_performance_live_mode_blocks_without_spending_calls(self):
         with TemporaryDirectory() as temp_dir:

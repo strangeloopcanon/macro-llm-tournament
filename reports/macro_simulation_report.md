@@ -2,9 +2,9 @@
 
 ## Bottom Line
 
-The current repository now has a playable, date-free macro simulation engine with quantitative gates. Households emit bounded beliefs, firms and policy/narrative actors emit bounded reactions, and deterministic code enforces budgets, consumption, saving, debt repayment, liquidity, aggregation, feedback, and accounting. The current fixture run clears the lab performance gate and the branchable playground QA gate.
+The project now has a playable, date-free macro simulation engine and a live out-of-sample forecast test.
 
-The claim supported by the current run is: the macro ecology is ready for controlled experiments and live/cached model comparisons. The empirical macro-prediction claim is gated behind a non-fixture vintage out-of-sample run.
+The new result is positive but bounded: live GPT models beat simple deterministic baselines on held-out, date-free vintage macro cards, but the absolute forecast errors are still too large for the stricter empirical-ready gate. In plain English: there is real predictive signal in the LLM belief layer, but it is not yet a strong macro-prediction engine.
 
 ## What The Ecology Does
 
@@ -24,13 +24,13 @@ This is closer to a controllable macro laboratory than a persona exercise. The L
 
 ## Current Run
 
-The current fixture run used:
+The current state combines three layers:
 
-- 24 fixture household cells in the demand-economy performance run.
-- 12 household cells, 20 periods, and 5 branches in the playable macro playground.
-- Branches: baseline, transfer shock, rate hike, job-risk shock, and belief-feedback.
-- 119 date-free vintage OOS fixture cards with hidden targets and a leakage audit.
-- Zero live model calls.
+- Playable macro playground fixture: 12 household cells, 20 periods, 5 branches.
+- Demand-economy performance fixture: 24 household cells, closed-loop scenarios, mechanism scoring.
+- Live vintage OOS forecast test: 147 held-out date-free cards from the FRED vintage panel test split.
+
+The live OOS test used `openai_responses` with `gpt-5.5` and `gpt-5.4`. Each model made 147 live calls. The combined replay artifact then scored both models with zero additional live calls.
 
 ## Results
 
@@ -51,7 +51,7 @@ The macro playground returned `macro_playground_fixture_ready`.
 | Firm channel | Pass: firm price/hiring effects enter only through bounded channels |
 | Critic flags | Pass: no blocking critic flags |
 
-### 2. Macro performance gate: pass
+### 2. Lab performance gate: pass
 
 The performance gate returned `macro_lab_performance_ready`.
 
@@ -62,44 +62,66 @@ The performance gate returned `macro_lab_performance_ready`.
 | Representative baseline | 10/14 pass | 4 | 0.0424 | 0.9576 |
 | Naive persona fixture | 9/14 pass | 5 | 0.2341 | 0.7659 |
 
-The LLM belief fixture clears the lab target catalog: accounting, transfer MPC, low/high-liquidity MPCs, liquidity and income gradients, monetary-shock signs, job-risk precaution, belief-feedback amplification, belief dispersion, and IRF shape.
+The useful comparison is that the belief-module architecture clears the mechanism surface while the direct persona baseline fails expected checks. The architecture is doing the right job: beliefs go through constrained economics instead of directly choosing whatever consumption path sounds plausible.
 
-The useful comparison is not that the fixture label is magic. It is that the belief-module architecture clears the target surface while the direct persona baseline fails the expected mechanism checks. The architecture is doing the right job: beliefs go through constrained economics instead of directly choosing whatever consumption path sounds plausible.
+### 3. Live date-free vintage OOS: relative signal, not full pass
 
-### 3. Date-free vintage OOS fixture: pass as a runner, not as model evidence
-
-The vintage OOS runner returned `demand_vintage_oos_fixture_ready`.
+The live OOS runner returned `demand_vintage_oos_scored`.
 
 | Check | Result |
 | --- | --- |
-| Cards | 119 |
-| Hidden target rows | 119 |
-| Forecast score rows | 84 |
+| Held-out test cards | 147 |
+| Target families | 7 |
+| GPT-5.5 live calls | 147 |
+| GPT-5.4 live calls | 147 |
+| Combined replay cache hits | 294 |
 | Leakage issues | 0 |
 
-On the fixture test split, weighted normalized absolute error was:
+Weighted normalized absolute error on the held-out test split:
 
-| Source | Test Error |
-| --- | ---: |
-| LLM belief fixture | 0.0791 |
-| Rolling trend | 0.0968 |
-| Rolling mean | 0.1894 |
-| No change | 0.1990 |
+| Source | Test Error | Improvement vs best baseline |
+| --- | ---: | ---: |
+| GPT-5.4 LLM belief | 2.8429 | 9.88% |
+| GPT-5.5 LLM belief | 2.9096 | 7.77% |
+| Rolling trend | 3.1546 | baseline |
+| Rolling mean | 3.2177 | baseline |
+| No change | 3.2716 | baseline |
 
-This validates the date-free card, hidden-target, scoring, and leakage-audit machinery. It is still a fixture, so it does not count as evidence that a live LLM predicts macro outcomes out of sample.
+The live models beat all simple baselines overall. GPT-5.4 is best overall; GPT-5.5 wins more individual target families but by smaller margins.
+
+GPT-5.5 beats the best baseline on 6 of 7 target families, losing only inflation. GPT-5.4 beats the best baseline on 5 of 7 target families, losing inflation and sentiment.
+
+| Target Family | GPT-5.5 vs Best Baseline | GPT-5.4 vs Best Baseline |
+| --- | ---: | ---: |
+| Policy rate level | +33.82% | +42.51% |
+| Unemployment rate level | +20.00% | +44.62% |
+| Saving rate level | +9.58% | +10.54% |
+| Output growth | +5.01% | +9.81% |
+| Real consumption growth | +2.11% | +3.53% |
+| Sentiment growth | +2.20% | -9.69% |
+| Inflation growth | -2.69% | -13.59% |
+
+The macro performance gate still reports `empirical_ready: false` because the absolute OOS error target is not met. The best LLM error is `2.8429`, while the current empirical-ready target requires weighted normalized absolute error at or below `1.0`.
 
 ## What We Can Say Now
 
-The project has moved from "can we make macro agents look plausible?" to "can we run a bounded macro ecology and score it?" The answer to the second question is now yes.
+We can now say that the LLM belief layer contains useful out-of-sample macro signal under date-free, hidden-target conditions. That is new.
 
-The system can run counterfactual branches, preserve accounting, expose actor contributions, and score whether mechanisms behave in the right direction. It can test whether belief updates, firm reactions, policy narratives, and household heterogeneity add value over rule-only baselines.
+We cannot yet say that the full simulated economy is empirically predictive in the strong sense. The live forecast layer beats baselines, but the misses are large in volatile consumption/output periods. The system has crossed from "playable sandbox" to "promising predictive signal"; it has not crossed to "strong macro validity."
 
 ## Current Limit
 
-The current run is fixture-only. The manifest correctly reports `empirical_ready: false`.
+The main failure mode is underreaction to large real consumption and output swings. The date-free test split includes big macro moves, and the live models mostly produce conservative forecasts. That helps against naive baselines but does not get close enough to the realized path.
 
-The next result to chase is a non-fixture vintage OOS run: same date-free cards, hidden targets, and baseline comparisons, but with actual model belief payloads instead of fixture forecasts. That is the gate that turns this from a validated macro sandbox into empirical predictive evidence.
+This is actually useful diagnostically: the next improvement should not be more personas. It should be better belief dynamics around regime shifts, rebound risk, uncertainty, and asymmetric responses after sharp changes.
 
 ## Next Test
 
-Run the vintage OOS path with live or replayed model belief calls, then feed those artifacts into the performance gate. The pass condition is `macro_empirical_oos_ready`: the lab gate still passes, the vintage OOS artifact is non-fixture, the LLM-belief rows have no blocking gaps or failures, and the result beats simple baselines on the held-out target surface.
+The next gate should add a calibrated belief-dynamics module before the household behavior layer:
+
+- expose recent level changes, volatility, and drawdown/rebound features more explicitly in the date-free cards;
+- ask models for distributions, not only point forecasts;
+- calibrate on validation split only, then lock prompts/transforms before test scoring;
+- feed calibrated beliefs into the demand economy and test whether behavior predictions improve, not just raw macro forecasts.
+
+Success means the live/replay LLM layer beats deterministic baselines and brings absolute OOS error materially closer to the empirical-ready threshold.

@@ -133,7 +133,7 @@ def build_macro_performance_gate(
     score_inputs = build_score_input_frames(artifacts, vintage_oos_dir=vintage_oos_dir)
     scores = score_performance_targets(catalog, score_inputs)
     variant_summary = summarize_variant_performance(scores)
-    attribution = build_performance_attribution(variant_summary)
+    attribution = build_performance_attribution(variant_summary, scores=scores)
     vintage_readiness = score_vintage_oos_readiness(vintage_panel_dir)
     manifest = build_macro_performance_manifest(
         artifacts_manifest=artifacts.manifest,
@@ -232,13 +232,17 @@ def summarize_variant_performance(scores: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["split", "variant", "source"]).reset_index(drop=True)
 
 
-def build_performance_attribution(summary: pd.DataFrame) -> pd.DataFrame:
+def build_performance_attribution(summary: pd.DataFrame, *, scores: pd.DataFrame | None = None) -> pd.DataFrame:
     if summary.empty:
         return pd.DataFrame()
     rows: list[dict[str, Any]] = []
     for split, split_rows in summary.groupby("split", sort=True):
-        llm = split_rows[split_rows["variant"].astype(str) == LLM_VARIANT]
         baseline_variants = VINTAGE_OOS_BASELINE_VARIANTS if str(split) == "oos" else DETERMINISTIC_BASELINE_VARIANTS
+        attribution_rows = _oos_raw_attribution_rows(scores, split=str(split), baseline_variants=baseline_variants)
+        if attribution_rows is not None:
+            rows.append(attribution_rows)
+            continue
+        llm = split_rows[split_rows["variant"].astype(str) == LLM_VARIANT]
         baselines = split_rows[split_rows["variant"].astype(str).isin(baseline_variants)]
         if llm.empty or baselines.empty:
             continue
@@ -262,6 +266,50 @@ def build_performance_attribution(summary: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _oos_raw_attribution_rows(
+    scores: pd.DataFrame | None,
+    *,
+    split: str,
+    baseline_variants: set[str],
+) -> dict[str, Any] | None:
+    if split != "oos" or scores is None or scores.empty:
+        return None
+    rows = scores[
+        (scores["split"].astype(str) == "oos")
+        & (scores["metric"].astype(str) == "weighted_normalized_abs_error")
+        & (scores["status"].astype(str).isin({"pass", "fail"}))
+    ].copy()
+    if rows.empty:
+        return None
+    llm = rows[rows["variant"].astype(str) == LLM_VARIANT].copy()
+    baselines = rows[rows["variant"].astype(str).isin(baseline_variants)].copy()
+    if llm.empty or baselines.empty:
+        return None
+    llm["raw_loss"] = pd.to_numeric(llm["value"], errors="coerce")
+    baselines["raw_loss"] = pd.to_numeric(baselines["value"], errors="coerce")
+    llm = llm[np.isfinite(llm["raw_loss"])]
+    baselines = baselines[np.isfinite(baselines["raw_loss"])]
+    if llm.empty or baselines.empty:
+        return None
+    llm_row = llm.sort_values(["raw_loss", "source"]).iloc[0]
+    baseline_row = baselines.sort_values(["raw_loss", "source"]).iloc[0]
+    llm_loss = float(llm_row["raw_loss"])
+    baseline_loss = float(baseline_row["raw_loss"])
+    improvement = (baseline_loss - llm_loss) / baseline_loss if baseline_loss > 0 else np.nan
+    return {
+        "split": split,
+        "llm_source": llm_row["source"],
+        "best_baseline_source": baseline_row["source"],
+        "best_baseline_variant": baseline_row["variant"],
+        "llm_score": float(1.0 - float(llm_row["normalized_loss"])),
+        "best_baseline_score": float(1.0 - float(baseline_row["normalized_loss"])),
+        "llm_weighted_loss": llm_loss,
+        "best_baseline_weighted_loss": baseline_loss,
+        "loss_improvement_pct": 100.0 * improvement if np.isfinite(improvement) else np.nan,
+        "interpretation": "Positive means the LLM belief variant lowers raw vintage OOS weighted normalized absolute error versus the strongest deterministic baseline.",
+    }
 
 
 def build_macro_performance_manifest(
