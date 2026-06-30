@@ -12,14 +12,18 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .agent_common import OUTPUT_ROOT, WORK_ROOT, markdown_table
+from .agent_common import OUTPUT_ROOT, WORK_ROOT, cache_key, markdown_table
+from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
+from .llm_common import LLMUnavailable
 
 
 DEMAND_VINTAGE_OOS_VERSION = "demand_vintage_oos_v1"
 PROMPT_VERSION = "demand_vintage_oos_card_v1"
 DEFAULT_VINTAGE_PANEL_DIR = WORK_ROOT / "fred_vintage_panel"
 DEFAULT_OUTPUT_DIR = OUTPUT_ROOT / "demand_vintage_oos_fixture"
+DEFAULT_FORECAST_CACHE_DIR = WORK_ROOT / "demand_vintage_oos_cache"
 OOS_MODES = ("fixture", "panel")
+FORECAST_MODES = ("fixture", "replay", "live")
 
 
 @dataclass(frozen=True)
@@ -43,9 +47,15 @@ TARGET_SPECS: tuple[VintageTargetSpec, ...] = (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build date-free vintage OOS demand cards, targets, and baseline scores.")
+    parser = argparse.ArgumentParser(description="Build date-free vintage OOS demand cards, model forecasts, targets, and scores.")
     parser.add_argument("--vintage-panel-dir", default=str(DEFAULT_VINTAGE_PANEL_DIR))
     parser.add_argument("--mode", choices=OOS_MODES, default="panel")
+    parser.add_argument("--forecast-mode", choices=FORECAST_MODES, default="fixture")
+    parser.add_argument("--provider", choices=SUPPORTED_FORECAST_PROVIDERS, default="codex_cli")
+    parser.add_argument("--models", default="gpt-5.5")
+    parser.add_argument("--max-live-calls", type=int, default=0)
+    parser.add_argument("--cache-dir", default=None)
+    parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--max-origins", type=int, default=0, help="Optional cap on origins; 0 means all available origins.")
     parser.add_argument("--history-periods", type=int, default=8)
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
@@ -54,17 +64,36 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    models = _parse_models(args.models)
+    if args.forecast_mode in {"replay", "live"} and not models:
+        raise SystemExit("--models must contain at least one model when --forecast-mode uses an LLM client")
+    if args.forecast_mode == "live":
+        if args.max_live_calls <= 0:
+            raise SystemExit("--max-live-calls must be positive when --forecast-mode live is used")
+        if not args.fresh_cache:
+            raise SystemExit("--fresh-cache is required when --forecast-mode live is used")
+    output_dir = Path(args.output_dir)
+    cache_dir = _resolve_forecast_cache_dir(args, output_dir)
     origins, context, data_status = load_vintage_panel(Path(args.vintage_panel_dir), mode=args.mode)
-    result = build_demand_vintage_oos(
-        origins,
-        context,
-        mode=args.mode,
-        max_origins=args.max_origins,
-        history_periods=args.history_periods,
-        data_status=data_status,
-        vintage_panel_dir=Path(args.vintage_panel_dir),
-    )
-    write_demand_vintage_oos_outputs(result, Path(args.output_dir))
+    try:
+        result = build_demand_vintage_oos(
+            origins,
+            context,
+            mode=args.mode,
+            forecast_mode=args.forecast_mode,
+            provider=args.provider,
+            models=models,
+            max_live_calls=args.max_live_calls,
+            cache_dir=cache_dir,
+            fresh_cache=args.fresh_cache,
+            max_origins=args.max_origins,
+            history_periods=args.history_periods,
+            data_status=data_status,
+            vintage_panel_dir=Path(args.vintage_panel_dir),
+        )
+    except LLMUnavailable as exc:
+        raise SystemExit(str(exc)) from exc
+    write_demand_vintage_oos_outputs(result, output_dir)
     print(f"Wrote demand vintage OOS run to {args.output_dir}")
     print(json.dumps({"verdict": result["manifest"]["verdict"], "passed": result["manifest"]["passed"]}, indent=2, sort_keys=True))
     return 0 if result["manifest"]["passed"] else 1
@@ -88,35 +117,76 @@ def build_demand_vintage_oos(
     context: pd.DataFrame,
     *,
     mode: str,
+    forecast_mode: str = "fixture",
+    provider: str = "codex_cli",
+    models: list[str] | None = None,
+    max_live_calls: int = 0,
+    cache_dir: Path | None = None,
+    fresh_cache: bool = False,
     max_origins: int = 0,
     history_periods: int = 8,
     data_status: dict[str, Any] | None = None,
     vintage_panel_dir: Path | None = None,
 ) -> dict[str, Any]:
+    if mode not in OOS_MODES:
+        raise ValueError(f"Unsupported vintage OOS mode: {mode}")
+    if forecast_mode not in FORECAST_MODES:
+        raise ValueError(f"Unsupported forecast mode: {forecast_mode}")
+    models = list(models or ["gpt-5.5"])
+    cache_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_FORECAST_CACHE_DIR
     origins = _normalize_origins(origins)
     context = _normalize_context(context)
     if max_origins and max_origins > 0:
         origins = _balanced_origin_sample(origins, max_origins)
     cards, targets = build_vintage_cards_and_targets(origins, context, history_periods=history_periods)
-    forecasts = build_vintage_forecasts(cards, targets)
+    if forecast_mode == "live":
+        required_live_calls = int(cards.shape[0]) * len(models)
+        if int(max_live_calls) < required_live_calls:
+            raise LLMUnavailable(
+                "--max-live-calls must be at least "
+                f"{required_live_calls} for a fresh live vintage OOS run with {len(models)} model(s) and {cards.shape[0]} card(s)"
+            )
+    forecasts = build_vintage_forecasts(cards, targets, include_llm_fixture=(forecast_mode == "fixture"))
+    raw_records: list[dict[str, Any]] = []
+    live_call_count = 0
+    cache_hit_count = 0
+    if forecast_mode in {"replay", "live"}:
+        model_forecasts, raw_records, live_call_count, cache_hit_count = build_vintage_model_forecasts(
+            cards,
+            provider=provider,
+            models=models,
+            forecast_mode=forecast_mode,
+            max_live_calls=max_live_calls,
+            cache_dir=cache_dir,
+        )
+        forecasts = pd.concat([forecasts, model_forecasts], ignore_index=True) if not model_forecasts.empty else forecasts
     scores, joined = score_vintage_forecasts(forecasts, targets)
     summary = summarize_vintage_scores(scores)
     leakage = audit_card_leakage(cards)
-    verdict = vintage_oos_verdict(cards, targets, scores, leakage, mode=mode)
+    verdict = vintage_oos_verdict(cards, targets, scores, leakage, mode=mode, forecast_mode=forecast_mode)
     manifest = {
         "schema_version": DEMAND_VINTAGE_OOS_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "mode": mode,
+        "forecast_mode": forecast_mode,
         "status": "ok",
         "verdict": verdict,
         "passed": verdict in {"demand_vintage_oos_fixture_ready", "demand_vintage_oos_scored"},
         "vintage_panel_dir": str(vintage_panel_dir) if vintage_panel_dir is not None else None,
         "data_status": data_status or {},
+        "provider": provider if forecast_mode in {"replay", "live"} else None,
+        "models": models if forecast_mode in {"replay", "live"} else [],
+        "max_live_calls": int(max_live_calls),
+        "live_call_count": int(live_call_count),
+        "cache_hit_count": int(cache_hit_count),
+        "cache_dir": str(cache_dir) if forecast_mode in {"replay", "live"} else None,
+        "fresh_cache": bool(fresh_cache),
         "origin_count": int(origins.shape[0]),
         "card_count": int(cards.shape[0]),
         "target_rows": int(targets.shape[0]),
         "forecast_rows": int(forecasts.shape[0]),
         "score_rows": int(scores.shape[0]),
+        "raw_record_count": int(len(raw_records)),
         "leakage_issue_count": int(leakage.shape[0]),
         "target_specs": [spec.target_name for spec in TARGET_SPECS],
         "cards_sha256": frame_sha256(cards),
@@ -129,6 +199,7 @@ def build_demand_vintage_oos(
             "demand_vintage_oos_joined_errors.csv",
             "demand_vintage_oos_summary.csv",
             "demand_vintage_oos_leakage_audit.csv",
+            "demand_vintage_oos_raw_records.json",
             "demand_vintage_oos_report.md",
             "manifest.json",
         ],
@@ -143,6 +214,7 @@ def build_demand_vintage_oos(
         "joined": joined,
         "summary": summary,
         "leakage": leakage,
+        "raw_records": raw_records,
         "report": report,
     }
 
@@ -226,7 +298,7 @@ def build_vintage_cards_and_targets(origins: pd.DataFrame, context: pd.DataFrame
     return pd.DataFrame(card_rows), pd.DataFrame(target_rows)
 
 
-def build_vintage_forecasts(cards: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
+def build_vintage_forecasts(cards: pd.DataFrame, targets: pd.DataFrame, *, include_llm_fixture: bool = True) -> pd.DataFrame:
     if cards.empty or targets.empty:
         return pd.DataFrame()
     target_by_card = targets.set_index("card_id")
@@ -241,12 +313,14 @@ def build_vintage_forecasts(cards: pd.DataFrame, targets: pd.DataFrame) -> pd.Da
         rolling_mean = _rolling_mean_forecast(str(target["transform"]), values)
         rolling_trend = _rolling_trend_forecast(str(target["transform"]), values)
         llm_fixture = 0.20 * no_change + 0.35 * rolling_mean + 0.45 * rolling_trend
-        for source, forecast, variant in [
+        forecast_specs = [
             ("no_change", no_change, "no_change"),
             ("rolling_mean", rolling_mean, "rolling_mean"),
             ("rolling_trend", rolling_trend, "rolling_trend"),
-            ("llm_belief_fixture", llm_fixture, "llm_belief"),
-        ]:
+        ]
+        if include_llm_fixture:
+            forecast_specs.append(("llm_belief_fixture", llm_fixture, "llm_belief"))
+        for source, forecast, variant in forecast_specs:
             rows.append(
                 {
                     "schema_version": DEMAND_VINTAGE_OOS_VERSION,
@@ -262,6 +336,141 @@ def build_vintage_forecasts(cards: pd.DataFrame, targets: pd.DataFrame) -> pd.Da
                 }
             )
     return pd.DataFrame(rows)
+
+
+def build_vintage_model_forecasts(
+    cards: pd.DataFrame,
+    *,
+    provider: str,
+    models: list[str],
+    forecast_mode: str,
+    max_live_calls: int,
+    cache_dir: Path,
+) -> tuple[pd.DataFrame, list[dict[str, Any]], int, int]:
+    rows: list[dict[str, Any]] = []
+    raw_records: list[dict[str, Any]] = []
+    live_used = 0
+    cache_hits = 0
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for model in models:
+        client = ForecastLLMClient(
+            provider,
+            model,
+            cache_dir,
+            mode=forecast_mode,
+            max_live_calls=max(0, int(max_live_calls) - live_used),
+        )
+        for _, card in cards.iterrows():
+            prompt_payload = json.loads(str(card["prompt_payload_json"]))
+            cache_name = vintage_forecast_cache_name(provider, model, prompt_payload)
+            raw = client.json_call(vintage_forecast_prompt(prompt_payload), cache_name, instructions=vintage_forecast_instructions())
+            payload = normalize_vintage_forecast_payload(raw.get("payload"), prompt_payload=prompt_payload)
+            payload_hash = hashlib.sha256(
+                json.dumps(_jsonable(payload), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            ).hexdigest()
+            prompt_hash = hashlib.sha256(
+                json.dumps(prompt_payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            ).hexdigest()
+            source = f"llm_{provider}_{model}".replace("/", "_").replace(":", "_")
+            rows.append(
+                {
+                    "schema_version": DEMAND_VINTAGE_OOS_VERSION,
+                    "card_id": card["card_id"],
+                    "origin_id": card["origin_id"],
+                    "split": card["split"],
+                    "target_name": card["target_name"],
+                    "source": source,
+                    "variant": "llm_belief",
+                    "forecast_value": float(payload["forecast_value"]),
+                    "confidence": float(payload["confidence"]),
+                    "reason": str(payload["reason"]),
+                }
+            )
+            raw_records.append(
+                {
+                    "schema_version": DEMAND_VINTAGE_OOS_VERSION,
+                    "prompt_version": PROMPT_VERSION,
+                    "provider": provider,
+                    "model": model,
+                    "forecast_mode": forecast_mode,
+                    "cache_name": cache_name,
+                    "cache_hit": bool(raw.get("cache_hit", False)),
+                    "cache_path": raw.get("cache_path"),
+                    "card_id": card["card_id"],
+                    "origin_id": card["origin_id"],
+                    "split": card["split"],
+                    "target_name": card["target_name"],
+                    "prompt_payload_sha256": prompt_hash,
+                    "payload_sha256": payload_hash,
+                    "payload": payload,
+                }
+            )
+        live_used += client.live_call_count
+        cache_hits += client.cache_hit_count
+    return pd.DataFrame(rows), raw_records, int(live_used), int(cache_hits)
+
+
+def vintage_forecast_cache_name(provider: str, model: str, prompt_payload: dict[str, Any]) -> str:
+    key = cache_key(
+        {
+            "kind": "demand_vintage_oos_forecast",
+            "provider": provider,
+            "model": model,
+            "prompt_version": PROMPT_VERSION,
+            "prompt_payload": prompt_payload,
+        }
+    )
+    return f"demand_vintage_oos_forecast_{key}"
+
+
+def vintage_forecast_prompt(prompt_payload: dict[str, Any]) -> str:
+    return f"""
+You are forecasting one date-free macro demand card.
+Use only the card JSON below. Do not infer a calendar date, named crisis, or hidden realized outcome.
+
+Card JSON:
+{json.dumps(prompt_payload, indent=2, sort_keys=True)}
+
+Return exactly this JSON object:
+{{
+  "forecast_value": 0.0,
+  "confidence": 0.0,
+  "reason": "short reason based only on the supplied relative history"
+}}
+""".strip()
+
+
+def vintage_forecast_instructions() -> str:
+    return """
+Return only valid JSON. Use only the supplied date-free card. Do not browse,
+inspect files, run commands, name calendar episodes, or cite realized outcomes.
+forecast_value must be numeric in the target units; confidence must be between 0 and 1.
+""".strip()
+
+
+def normalize_vintage_forecast_payload(payload: Any, *, prompt_payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise LLMUnavailable("Vintage OOS forecast payload must be a JSON object")
+    allowed = {"prompt_version", "forecast_value", "confidence", "reason"}
+    extra = sorted(set(payload) - allowed)
+    if extra:
+        raise LLMUnavailable(f"Vintage OOS forecast payload has unexpected field(s): {', '.join(extra)}")
+    if "prompt_version" in payload and str(payload["prompt_version"]) != str(prompt_payload.get("prompt_version")):
+        raise LLMUnavailable("Vintage OOS forecast payload prompt_version does not match the card")
+    forecast_value = _finite_payload_float(payload.get("forecast_value"), "forecast_value")
+    if abs(forecast_value) > 10000.0:
+        raise LLMUnavailable("Vintage OOS forecast_value is outside the allowed +/-10000 bound")
+    confidence = _finite_payload_float(payload.get("confidence"), "confidence")
+    if confidence < 0.0 or confidence > 1.0:
+        raise LLMUnavailable("Vintage OOS confidence must be between 0 and 1")
+    reason = str(payload.get("reason", "")).strip()
+    if not reason:
+        raise LLMUnavailable("Vintage OOS forecast payload reason must be non-empty")
+    return {
+        "forecast_value": float(forecast_value),
+        "confidence": float(confidence),
+        "reason": reason[:500],
+    }
 
 
 def score_vintage_forecasts(forecasts: pd.DataFrame, targets: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -344,12 +553,20 @@ def audit_card_leakage(cards: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def vintage_oos_verdict(cards: pd.DataFrame, targets: pd.DataFrame, scores: pd.DataFrame, leakage: pd.DataFrame, *, mode: str) -> str:
+def vintage_oos_verdict(
+    cards: pd.DataFrame,
+    targets: pd.DataFrame,
+    scores: pd.DataFrame,
+    leakage: pd.DataFrame,
+    *,
+    mode: str,
+    forecast_mode: str,
+) -> str:
     if not leakage.empty:
         return "demand_vintage_oos_leakage_failed"
     if cards.empty or targets.empty or scores.empty:
         return "demand_vintage_oos_needs_work"
-    if mode == "fixture":
+    if mode == "fixture" or forecast_mode == "fixture":
         return "demand_vintage_oos_fixture_ready"
     return "demand_vintage_oos_scored"
 
@@ -363,6 +580,10 @@ def write_demand_vintage_oos_outputs(result: dict[str, Any], output_dir: Path) -
     result["joined"].to_csv(output_dir / "demand_vintage_oos_joined_errors.csv", index=False)
     result["summary"].to_csv(output_dir / "demand_vintage_oos_summary.csv", index=False)
     result["leakage"].to_csv(output_dir / "demand_vintage_oos_leakage_audit.csv", index=False)
+    (output_dir / "demand_vintage_oos_raw_records.json").write_text(
+        json.dumps(_jsonable(result.get("raw_records", [])), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     (output_dir / "demand_vintage_oos_report.md").write_text(result["report"], encoding="utf-8")
     (output_dir / "manifest.json").write_text(json.dumps(_jsonable(result["manifest"]), indent=2, sort_keys=True), encoding="utf-8")
 
@@ -528,6 +749,28 @@ def _pct_changes(values: list[float]) -> list[float]:
         if abs(prev) > 1e-12:
             out.append(100.0 * (cur / prev - 1.0))
     return out
+
+
+def _parse_models(raw: str) -> list[str]:
+    return [part.strip() for part in str(raw or "").split(",") if part.strip()]
+
+
+def _resolve_forecast_cache_dir(args: argparse.Namespace, output_dir: Path) -> Path:
+    if args.cache_dir:
+        return Path(args.cache_dir)
+    if args.fresh_cache:
+        return output_dir / "fresh_demand_vintage_oos_cache"
+    return DEFAULT_FORECAST_CACHE_DIR
+
+
+def _finite_payload_float(value: Any, field_name: str) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise LLMUnavailable(f"Vintage OOS forecast payload field {field_name} must be numeric") from exc
+    if not np.isfinite(numeric):
+        raise LLMUnavailable(f"Vintage OOS forecast payload field {field_name} must be finite")
+    return float(numeric)
 
 
 def _vintage_bottom_line(manifest: dict[str, Any]) -> str:

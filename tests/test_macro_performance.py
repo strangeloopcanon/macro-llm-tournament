@@ -13,6 +13,15 @@ from macro_llm_tournament.macro_performance_gate import (
     DEFAULT_TARGET_CATALOG,
     catalog_sha256,
     load_performance_target_catalog,
+    macro_performance_verdict,
+)
+from macro_llm_tournament.demand_vintage_oos import (
+    _balanced_origin_sample,
+    _normalize_context,
+    _normalize_origins,
+    build_vintage_cards_and_targets,
+    fixture_vintage_panel,
+    vintage_forecast_cache_name,
 )
 
 
@@ -84,6 +93,95 @@ class MacroPerformanceTests(unittest.TestCase):
             self.assertNotIn("target_observation_date", payload_text)
             self.assertNotIn("as_of_date", payload_text)
             self.assertNotIn("realized", payload_text.lower())
+
+    def test_demand_vintage_oos_replay_reads_cached_model_forecasts(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache_dir = root / "cache"
+            provider_dir = cache_dir / "codex_cli"
+            provider_dir.mkdir(parents=True)
+
+            origins, context = fixture_vintage_panel()
+            sampled = _balanced_origin_sample(_normalize_origins(origins), 8)
+            cards, _targets = build_vintage_cards_and_targets(sampled, _normalize_context(context), history_periods=8)
+            self.assertFalse(cards.empty)
+            for _, card in cards.iterrows():
+                prompt_payload = json.loads(card["prompt_payload_json"])
+                cache_name = vintage_forecast_cache_name("codex_cli", "gpt-5.5", prompt_payload)
+                cache_payload = {
+                    "provider": "codex_cli",
+                    "model": "gpt-5.5",
+                    "payload": {
+                        "forecast_value": 0.0,
+                        "confidence": 0.61,
+                        "reason": "cached replay forecast from relative history",
+                    },
+                    "cache_hit": False,
+                }
+                (provider_dir / f"{cache_name}.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--forecast-mode",
+                    "replay",
+                    "--provider",
+                    "codex_cli",
+                    "--models",
+                    "gpt-5.5",
+                    "--cache-dir",
+                    str(cache_dir),
+                    "--max-origins",
+                    "8",
+                    "--output-dir",
+                    str(root / "replay_out"),
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = root / "replay_out"
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            forecasts = pd.read_csv(out / "demand_vintage_oos_forecasts.csv")
+            raw_records = json.loads((out / "demand_vintage_oos_raw_records.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(manifest["forecast_mode"], "replay")
+            self.assertEqual(manifest["live_call_count"], 0)
+            self.assertEqual(manifest["cache_hit_count"], len(cards))
+            self.assertEqual(len(raw_records), len(cards))
+            self.assertIn("llm_codex_cli_gpt-5.5", set(forecasts["source"]))
+            self.assertIn("llm_belief", set(forecasts["variant"]))
+
+    def test_demand_vintage_oos_live_preflights_call_budget_before_provider(self):
+        with TemporaryDirectory() as temp_dir:
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--forecast-mode",
+                    "live",
+                    "--provider",
+                    "codex_cli",
+                    "--models",
+                    "gpt-5.5",
+                    "--fresh-cache",
+                    "--max-live-calls",
+                    "1",
+                    "--max-origins",
+                    "8",
+                    "--output-dir",
+                    temp_dir,
+                ]
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("--max-live-calls must be at least", result.stderr)
 
     def test_macro_performance_fixture_scores_lab_without_empirical_overclaim(self):
         with TemporaryDirectory() as temp_dir:
@@ -191,6 +289,62 @@ class MacroPerformanceTests(unittest.TestCase):
             self.assertEqual(replay_manifest["verdict"], "macro_lab_performance_ready")
             self.assertFalse(replay_manifest["empirical_ready"])
             self.assertFalse(replay_manifest["vintage_oos_empirical_eligible"])
+
+    def test_macro_performance_empirical_verdict_requires_oos_baseline_beat(self):
+        scores = pd.DataFrame([{"placeholder": 1}])
+        summary = pd.DataFrame(
+            [
+                {
+                    "source": "llm_lab",
+                    "variant": "llm_belief",
+                    "split": "lab",
+                    "scored_count": 4,
+                    "blocking_fail_count": 0,
+                    "blocking_gap_count": 0,
+                    "critical_fail_count": 0,
+                    "weighted_normalized_loss": 0.10,
+                },
+                {
+                    "source": "llm_oos",
+                    "variant": "llm_belief",
+                    "split": "oos",
+                    "scored_count": 1,
+                    "blocking_fail_count": 0,
+                    "blocking_gap_count": 0,
+                    "critical_fail_count": 0,
+                    "weighted_normalized_loss": 0.25,
+                },
+            ]
+        )
+        worse_attribution = pd.DataFrame(
+            [
+                {
+                    "split": "oos",
+                    "llm_weighted_loss": 0.25,
+                    "best_baseline_weighted_loss": 0.20,
+                    "loss_improvement_pct": -25.0,
+                }
+            ]
+        )
+        better_attribution = pd.DataFrame(
+            [
+                {
+                    "split": "oos",
+                    "llm_weighted_loss": 0.15,
+                    "best_baseline_weighted_loss": 0.20,
+                    "loss_improvement_pct": 25.0,
+                }
+            ]
+        )
+
+        self.assertEqual(
+            macro_performance_verdict(scores, summary, worse_attribution, mode="replay", oos_empirical_eligible=True),
+            "macro_lab_performance_ready",
+        )
+        self.assertEqual(
+            macro_performance_verdict(scores, summary, better_attribution, mode="replay", oos_empirical_eligible=True),
+            "macro_empirical_oos_ready",
+        )
 
     def test_macro_performance_live_mode_blocks_without_spending_calls(self):
         with TemporaryDirectory() as temp_dir:

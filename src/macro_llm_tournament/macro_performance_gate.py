@@ -28,6 +28,7 @@ DEFAULT_VINTAGE_OOS_DIR = OUTPUT_ROOT / "demand_vintage_oos_fixture"
 DEFAULT_TARGET_CATALOG = Path(__file__).resolve().parent / "data" / "macro_performance_targets.csv"
 ALLOWED_SOURCE_STATUSES = {"verified_public", "internal_mechanism", "empirical_shape", "vintage_oos"}
 DETERMINISTIC_BASELINE_VARIANTS = {"representative", "adaptive"}
+VINTAGE_OOS_BASELINE_VARIANTS = {"no_change", "rolling_mean", "rolling_trend"}
 LLM_VARIANT = "llm_belief"
 PERFORMANCE_MODES = ("fixture", "replay", "live")
 
@@ -144,6 +145,7 @@ def build_macro_performance_gate(
         mode=mode,
         scores=scores,
         variant_summary=variant_summary,
+        attribution=attribution,
         vintage_readiness=vintage_readiness,
     )
     report = build_macro_performance_report(manifest, variant_summary, attribution, scores, vintage_readiness)
@@ -236,7 +238,8 @@ def build_performance_attribution(summary: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for split, split_rows in summary.groupby("split", sort=True):
         llm = split_rows[split_rows["variant"].astype(str) == LLM_VARIANT]
-        baselines = split_rows[split_rows["variant"].astype(str).isin(DETERMINISTIC_BASELINE_VARIANTS)]
+        baseline_variants = VINTAGE_OOS_BASELINE_VARIANTS if str(split) == "oos" else DETERMINISTIC_BASELINE_VARIANTS
+        baselines = split_rows[split_rows["variant"].astype(str).isin(baseline_variants)]
         if llm.empty or baselines.empty:
             continue
         llm_row = llm.sort_values(["weighted_normalized_loss", "source"]).iloc[0]
@@ -272,12 +275,20 @@ def build_macro_performance_manifest(
     mode: str,
     scores: pd.DataFrame,
     variant_summary: pd.DataFrame,
+    attribution: pd.DataFrame,
     vintage_readiness: pd.DataFrame,
 ) -> dict[str, Any]:
     oos_available = _oos_scores_available(vintage_oos_dir)
     vintage_oos_provenance = _vintage_oos_provenance(vintage_oos_dir)
     oos_empirical_eligible = _vintage_oos_empirical_eligible(vintage_oos_provenance)
-    verdict = macro_performance_verdict(scores, variant_summary, mode=mode, oos_empirical_eligible=oos_empirical_eligible)
+    oos_improvement_pct = _oos_loss_improvement_pct(attribution)
+    verdict = macro_performance_verdict(
+        scores,
+        variant_summary,
+        attribution,
+        mode=mode,
+        oos_empirical_eligible=oos_empirical_eligible,
+    )
     return {
         "schema_version": MACRO_PERFORMANCE_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -292,8 +303,10 @@ def build_macro_performance_manifest(
         "vintage_oos_dir": str(vintage_oos_dir),
         "vintage_oos_scores_available": bool(oos_available),
         "vintage_oos_mode": vintage_oos_provenance.get("mode"),
+        "vintage_oos_forecast_mode": vintage_oos_provenance.get("forecast_mode"),
         "vintage_oos_verdict": vintage_oos_provenance.get("verdict"),
         "vintage_oos_empirical_eligible": bool(oos_empirical_eligible),
+        "vintage_oos_llm_baseline_improvement_pct": oos_improvement_pct,
         "target_catalog_path": str(target_catalog_path),
         "target_catalog_sha256": target_catalog_hash,
         "target_rows": int(scores.shape[0]),
@@ -311,7 +324,14 @@ def build_macro_performance_manifest(
     }
 
 
-def macro_performance_verdict(scores: pd.DataFrame, summary: pd.DataFrame, *, mode: str, oos_empirical_eligible: bool = False) -> str:
+def macro_performance_verdict(
+    scores: pd.DataFrame,
+    summary: pd.DataFrame,
+    attribution: pd.DataFrame | None = None,
+    *,
+    mode: str,
+    oos_empirical_eligible: bool = False,
+) -> str:
     if scores.empty or summary.empty:
         return "macro_lab_performance_needs_work"
     lab_llm = summary[(summary["split"].astype(str) == "lab") & (summary["variant"].astype(str) == LLM_VARIANT)]
@@ -325,14 +345,20 @@ def macro_performance_verdict(scores: pd.DataFrame, summary: pd.DataFrame, *, mo
     )
     if not lab_ready:
         return "macro_lab_performance_needs_work"
-    oos_llm = summary[(summary["split"].astype(str) == "oos") & (summary["variant"].astype(str).str.contains("llm"))]
+    oos_llm = summary[(summary["split"].astype(str) == "oos") & (summary["variant"].astype(str) == LLM_VARIANT)]
+    oos_best_ready = False
+    if not oos_llm.empty:
+        best_oos_llm = oos_llm.sort_values(["weighted_normalized_loss", "source"], na_position="last").iloc[0]
+        oos_best_ready = bool(
+            int(best_oos_llm["blocking_fail_count"]) == 0
+            and int(best_oos_llm["blocking_gap_count"]) == 0
+            and int(best_oos_llm["scored_count"]) > 0
+        )
     if (
         mode != "fixture"
         and oos_empirical_eligible
-        and not oos_llm.empty
-        and (oos_llm["blocking_fail_count"].astype(int) == 0).all()
-        and (oos_llm["blocking_gap_count"].astype(int) == 0).all()
-        and (oos_llm["scored_count"].astype(int) > 0).all()
+        and oos_best_ready
+        and _oos_llm_beats_baseline(attribution)
     ):
         return "macro_empirical_oos_ready"
     return "macro_lab_performance_ready"
@@ -452,7 +478,7 @@ def _score_target_value(target: pd.Series, *, source: str, variant: str, value: 
         loss = 1.0
     elif direction == "lower_is_better":
         passed = bool(value <= high)
-        loss = 0.0 if passed else _bounded_loss(value - high, _target_scale(target))
+        loss = _bounded_loss(value, _target_scale(target))
         status = "pass" if passed else "fail"
     elif direction == "higher_is_better":
         passed = bool(value >= low)
@@ -558,6 +584,7 @@ def _vintage_oos_provenance(vintage_oos_dir: Path) -> dict[str, Any]:
     return {
         "status": str(data.get("status", "unknown")),
         "mode": data.get("mode"),
+        "forecast_mode": data.get("forecast_mode"),
         "verdict": data.get("verdict"),
         "passed": bool(data.get("passed", False)),
         "schema_version": data.get("schema_version"),
@@ -568,8 +595,33 @@ def _vintage_oos_empirical_eligible(provenance: dict[str, Any]) -> bool:
     return bool(
         provenance.get("passed")
         and provenance.get("mode") not in {None, "", "fixture"}
+        and provenance.get("forecast_mode") not in {None, "", "fixture"}
         and provenance.get("verdict") == "demand_vintage_oos_scored"
     )
+
+
+def _oos_llm_beats_baseline(attribution: pd.DataFrame | None) -> bool:
+    if attribution is None or attribution.empty:
+        return False
+    rows = attribution[attribution["split"].astype(str) == "oos"].copy()
+    if rows.empty:
+        return False
+    llm_loss = pd.to_numeric(rows["llm_weighted_loss"], errors="coerce")
+    baseline_loss = pd.to_numeric(rows["best_baseline_weighted_loss"], errors="coerce")
+    improvement = pd.to_numeric(rows["loss_improvement_pct"], errors="coerce")
+    return bool(((llm_loss < baseline_loss) & (improvement > 0.0)).any())
+
+
+def _oos_loss_improvement_pct(attribution: pd.DataFrame | None) -> float | None:
+    if attribution is None or attribution.empty:
+        return None
+    rows = attribution[attribution["split"].astype(str) == "oos"].copy()
+    if rows.empty:
+        return None
+    values = pd.to_numeric(rows["loss_improvement_pct"], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.iloc[0])
 
 
 def _scorecard_status(scores: pd.DataFrame) -> str:
@@ -586,12 +638,14 @@ def _bottom_line(manifest: dict[str, Any], failed: pd.DataFrame) -> str:
     verdict = manifest.get("verdict")
     if verdict == "macro_empirical_oos_ready":
         return (
-            f"Verdict: `{verdict}`. The lab gate passes and scored vintage OOS artifacts are present. "
+            f"Verdict: `{verdict}`. The lab gate passes and the LLM vintage OOS forecast beats the strongest deterministic baseline. "
             "This is the first empirical performance-ready state."
         )
     if verdict == "macro_lab_performance_ready":
         if manifest.get("vintage_oos_scores_available") and not manifest.get("vintage_oos_empirical_eligible"):
             cap = " Vintage OOS scores are present as diagnostics, but their provenance is fixture/non-empirical."
+        elif manifest.get("vintage_oos_scores_available") and manifest.get("vintage_oos_empirical_eligible"):
+            cap = " Vintage OOS scores are present, but the LLM forecast has not beaten the strongest deterministic OOS baseline yet."
         elif manifest.get("vintage_oos_scores_available"):
             cap = " Vintage OOS scores are present as diagnostics."
         else:
