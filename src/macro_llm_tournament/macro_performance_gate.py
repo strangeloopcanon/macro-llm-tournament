@@ -465,6 +465,7 @@ def build_macro_performance_manifest(
         "vintage_oos_mode": vintage_oos_provenance.get("mode"),
         "vintage_oos_forecast_mode": vintage_oos_provenance.get("forecast_mode"),
         "vintage_oos_verdict": vintage_oos_provenance.get("verdict"),
+        "vintage_oos_artifact_verdict": vintage_oos_provenance.get("artifact_verdict"),
         "vintage_oos_empirical_eligible": bool(oos_empirical_eligible),
         "vintage_oos_llm_baseline_improvement_pct": oos_improvement_pct,
         "target_catalog_path": str(target_catalog_path),
@@ -749,13 +750,19 @@ def _vintage_oos_provenance(vintage_oos_dir: Path) -> dict[str, Any]:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {"status": "invalid_json"}
+    schema_version = data.get("schema_version")
+    verdict = data.get("verdict")
+    if schema_version == "belief_dynamics_calibration_v1" and str(verdict).startswith("belief_calibration_"):
+        split_disjoint = bool(data.get("calibration_split_disjoint", False))
+        verdict = "demand_vintage_oos_scored" if bool(data.get("passed", False)) and split_disjoint else verdict
     return {
         "status": str(data.get("status", "unknown")),
         "mode": data.get("mode"),
         "forecast_mode": data.get("forecast_mode"),
-        "verdict": data.get("verdict"),
+        "verdict": verdict,
+        "artifact_verdict": data.get("verdict"),
         "passed": bool(data.get("passed", False)),
-        "schema_version": data.get("schema_version"),
+        "schema_version": schema_version,
         "live_call_count": int(data.get("live_call_count", 0) or 0),
         "cache_hit_count": int(data.get("cache_hit_count", 0) or 0),
     }

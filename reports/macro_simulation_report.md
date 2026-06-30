@@ -2,133 +2,113 @@
 
 ## Bottom Line
 
-The project now has a playable, date-free macro simulation engine and a live out-of-sample forecast test.
+The current run clears the first empirical OOS gate.
 
-The new result is positive but bounded: live GPT models beat simple deterministic baselines on held-out, date-free vintage macro cards, but the absolute forecast errors are still too large for the stricter empirical-ready gate. In plain English: the LLM belief layer now has a credible relative out-of-sample result in this run, while the full system remains short of a strong macro-prediction engine.
+After fixing the vintage scoring target, GPT-5.5 and GPT-5.4 both beat deterministic baselines on held-out, date-free macro cards and clear the current absolute weighted-error threshold. The behavior economy also passes the lab gate after feeding in a bounded belief-dynamics profile. The win is the belief layer plus the behavior engine, not the fitted calibration model: the validation-fitted forecast calibration overfits and makes held-out forecasts worse.
 
-## What The Ecology Does
+The clean claim is:
 
-The economy is intentionally small: one good, no capital, no full asset market, and no external sector. That keeps the loop inspectable.
+> Under corrected, date-free, hidden-target scoring, GPT belief forecasts beat no-change, rolling-mean, and rolling-trend controls on the held-out vintage test split. Those beliefs can be fed into the HANK-lite demand economy without breaking accounting or the mechanism tests.
 
-Each period works like this:
+## What Changed
 
-1. A branch starts from a date-free state such as `period_0`.
-2. Firm actors provide bounded output, hiring, price-pressure, and credit-tightening reactions.
-3. Policy/narrative actors provide bounded rate, transfer, confidence, job-risk, and dispersion modifiers.
-4. Household actors provide beliefs only: inflation, income growth, job-loss risk, confidence, and precaution.
-5. Deterministic structural code converts those beliefs into consumption, saving, debt repayment, and liquidity changes.
-6. Aggregate demand updates output, employment, income, inflation, the policy rate, and next-period household states.
-7. A critic actor reads the result and flags accounting breaks or implausible sign patterns, but cannot mutate the state.
+The important change was not another persona variant. It was the scoring and calibration setup.
 
-This is closer to a controllable macro laboratory than a persona exercise. The LLM-shaped part is the belief/reaction layer; the economy itself is bounded by code.
+The old vintage target construction mixed vintages for percent-change targets: it divided a final next-period value by the vintage current value. That accidentally put benchmark revisions into the growth target. The scorer now uses the final current value and final next value for percent-change targets, while the prompt still sees only the as-of vintage history. That makes the hidden outcome a realized growth target rather than a revision artifact.
 
-## Current Run
+On top of that corrected scorer, we added a validation-only belief-dynamics calibration step. It learns regime-shift, rebound, and uncertainty features from the validation split, applies the locked transform to the test split, and emits a bounded behavior profile for the demand economy.
 
-The current state combines three layers:
+## Current Evidence
 
-- Playable macro playground fixture: 12 household cells, 20 periods, 5 branches.
-- Demand-economy performance fixture: 24 household cells, closed-loop scenarios, mechanism scoring.
-- Live vintage OOS forecast test: 147 held-out date-free cards from the FRED vintage panel test split.
+The current result combines three artifacts:
 
-The live OOS test used `openai_responses` with `gpt-5.5` and `gpt-5.4`. Each model made 147 live calls. The combined replay artifact then scored both models with zero additional live calls.
+| Layer | Artifact | Verdict |
+| --- | --- | --- |
+| Corrected validation vintage run | `demand_vintage_oos_replay_gpt55_gpt54_val_panel_consistent_targets` | `demand_vintage_oos_scored` |
+| Corrected held-out test plus calibration report | `belief_calibration_gpt55_gpt54_val_to_test_consistent_targets` | `belief_calibration_evaluated` |
+| Combined macro performance gate | `macro_performance_gate_calibrated_consistent_oos` | `macro_empirical_oos_ready` |
 
-## Results
+The validation run used 20 validation origins, 140 date-free cards, and the already-collected GPT-5.5/GPT-5.4 cache. The held-out test run used 21 scored test origins and 147 date-free cards. The test replay used 294 cache hits and made zero new live calls. The leakage audit found zero issues.
 
-### 1. Playable macro engine: pass
+## Held-Out OOS Results
 
-The macro playground returned `macro_playground_fixture_ready`.
+Weighted normalized absolute error on the corrected held-out test split:
 
-| Gate | Result |
-| --- | --- |
-| Actor role coverage | Pass: firm, policy/narrative, household-belief, and critic payloads emitted each period |
-| Schema closure | Pass: actor payloads normalize through fail-closed schemas |
-| Accounting | Pass: max absolute residual `5.82e-11` |
-| Branch divergence | Pass: branches measurably diverge from baseline |
-| Rate hike | Pass: consumption and output contract over the early response window |
-| Transfer shock | Pass: transfer spending, debt repayment, and liquid saving exhaust the transfer |
-| Liquidity gradient | Pass: low-liquidity MPC exceeds high-liquidity MPC; gradient `0.461` |
-| Job-risk shock | Pass: precautionary saving rises and consumption falls before income moves |
-| Firm channel | Pass: firm price/hiring effects enter only through bounded channels |
-| Critic flags | Pass: no blocking critic flags |
+| Source | Test WNAE | Gate |
+| --- | ---: | --- |
+| GPT-5.5 | 0.8945 | Pass |
+| GPT-5.4 | 0.9064 | Pass |
+| No change | 1.1260 | Fail |
+| Rolling trend | 1.2668 | Fail |
+| Rolling mean | 1.2790 | Fail |
 
-### 2. Lab performance gate: pass
+GPT-5.5 is the best model in this run. It improves on the best deterministic baseline by 20.56%. The paired origin-cluster bootstrap is strongly positive: mean loss reduction `0.2315`, 95% interval `[0.0688, 0.4153]`, positive share `99.82%`.
 
-The performance gate returned `macro_lab_performance_ready`.
+GPT-5.4 is close behind. It improves on the best deterministic baseline by 19.51%, with mean loss reduction `0.2197`, 95% interval `[0.0077, 0.4879]`, and positive share `97.97%`.
 
-| Variant | Lab Targets | Blocking Failures | Weighted Loss | Score |
-| --- | ---: | ---: | ---: | ---: |
-| LLM belief fixture | 16/16 pass | 0 | 0.0000 | 1.0000 |
-| Adaptive baseline | 13/14 pass | 1 | 0.0043 | 0.9957 |
-| Representative baseline | 10/14 pass | 4 | 0.0424 | 0.9576 |
-| Naive persona fixture | 9/14 pass | 5 | 0.2341 | 0.7659 |
+The gains are strongest where the target is closer to beliefs about policy, labor, and inflation. The models still miss large real activity swings: output and consumption remain above WNAE 1.0 by target family even though the combined score clears the overall gate.
 
-The useful comparison is that the belief-module architecture clears the mechanism surface while the direct persona baseline fails expected checks. The architecture is doing the right job: beliefs go through constrained economics instead of directly choosing whatever consumption path sounds plausible.
+| Source | Inflation | Output | Policy Rate | Consumption | Saving | Sentiment | Unemployment |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPT-5.5 | 0.2904 | 1.4596 | 0.0652 | 1.5179 | 1.3476 | 1.3747 | 0.2063 |
+| GPT-5.4 | 0.3174 | 1.3133 | 0.0567 | 1.6393 | 1.3333 | 1.5417 | 0.1429 |
+| No change | 0.5625 | 1.8684 | 0.1300 | 2.1671 | 1.4905 | 1.4057 | 0.2579 |
 
-### 3. Live date-free vintage OOS: relative signal, not full pass
+## Calibration Result
 
-The live OOS runner returned `demand_vintage_oos_scored`.
+The validation-fitted residual calibration does not improve held-out forecasts.
+
+| Source | Test WNAE |
+| --- | ---: |
+| GPT-5.5 raw | 0.8945 |
+| GPT-5.4 raw | 0.9064 |
+| GPT-5.4 calibrated | 1.2254 |
+| GPT-5.5 calibrated | 1.7201 |
+
+That result matters. We now know the raw LLM belief signal is strong enough to clear the first empirical OOS threshold, but the simple residual/ridge calibration is too eager to extrapolate validation patterns into the held-out period. The calibration artifact is still useful because it produces a bounded behavior-economy profile, but it should not be treated as the winning forecast source.
+
+## Behavior Economy
+
+The calibrated belief profile was fed into the HANK-lite demand economy as a bounded postprocessor on household beliefs. Households still emit beliefs only; deterministic code owns consumption, saving, debt repayment, liquidity, aggregation, sticky inflation, policy feedback, and accounting.
+
+The behavior run passed the full lab surface:
 
 | Check | Result |
 | --- | --- |
-| Held-out test cards | 147 |
-| Target families | 7 |
-| GPT-5.5 live calls | 147 |
-| GPT-5.4 live calls | 147 |
-| Combined replay cache hits | 294 |
-| Leakage issues | 0 |
+| Verdict | `hank_lite_belief_lab_ready` |
+| Required metrics | 54 of 54 passed |
+| Accounting residual | `5.82e-11` |
+| Transfer MPC shape | Passed |
+| Liquidity and income MPC gradients | Passed |
+| Rate-hike response | Consumption/output contract; inflation softens |
+| Job-risk response | Consumption falls before income moves |
+| Belief feedback and dispersion | Passed for the LLM belief source |
 
-Weighted normalized absolute error on the held-out test split:
+The combined macro gate then returned `macro_empirical_oos_ready`: the lab behavior source passes with no blocking failures, and the held-out OOS belief source beats the best deterministic baseline with WNAE below 1.0.
 
-| Source | Test Error | Improvement vs best baseline |
-| --- | ---: | ---: |
-| GPT-5.4 LLM belief | 2.8429 | 9.88% |
-| GPT-5.5 LLM belief | 2.9096 | 7.77% |
-| Rolling trend | 3.1546 | baseline |
-| Rolling mean | 3.2177 | baseline |
-| No change | 3.2716 | baseline |
+## What We Have Learned
 
-The live models beat all simple baselines overall. GPT-5.4 is best overall; GPT-5.5 wins more individual target families but by smaller margins.
+The belief-engine claim is now real in the narrow empirical sense that matters first. Date-free GPT belief forecasts contain enough signal to beat simple macro baselines on held-out vintage targets and clear the current absolute error gate.
 
-A paired origin-cluster bootstrap keeps the mean loss reduction positive in most resamples, but the 95% interval still touches small negative reductions. That makes the right reading directional rather than triumphant: the LLM forecasts improve on the simple baselines in this test split, and the next run needs tighter absolute error plus stronger uncertainty evidence.
+The behavior-economy claim is also stronger than before. The engine can take LLM-shaped beliefs, enforce feasibility through code, and produce macro-consistent responses across transfers, rate hikes, job-risk shocks, and endogenous belief feedback.
 
-| Source | Mean Loss Reduction vs Rolling Trend | Bootstrap Share Positive | 95% Bootstrap Interval |
-| --- | ---: | ---: | ---: |
-| GPT-5.4 LLM belief | `0.3116` | `96.7%` | `[-0.0079, 0.8319]` |
-| GPT-5.5 LLM belief | `0.2450` | `91.9%` | `[-0.0577, 0.6970]` |
+The calibration story is weaker. Simple validation residual calibration is not the way through; it overfits. The next calibration attempt should be more conservative, probably distributional, and explicitly guarded against regime-transfer failures.
 
-GPT-5.5 beats the best baseline on 6 of 7 target families, losing only inflation. GPT-5.4 beats the best baseline on 5 of 7 target families, losing inflation and sentiment.
+## Scope
 
-| Target Family | GPT-5.5 vs Best Baseline | GPT-5.4 vs Best Baseline |
-| --- | ---: | ---: |
-| Policy rate level | +33.82% | +42.51% |
-| Unemployment rate level | +20.00% | +44.62% |
-| Saving rate level | +9.58% | +10.54% |
-| Output growth | +5.01% | +9.81% |
-| Real consumption growth | +2.11% | +3.53% |
-| Sentiment growth | +2.20% | -9.69% |
-| Inflation growth | -2.69% | -13.59% |
+This is still a first empirical gate, not a finished macro model. The sample is 147 held-out vintage cards across seven target families, and the behavior economy is a one-good HANK-lite demand economy without capital, a full banking sector, an asset market, or an external sector.
 
-The macro performance gate still reports `empirical_ready: false` because the absolute OOS error target is not met. The best LLM error is `2.8429`, while the current empirical-ready target requires weighted normalized absolute error at or below `1.0`.
+That scope is enough for the current claim: the system now produces empirical belief signal and behavior-consistent macro dynamics. The next question is whether that signal can be made stronger on hard real-activity periods without overfitting.
 
-## What We Can Say Now
+## Next Move
 
-We can now say that the LLM belief layer produced a positive relative out-of-sample result under date-free, hidden-target conditions. That is new.
+Freeze the corrected target construction and current OOS scorer.
 
-The full simulated economy still falls short of strong empirical prediction. The live forecast layer beats baselines, but the misses are large in volatile consumption/output periods. The system has crossed from "playable sandbox" to "promising predictive signal"; it has not crossed to "strong macro validity."
+Then improve belief dynamics around exactly the failure modes visible here:
 
-## Current Limit
+- regime shifts and rebounds after sharp drawdowns;
+- uncertainty and asymmetric underreaction in output and consumption;
+- distributional forecasts rather than only point forecasts;
+- calibration rules that can decline to move a forecast when validation evidence is not robust.
 
-The main failure mode is underreaction to large real consumption and output swings. The date-free test split includes big macro moves, and the live models mostly produce conservative forecasts. That helps against naive baselines but does not get close enough to the realized path.
-
-This is actually useful diagnostically: the next improvement should not be more personas. It should be better belief dynamics around regime shifts, rebound risk, uncertainty, and asymmetric responses after sharp changes.
-
-## Next Test
-
-The next gate should add a calibrated belief-dynamics module before the household behavior layer:
-
-- expose recent level changes, volatility, and drawdown/rebound features more explicitly in the date-free cards;
-- ask models for distributions, not only point forecasts;
-- calibrate on validation split only, then lock prompts/transforms before test scoring;
-- feed calibrated beliefs into the demand economy and test whether behavior predictions improve, not just raw macro forecasts.
-
-Success means the live/replay LLM layer beats deterministic baselines and brings absolute OOS error materially closer to the empirical-ready threshold.
+The goal for the next run is simple: keep the OOS WNAE below 1.0, improve output and consumption target-family errors, and preserve the behavior-economy lab pass.

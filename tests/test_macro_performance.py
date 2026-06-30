@@ -12,6 +12,7 @@ import pandas as pd
 from macro_llm_tournament.macro_performance_gate import (
     DEFAULT_TARGET_CATALOG,
     _bottom_line,
+    _vintage_oos_provenance,
     _vintage_oos_empirical_eligible,
     build_oos_pairwise_comparison,
     build_performance_attribution,
@@ -22,12 +23,15 @@ from macro_llm_tournament.macro_performance_gate import (
 )
 from macro_llm_tournament.demand_vintage_oos import (
     _balanced_origin_sample,
+    _filter_origins_by_splits,
+    _legacy_prompt_payloads_by_card,
     _normalize_context,
     _normalize_origins,
     build_vintage_cards_and_targets,
     fixture_vintage_panel,
     vintage_forecast_cache_name,
 )
+from macro_llm_tournament.belief_calibration import BELIEF_CALIBRATION_VERSION
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -99,6 +103,115 @@ class MacroPerformanceTests(unittest.TestCase):
             self.assertNotIn("as_of_date", payload_text)
             self.assertNotIn("realized", payload_text.lower())
 
+    def test_demand_vintage_oos_split_filter_writes_only_requested_split(self):
+        with TemporaryDirectory() as temp_dir:
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--splits",
+                    "val",
+                    "--output-dir",
+                    temp_dir,
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            root = Path(temp_dir)
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            cards = pd.read_csv(root / "demand_vintage_oos_cards.csv")
+            targets = pd.read_csv(root / "demand_vintage_oos_targets.csv")
+
+            self.assertEqual(manifest["splits"], ["val"])
+            self.assertEqual(set(cards["split"]), {"val"})
+            self.assertEqual(set(targets["split"]), {"val"})
+            self.assertFalse(cards.empty)
+
+            all_result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--output-dir",
+                    str(root / "all"),
+                ]
+            )
+            self.assertEqual(all_result.returncode, 0, all_result.stderr)
+            all_cards = pd.read_csv(root / "all" / "demand_vintage_oos_cards.csv")
+            split_keys = set(cards[["origin_id", "target_name"]].itertuples(index=False, name=None))
+            all_val_keys = set(
+                all_cards[all_cards["split"].astype(str) == "val"][["origin_id", "target_name"]].itertuples(
+                    index=False,
+                    name=None,
+                )
+            )
+            self.assertEqual(split_keys, all_val_keys)
+
+    def test_vintage_pct_change_targets_use_final_current_denominator(self):
+        origins = pd.DataFrame(
+            [
+                {"origin": "origin_test", "as_of_date": "2025-01-15", "split": "test"},
+                {"origin": "origin_later", "as_of_date": "2025-04-15", "split": "train"},
+            ]
+        )
+        context = pd.DataFrame(
+            [
+                {
+                    "origin": "origin_test",
+                    "as_of_date": "2025-01-15",
+                    "series_id": "PCECC96",
+                    "label": "real consumption",
+                    "observation_date": "2024-07-01",
+                    "value": 95.0,
+                    "realtime_start": "2025-01-15",
+                    "realtime_end": "2025-01-15",
+                },
+                {
+                    "origin": "origin_test",
+                    "as_of_date": "2025-01-15",
+                    "series_id": "PCECC96",
+                    "label": "real consumption",
+                    "observation_date": "2024-10-01",
+                    "value": 100.0,
+                    "realtime_start": "2025-01-15",
+                    "realtime_end": "2025-01-15",
+                },
+                {
+                    "origin": "origin_later",
+                    "as_of_date": "2025-04-15",
+                    "series_id": "PCECC96",
+                    "label": "real consumption",
+                    "observation_date": "2024-10-01",
+                    "value": 200.0,
+                    "realtime_start": "2025-04-15",
+                    "realtime_end": "2025-04-15",
+                },
+                {
+                    "origin": "origin_later",
+                    "as_of_date": "2025-04-15",
+                    "series_id": "PCECC96",
+                    "label": "real consumption",
+                    "observation_date": "2025-01-01",
+                    "value": 220.0,
+                    "realtime_start": "2025-04-15",
+                    "realtime_end": "2025-04-15",
+                },
+            ]
+        )
+
+        cards, targets = build_vintage_cards_and_targets(_normalize_origins(origins), _normalize_context(context), history_periods=2)
+        target = targets[targets["target_name"] == "real_consumption_growth_pct"].iloc[0]
+
+        self.assertEqual(float(target["current_value"]), 100.0)
+        self.assertEqual(float(target["target_current_value"]), 200.0)
+        self.assertAlmostEqual(float(target["target_value"]), 10.0)
+        self.assertIn('"value":100.0', str(cards.iloc[0]["history_json"]).replace(" ", ""))
+
     def test_demand_vintage_oos_replay_reads_cached_model_forecasts(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -159,6 +272,66 @@ class MacroPerformanceTests(unittest.TestCase):
             self.assertEqual(len(raw_records), len(cards))
             self.assertIn("llm_codex_cli_gpt-5.5", set(forecasts["source"]))
             self.assertIn("llm_belief", set(forecasts["variant"]))
+
+    def test_demand_vintage_oos_replay_can_read_legacy_split_local_cache(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache_dir = root / "cache"
+            provider_dir = cache_dir / "codex_cli"
+            provider_dir.mkdir(parents=True)
+
+            origins, context = fixture_vintage_panel()
+            origins = _filter_origins_by_splits(_normalize_origins(origins), ["val"])
+            cards, _targets = build_vintage_cards_and_targets(origins, _normalize_context(context), history_periods=8)
+            legacy_payloads = _legacy_prompt_payloads_by_card(cards)
+            self.assertFalse(cards.empty)
+            self.assertFalse(cards["origin_id"].astype(str).str.startswith("vintage_origin_0000").all())
+            self.assertEqual(set(legacy_payloads), set(cards["card_id"].astype(str)))
+            for _, card in cards.iterrows():
+                legacy_prompt_payload = legacy_payloads[str(card["card_id"])]
+                cache_name = vintage_forecast_cache_name("codex_cli", "gpt-5.5", legacy_prompt_payload)
+                cache_payload = {
+                    "provider": "codex_cli",
+                    "model": "gpt-5.5",
+                    "payload": {
+                        "forecast_value": 0.0,
+                        "confidence": 0.61,
+                        "reason": "legacy split-local cached replay forecast",
+                    },
+                    "cache_hit": False,
+                }
+                (provider_dir / f"{cache_name}.json").write_text(json.dumps(cache_payload), encoding="utf-8")
+
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--forecast-mode",
+                    "replay",
+                    "--provider",
+                    "codex_cli",
+                    "--models",
+                    "gpt-5.5",
+                    "--cache-dir",
+                    str(cache_dir),
+                    "--splits",
+                    "val",
+                    "--output-dir",
+                    str(root / "replay_out"),
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = root / "replay_out"
+            raw_records = json.loads((out / "demand_vintage_oos_raw_records.json").read_text(encoding="utf-8"))
+            forecasts = pd.read_csv(out / "demand_vintage_oos_forecasts.csv")
+
+            self.assertTrue(all(record.get("legacy_cache_hit") for record in raw_records))
+            self.assertTrue(all(record.get("legacy_cache_name") for record in raw_records))
+            self.assertEqual(set(forecasts["origin_id"].astype(str)), set(cards["origin_id"].astype(str)))
 
     def test_demand_vintage_oos_live_preflights_call_budget_before_provider(self):
         with TemporaryDirectory() as temp_dir:
@@ -466,6 +639,181 @@ class MacroPerformanceTests(unittest.TestCase):
             self.assertEqual(pairwise.loc[0, "mean_loss_reduction"], 2.0)
             self.assertAlmostEqual(float(pairwise.loc[0, "improvement_pct"]), 66.6666666667)
             self.assertEqual(pairwise.loc[0, "bootstrap_share_positive"], 1.0)
+
+    def test_belief_calibration_fits_validation_and_scores_evaluation(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            calibration_dir = root / "val"
+            evaluation_dir = root / "test"
+            output_dir = root / "calibration"
+
+            calibration = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--splits",
+                    "val",
+                    "--output-dir",
+                    str(calibration_dir),
+                ]
+            )
+            self.assertEqual(calibration.returncode, 0, calibration.stderr)
+            evaluation = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--splits",
+                    "test",
+                    "--output-dir",
+                    str(evaluation_dir),
+                ]
+            )
+            self.assertEqual(evaluation.returncode, 0, evaluation.stderr)
+
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.belief_calibration",
+                    "--calibration-run-dir",
+                    str(calibration_dir),
+                    "--evaluation-run-dir",
+                    str(evaluation_dir),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            profile = json.loads((output_dir / "belief_calibration_profile.json").read_text(encoding="utf-8"))
+            forecasts = pd.read_csv(output_dir / "demand_vintage_oos_forecasts.csv")
+            model = pd.read_csv(output_dir / "belief_calibration_model.csv")
+            summary = pd.read_csv(output_dir / "demand_vintage_oos_summary.csv")
+
+            self.assertEqual(profile["schema_version"], BELIEF_CALIBRATION_VERSION)
+            self.assertEqual(manifest["calibration_splits"], ["val"])
+            self.assertEqual(manifest["evaluation_splits"], ["test"])
+            self.assertTrue(manifest["passed"])
+            self.assertFalse(model.empty)
+            self.assertTrue(any(str(source).endswith("_calibrated") for source in forecasts["source"]))
+            self.assertTrue(any(str(source).endswith("_calibrated") for source in summary["source"]))
+            provenance = _vintage_oos_provenance(output_dir)
+            self.assertEqual(provenance["verdict"], "demand_vintage_oos_scored")
+            self.assertEqual(provenance["artifact_verdict"], "belief_calibration_empirical_ready")
+            self.assertEqual(provenance["forecast_mode"], "fixture")
+
+    def test_belief_calibration_fails_when_calibration_and_evaluation_splits_overlap(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            evaluation_dir = root / "test"
+            output_dir = root / "calibration"
+
+            evaluation = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--splits",
+                    "test",
+                    "--output-dir",
+                    str(evaluation_dir),
+                ]
+            )
+            self.assertEqual(evaluation.returncode, 0, evaluation.stderr)
+
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.belief_calibration",
+                    "--calibration-run-dir",
+                    str(evaluation_dir),
+                    "--evaluation-run-dir",
+                    str(evaluation_dir),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["verdict"], "belief_calibration_split_leakage_failed")
+            self.assertFalse(manifest["passed"])
+            self.assertEqual(manifest["calibration_split_overlap"], ["test"])
+            provenance = _vintage_oos_provenance(output_dir)
+            self.assertEqual(provenance["verdict"], "belief_calibration_split_leakage_failed")
+
+    def test_demand_economy_calibration_profile_changes_source_and_preserves_accounting(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            profile_path = root / "profile.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": BELIEF_CALIBRATION_VERSION,
+                        "profile_id": "test_profile",
+                        "demand_adjustments": {
+                            "calibration_strength": 0.1,
+                            "income_rebound_gain": 0.05,
+                            "inflation_attention_gain": 0.03,
+                            "job_risk_regime_gain": 0.06,
+                            "confidence_rebound_gain": 0.05,
+                            "precaution_uncertainty_gain": 0.05,
+                            "active_targets": ["output_growth_pct"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = root / "demand"
+            result = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_economy",
+                    "--belief-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5",
+                    "--household-source",
+                    "fixture",
+                    "--household-count",
+                    "12",
+                    "--period-count",
+                    "20",
+                    "--variants",
+                    "llm_belief",
+                    "--feedback-mode",
+                    "closed_loop",
+                    "--scenarios",
+                    "baseline,transfer_shock,rate_hike,job_risk_shock,belief_feedback",
+                    "--belief-calibration-profile",
+                    str(profile_path),
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            beliefs = pd.read_csv(output_dir / "demand_beliefs.csv")
+            accounting = pd.read_csv(output_dir / "demand_accounting.csv")
+
+            self.assertEqual(manifest["belief_calibration_profile_id"], "test_profile")
+            self.assertTrue(set(beliefs["source"].astype(str)).pop().endswith("_calibrated"))
+            self.assertLess(float(accounting["abs_residual"].max()), 1e-6)
+            self.assertIn("calibrated_dynamics", " ".join(beliefs["reason_codes_json"].astype(str).tolist()))
 
     def test_vintage_readiness_uses_configured_oos_artifact_dir(self):
         with TemporaryDirectory() as temp_dir:

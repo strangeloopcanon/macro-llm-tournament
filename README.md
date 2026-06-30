@@ -20,6 +20,7 @@ The repository contains the reusable harness, plus one current handoff report at
 - `src/macro_llm_tournament/persona_ecology.py` runs respondent-seeded belief ecologies with profile, prior-expectation, external-information, behavior, and aggregate-feedback modules.
 - `src/macro_llm_tournament/demand_economy.py` runs the abstract HANK-lite demand economy: household belief modules form inflation, income, job-risk, confidence, and precautionary-saving beliefs; deterministic structural code converts those beliefs into budget-constrained consumption, aggregate demand, output, employment, sticky inflation, and policy feedback.
 - `src/macro_llm_tournament/demand_vintage_oos.py` builds date-free vintage demand cards, hidden targets, baseline forecasts, leakage audits, and OOS score summaries.
+- `src/macro_llm_tournament/belief_calibration.py` fits validation-only belief-dynamics calibration, scores the locked transform on held-out vintage cards, and emits a bounded behavior-economy calibration profile.
 - `src/macro_llm_tournament/macro_playground.py` wraps the demand kernel in a branchable scenario sandbox with bounded household, firm, policy/narrative, and critic actor payloads.
 - `src/macro_llm_tournament/macro_performance_gate.py` scores the macro lab and vintage OOS artifacts against an executable target catalog without promoting fixture runs to empirical validity.
 - `src/macro_llm_tournament/macro_validity.py` builds the external-validity bridge scorecard for micro behavior, IRF shape, and vintage-data readiness.

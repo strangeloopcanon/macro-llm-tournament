@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--fresh-cache", action="store_true")
+    parser.add_argument("--splits", default="", help="Optional comma-separated split filter such as val,test. Empty means all splits.")
     parser.add_argument("--max-origins", type=int, default=0, help="Optional cap on origins; 0 means all available origins.")
     parser.add_argument("--history-periods", type=int, default=8)
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
@@ -86,6 +87,7 @@ def main() -> int:
             max_live_calls=args.max_live_calls,
             cache_dir=cache_dir,
             fresh_cache=args.fresh_cache,
+            splits=_parse_splits(args.splits),
             max_origins=args.max_origins,
             history_periods=args.history_periods,
             data_status=data_status,
@@ -123,6 +125,7 @@ def build_demand_vintage_oos(
     max_live_calls: int = 0,
     cache_dir: Path | None = None,
     fresh_cache: bool = False,
+    splits: list[str] | None = None,
     max_origins: int = 0,
     history_periods: int = 8,
     data_status: dict[str, Any] | None = None,
@@ -136,6 +139,7 @@ def build_demand_vintage_oos(
     cache_dir = Path(cache_dir) if cache_dir is not None else DEFAULT_FORECAST_CACHE_DIR
     origins = _normalize_origins(origins)
     context = _normalize_context(context)
+    origins = _filter_origins_by_splits(origins, splits or [])
     if max_origins and max_origins > 0:
         origins = _balanced_origin_sample(origins, max_origins)
     cards, targets = build_vintage_cards_and_targets(origins, context, history_periods=history_periods)
@@ -186,6 +190,7 @@ def build_demand_vintage_oos(
         "cache_hit_count": int(cache_hit_count),
         "cache_dir": str(cache_dir) if forecast_mode in {"replay", "live"} else None,
         "fresh_cache": bool(fresh_cache),
+        "splits": sorted(origins["split"].dropna().astype(str).unique().tolist()) if "split" in origins else [],
         "origin_count": int(origins.shape[0]),
         "scored_origin_count": int(cards["origin_id"].nunique()) if "origin_id" in cards else 0,
         "card_count": int(cards.shape[0]),
@@ -230,7 +235,7 @@ def build_vintage_cards_and_targets(origins: pd.DataFrame, context: pd.DataFrame
     card_rows: list[dict[str, Any]] = []
     target_rows: list[dict[str, Any]] = []
     for origin_index, origin in origins.reset_index(drop=True).iterrows():
-        origin_key = f"vintage_origin_{origin_index:04d}"
+        origin_key = _origin_key(origin, origin_index)
         origin_context = context[context["origin"].astype(str) == str(origin["origin"])].copy()
         if origin_context.empty:
             continue
@@ -248,7 +253,9 @@ def build_vintage_cards_and_targets(origins: pd.DataFrame, context: pd.DataFrame
                 continue
             target_row = target_candidates.iloc[0]
             current_value = float(history["value"].iloc[-1])
-            target_value = _target_value(spec, current_value=current_value, target_raw=float(target_row["value"]))
+            final_current_value = _final_current_value(final_series, current_observation)
+            target_denominator_value = final_current_value if spec.transform == "pct_change" else current_value
+            target_value = _target_value(spec, current_value=target_denominator_value, target_raw=float(target_row["value"]))
             if not np.isfinite(target_value):
                 continue
             card_id = f"{origin_key}_{spec.target_name}"
@@ -295,6 +302,7 @@ def build_vintage_cards_and_targets(origins: pd.DataFrame, context: pd.DataFrame
                     "current_observation_date": current_observation.date().isoformat(),
                     "target_observation_date": pd.Timestamp(target_row["observation_date"]).date().isoformat(),
                     "current_value": current_value,
+                    "target_current_value": target_denominator_value,
                     "target_raw_value": float(target_row["value"]),
                     "target_value": target_value,
                     "default_scale": float(spec.default_scale),
@@ -302,6 +310,13 @@ def build_vintage_cards_and_targets(origins: pd.DataFrame, context: pd.DataFrame
                 }
             )
     return pd.DataFrame(card_rows), pd.DataFrame(target_rows)
+
+
+def _origin_key(origin: pd.Series, fallback_index: int) -> str:
+    sequence = origin.get("_origin_sequence", fallback_index)
+    if pd.isna(sequence):
+        sequence = fallback_index
+    return f"vintage_origin_{int(sequence):04d}"
 
 
 def build_vintage_forecasts(cards: pd.DataFrame, targets: pd.DataFrame, *, include_llm_fixture: bool = True) -> pd.DataFrame:
@@ -358,6 +373,7 @@ def build_vintage_model_forecasts(
     live_used = 0
     cache_hits = 0
     cache_dir.mkdir(parents=True, exist_ok=True)
+    legacy_prompt_payloads = _legacy_prompt_payloads_by_card(cards)
     for model in models:
         client = ForecastLLMClient(
             provider,
@@ -369,7 +385,25 @@ def build_vintage_model_forecasts(
         for _, card in cards.iterrows():
             prompt_payload = json.loads(str(card["prompt_payload_json"]))
             cache_name = vintage_forecast_cache_name(provider, model, prompt_payload)
-            raw = client.json_call(vintage_forecast_prompt(prompt_payload), cache_name, instructions=vintage_forecast_instructions())
+            legacy_cache_name = None
+            legacy_prompt_hash = None
+            legacy_cache_hit = False
+            try:
+                raw = client.json_call(vintage_forecast_prompt(prompt_payload), cache_name, instructions=vintage_forecast_instructions())
+            except LLMUnavailable:
+                legacy_prompt_payload = legacy_prompt_payloads.get(str(card["card_id"]))
+                if forecast_mode != "replay" or legacy_prompt_payload is None:
+                    raise
+                legacy_cache_name = vintage_forecast_cache_name(provider, model, legacy_prompt_payload)
+                raw = client.json_call(
+                    vintage_forecast_prompt(legacy_prompt_payload),
+                    legacy_cache_name,
+                    instructions=vintage_forecast_instructions(),
+                )
+                legacy_prompt_hash = hashlib.sha256(
+                    json.dumps(legacy_prompt_payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+                ).hexdigest()
+                legacy_cache_hit = True
             payload = normalize_vintage_forecast_payload(raw.get("payload"), prompt_payload=prompt_payload)
             payload_hash = hashlib.sha256(
                 json.dumps(_jsonable(payload), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -400,6 +434,8 @@ def build_vintage_model_forecasts(
                     "model": model,
                     "forecast_mode": forecast_mode,
                     "cache_name": cache_name,
+                    "legacy_cache_name": legacy_cache_name,
+                    "legacy_cache_hit": legacy_cache_hit,
                     "cache_hit": bool(raw.get("cache_hit", False)),
                     "cache_path": raw.get("cache_path"),
                     "card_id": card["card_id"],
@@ -407,6 +443,7 @@ def build_vintage_model_forecasts(
                     "split": card["split"],
                     "target_name": card["target_name"],
                     "prompt_payload_sha256": prompt_hash,
+                    "legacy_prompt_payload_sha256": legacy_prompt_hash,
                     "payload_sha256": payload_hash,
                     "payload": payload,
                 }
@@ -414,6 +451,34 @@ def build_vintage_model_forecasts(
         live_used += client.live_call_count
         cache_hits += client.cache_hit_count
     return pd.DataFrame(rows), raw_records, int(live_used), int(cache_hits)
+
+
+def _legacy_prompt_payloads_by_card(cards: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    if cards.empty or "origin_id" not in cards or "split" not in cards:
+        return {}
+    origin_rows = cards[["split", "origin_id"]].drop_duplicates().copy()
+    origin_rows["_origin_number"] = origin_rows["origin_id"].map(_origin_number)
+    origin_rows = origin_rows.dropna(subset=["_origin_number"]).sort_values(["split", "_origin_number"])
+    legacy_by_origin: dict[tuple[str, str], str] = {}
+    for split, group in origin_rows.groupby("split", sort=True):
+        for local_index, (_, row) in enumerate(group.iterrows()):
+            legacy_by_origin[(str(split), str(row["origin_id"]))] = f"vintage_origin_{local_index:04d}"
+    payloads: dict[str, dict[str, Any]] = {}
+    for _, card in cards.iterrows():
+        legacy_origin_id = legacy_by_origin.get((str(card["split"]), str(card["origin_id"])))
+        if not legacy_origin_id or legacy_origin_id == str(card["origin_id"]):
+            continue
+        prompt_payload = json.loads(str(card["prompt_payload_json"]))
+        legacy_payload = dict(prompt_payload)
+        legacy_payload["origin_id"] = legacy_origin_id
+        legacy_payload["card_id"] = f"{legacy_origin_id}_{card['target_name']}"
+        payloads[str(card["card_id"])] = legacy_payload
+    return payloads
+
+
+def _origin_number(origin_id: Any) -> float:
+    match = re.search(r"(\d+)$", str(origin_id))
+    return float(match.group(1)) if match else np.nan
 
 
 def vintage_forecast_cache_name(provider: str, model: str, prompt_payload: dict[str, Any]) -> str:
@@ -661,7 +726,23 @@ def _normalize_origins(origins: pd.DataFrame) -> pd.DataFrame:
     out = origins.copy()
     out["as_of_date"] = pd.to_datetime(out["as_of_date"])
     out["split"] = out["split"].fillna("train").astype(str)
-    return out.sort_values(["as_of_date", "origin"]).reset_index(drop=True)
+    out = out.sort_values(["as_of_date", "origin"]).reset_index(drop=True)
+    out["_origin_sequence"] = np.arange(out.shape[0], dtype=int)
+    return out
+
+
+def _filter_origins_by_splits(origins: pd.DataFrame, splits: list[str]) -> pd.DataFrame:
+    wanted = {str(split).strip() for split in splits if str(split).strip()}
+    if not wanted:
+        return origins
+    available = set(origins["split"].dropna().astype(str))
+    missing = sorted(wanted - available)
+    if missing:
+        raise ValueError(f"Vintage origins do not contain requested split(s): {', '.join(missing)}")
+    filtered = origins[origins["split"].astype(str).isin(wanted)].copy()
+    if filtered.empty:
+        raise ValueError(f"Vintage split filter produced no origins: {', '.join(sorted(wanted))}")
+    return filtered.sort_values(["as_of_date", "origin"]).reset_index(drop=True)
 
 
 def _normalize_context(context: pd.DataFrame) -> pd.DataFrame:
@@ -704,6 +785,13 @@ def _history_rows(series_context: pd.DataFrame, history_periods: int) -> pd.Data
         .tail(max(2, history_periods))
         .reset_index(drop=True)
     )
+
+
+def _final_current_value(final_series: pd.DataFrame, current_observation: pd.Timestamp) -> float:
+    rows = final_series[final_series["observation_date"] == current_observation]
+    if rows.empty:
+        return np.nan
+    return float(rows.sort_values("observation_date").iloc[-1]["value"])
 
 
 def _relative_history(history: pd.DataFrame) -> list[dict[str, Any]]:
@@ -758,6 +846,10 @@ def _pct_changes(values: list[float]) -> list[float]:
 
 
 def _parse_models(raw: str) -> list[str]:
+    return [part.strip() for part in str(raw or "").split(",") if part.strip()]
+
+
+def _parse_splits(raw: str) -> list[str]:
     return [part.strip() for part in str(raw or "").split(",") if part.strip()]
 
 

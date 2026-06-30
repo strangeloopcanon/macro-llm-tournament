@@ -74,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models", default="gpt-5.5")
     parser.add_argument("--belief-mode", "--decision-mode", dest="belief_mode", choices=BELIEF_MODES, default="fixture")
     parser.add_argument("--raw-records-json", default=None, help="Replay prior demand_raw_records.json payloads without prompt-cache lookup.")
+    parser.add_argument("--belief-calibration-profile", default=None, help="Optional belief_calibration_profile.json to postprocess LLM belief payloads.")
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--household-source", choices=["fixture", "csv"], default="fixture")
@@ -139,6 +140,7 @@ def main() -> int:
             raise SystemExit("--raw-records-json is required when --belief-mode raw_replay")
         if not Path(args.raw_records_json).exists():
             raise SystemExit(f"--raw-records-json does not exist: {args.raw_records_json}")
+    belief_calibration_profile = _load_belief_calibration_profile(Path(args.belief_calibration_profile)) if args.belief_calibration_profile else None
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_ROOT / f"demand_economy_{timestamp}"
@@ -170,6 +172,7 @@ def main() -> int:
             variant=variant,
             max_live_calls=max(0, int(args.max_live_calls) - live_used),
             raw_replay_records=raw_replay_records,
+            belief_calibration_profile=belief_calibration_profile,
         )
         initial, beliefs, decisions, periods, accounting, prompt_rows = run_demand_economy(
             households,
@@ -214,6 +217,8 @@ def main() -> int:
         "belief_mode": args.belief_mode,
         "fresh_cache": bool(args.fresh_cache),
         "raw_records_json": args.raw_records_json if args.belief_mode == "raw_replay" else None,
+        "belief_calibration_profile": args.belief_calibration_profile,
+        "belief_calibration_profile_id": belief_calibration_profile.get("profile_id") if belief_calibration_profile else None,
         "max_live_calls": int(args.max_live_calls),
         "live_call_count": int(live_used),
         "cache_hit_count": int(cache_hits),
@@ -284,6 +289,7 @@ class DemandEconomyClient:
         variant: str = "llm_belief",
         max_live_calls: int = 0,
         raw_replay_records: list[dict[str, Any]] | None = None,
+        belief_calibration_profile: dict[str, Any] | None = None,
     ):
         if mode not in BELIEF_MODES:
             raise ValueError(f"Unsupported demand-economy mode: {mode}")
@@ -294,6 +300,7 @@ class DemandEconomyClient:
         self.cache_dir = cache_dir
         self.mode = mode
         self.variant = variant
+        self.belief_calibration_profile = belief_calibration_profile if variant == "llm_belief" else None
         self.raw_records: list[dict[str, Any]] = []
         self._raw_replay_records = _raw_replay_record_map(raw_replay_records or [])
         llm_mode = mode if variant in LLM_VARIANTS else "fixture"
@@ -311,7 +318,8 @@ class DemandEconomyClient:
     def source(self) -> str:
         if self.variant in LLM_VARIANTS:
             prefix = "fixture" if self.mode == "fixture" else "raw_replay" if self.mode == "raw_replay" else self.provider
-            return f"{self.variant}_{prefix}_{self.model}"
+            suffix = "_calibrated" if self.belief_calibration_profile else ""
+            return f"{self.variant}_{prefix}_{self.model}{suffix}"
         return self.variant
 
     def belief_panel(
@@ -369,6 +377,14 @@ class DemandEconomyClient:
                 cache_name = f"demand_belief_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt_payload})}"
                 data = self._llm.json_call(prompt_text, cache_name, instructions=_demand_instructions())
         normalized = normalize_period_payload(household_states, data, variant=self.variant)
+        if self.belief_calibration_profile and self.variant == "llm_belief":
+            normalized = apply_belief_calibration_profile(
+                normalized,
+                scenario,
+                period_state,
+                household_states,
+                self.belief_calibration_profile,
+            )
         self.raw_records.append(
             {
                 "source": self.source,
@@ -380,6 +396,9 @@ class DemandEconomyClient:
                 "model": data.get("model"),
                 "cache_hit": bool(data.get("cache_hit", False)),
                 "cache_path": data.get("cache_path"),
+                "belief_calibration_profile_id": (
+                    self.belief_calibration_profile.get("profile_id") if self.belief_calibration_profile else None
+                ),
                 "payload": data.get("payload", data),
             }
         )
@@ -455,6 +474,17 @@ def _load_raw_replay_records(path: Path) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         raise SystemExit("--raw-records-json must contain a list of demand raw records")
     return [record for record in data if isinstance(record, dict)]
+
+
+def _load_belief_calibration_profile(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit("--belief-calibration-profile must contain a JSON object")
+    if str(data.get("schema_version", "")) != "belief_dynamics_calibration_v1":
+        raise SystemExit("--belief-calibration-profile has an unsupported schema_version")
+    if not isinstance(data.get("demand_adjustments"), dict):
+        raise SystemExit("--belief-calibration-profile is missing demand_adjustments")
+    return data
 
 
 def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str, int], dict[str, Any]]:
@@ -1055,6 +1085,76 @@ def normalize_demand_payload(household_states: list[dict[str, Any]], data: dict[
     return normalize_belief_payload(household_states, data)
 
 
+def apply_belief_calibration_profile(
+    panel: dict[str, Any],
+    scenario: DemandScenario,
+    period_state: dict[str, Any],
+    household_states: list[dict[str, Any]],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    adjustments = profile.get("demand_adjustments", {})
+    if not isinstance(adjustments, dict):
+        return panel
+    beliefs_by_type = {type_id: dict(row) for type_id, row in panel.get("beliefs_by_type", {}).items()}
+    output_gap = float(period_state.get("output_gap_pct", 0.0))
+    inflation_gap = float(period_state.get("inflation_rate", INFLATION_TARGET)) - INFLATION_TARGET
+    policy_gap = float(period_state.get("policy_rate", NEUTRAL_POLICY_RATE)) - NEUTRAL_POLICY_RATE
+    job_shock = float(period_state.get("job_risk_shock_pp", 0.0))
+    transfer = float(period_state.get("transfer_per_household", 0.0))
+    dispersion = max(1.0, float(getattr(scenario, "belief_dispersion_multiplier", 1.0)))
+    feedback_gain = max(0.0, float(getattr(scenario, "feedback_gain", 1.0)))
+    rebound_signal = max(0.0, output_gap) + (0.35 if transfer > 0 else 0.0)
+    slump_signal = max(0.0, -output_gap) + 0.35 * max(0.0, policy_gap) + 0.25 * max(0.0, job_shock)
+    uncertainty_signal = abs(output_gap) + abs(inflation_gap) + 0.5 * max(0.0, job_shock) + 0.4 * (dispersion - 1.0)
+    income_rebound_gain = float(adjustments.get("income_rebound_gain", 0.0) or 0.0)
+    inflation_attention_gain = float(adjustments.get("inflation_attention_gain", 0.0) or 0.0)
+    job_risk_regime_gain = float(adjustments.get("job_risk_regime_gain", 0.0) or 0.0)
+    confidence_rebound_gain = float(adjustments.get("confidence_rebound_gain", 0.0) or 0.0)
+    precaution_uncertainty_gain = float(adjustments.get("precaution_uncertainty_gain", 0.0) or 0.0)
+    state_by_type = {str(row["type_id"]): row for row in household_states}
+    for type_id, belief in beliefs_by_type.items():
+        state = state_by_type.get(type_id, {})
+        low_liquid = str(state.get("liquidity_group", "")).lower() == "low"
+        high_risk = str(state.get("job_loss_risk_type", "")).lower() == "high"
+        attention_prices = float(belief.get("attention_weight_prices", state.get("attention_weight_prices", 0.5)) or 0.5)
+        attention_jobs = float(belief.get("attention_weight_jobs", state.get("attention_weight_jobs", 0.5)) or 0.5)
+        precautionary_sensitivity = float(state.get("precautionary_sensitivity", 0.5) or 0.5)
+        fragility = 1.0 + (0.35 if low_liquid else 0.0) + (0.25 if high_risk else 0.0)
+        income_delta = income_rebound_gain * (0.65 * rebound_signal - 0.85 * slump_signal) * fragility
+        inflation_delta = inflation_attention_gain * attention_prices * (inflation_gap + 0.10 * feedback_gain * output_gap)
+        job_delta = job_risk_regime_gain * attention_jobs * (slump_signal - 0.30 * rebound_signal) * fragility
+        confidence_delta = confidence_rebound_gain * (0.90 * rebound_signal - 1.10 * slump_signal - 0.30 * abs(inflation_gap))
+        confidence_delta += 0.08 * transfer / 1000.0 if low_liquid else 0.02 * transfer / 1000.0
+        precaution_delta = precaution_uncertainty_gain * uncertainty_signal * precautionary_sensitivity * fragility + 0.035 * job_delta
+        precaution_delta -= 0.06 * rebound_signal
+        belief["expected_income_growth_next_period"] = float(
+            np.clip(float(belief["expected_income_growth_next_period"]) + income_delta, -12.0, 12.0)
+        )
+        belief["expected_inflation_next_period"] = float(
+            np.clip(float(belief["expected_inflation_next_period"]) + inflation_delta, -5.0, 15.0)
+        )
+        belief["perceived_job_loss_probability"] = float(
+            np.clip(float(belief["perceived_job_loss_probability"]) + job_delta, 0.0, 40.0)
+        )
+        belief["confidence_index"] = float(np.clip(float(belief["confidence_index"]) + confidence_delta, 0.0, 100.0))
+        belief["precautionary_saving_score"] = float(
+            np.clip(float(belief["precautionary_saving_score"]) + precaution_delta, 0.0, 10.0)
+        )
+        reason_codes = list(belief.get("reason_codes", []))
+        if "calibrated_dynamics" not in reason_codes:
+            reason_codes.append("calibrated_dynamics")
+        belief["reason_codes"] = reason_codes[:6]
+        causal_path = list(belief.get("causal_path", []))
+        if "validation calibrated belief dynamics" not in causal_path:
+            causal_path.append("validation calibrated belief dynamics")
+        belief["causal_path"] = causal_path[:6]
+    return {
+        "prompt_version": panel.get("prompt_version", DEMAND_ECONOMY_PROMPT_VERSION),
+        "beliefs_by_type": beliefs_by_type,
+        "direct_actions_by_type": panel.get("direct_actions_by_type", {}),
+    }
+
+
 def fixture_demand_payload(
     scenario: DemandScenario,
     period_state: dict[str, Any],
@@ -1443,6 +1543,7 @@ def build_demand_economy_report(
         "",
         "## Setup",
         f"- Belief mode: `{manifest.get('belief_mode')}`",
+        f"- Belief calibration profile: `{manifest.get('belief_calibration_profile_id') or 'none'}`",
         f"- Provider/models: `{manifest.get('provider')}` / `{', '.join(manifest.get('models', []))}`",
         f"- Variants: `{', '.join(manifest.get('variants', []))}`",
         f"- Fixture-forced variants: `{', '.join(manifest.get('fixture_variants', [])) or 'none'}`",

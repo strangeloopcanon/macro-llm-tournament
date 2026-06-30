@@ -31,6 +31,7 @@ macro-llm-persona-belief-panel = "macro_llm_tournament.persona_belief_panel:main
 macro-llm-persona-ecology = "macro_llm_tournament.persona_ecology:main"
 macro-llm-demand-economy = "macro_llm_tournament.demand_economy:main"
 macro-llm-demand-vintage-oos = "macro_llm_tournament.demand_vintage_oos:main"
+macro-llm-belief-calibration = "macro_llm_tournament.belief_calibration:main"
 macro-llm-macro-validity = "macro_llm_tournament.macro_validity:main"
 macro-llm-macro-performance-gate = "macro_llm_tournament.macro_performance_gate:main"
 macro-llm-postcutoff-behavior-gate = "macro_llm_tournament.postcutoff_behavior_gate:main"
