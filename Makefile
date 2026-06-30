@@ -1,3 +1,5 @@
+DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
+
 .PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
@@ -111,6 +113,10 @@ demand-economy-fixture:
 		--output-dir outputs/demand_economy_fixture
 
 demand-economy-live-replay:
+	@if [ -e "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" ] && [ "$(ALLOW_REPLAY_OVERWRITE)" != "1" ]; then \
+		echo "Refusing to overwrite $(DEMAND_ECONOMY_REPLAY_OUTPUT). Set DEMAND_ECONOMY_REPLAY_OUTPUT=outputs/demand_economy_replay_$$(date -u +%Y%m%dT%H%M%SZ) or ALLOW_REPLAY_OVERWRITE=1."; \
+		exit 2; \
+	fi
 	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
 		--provider codex_cli \
 		--models gpt-5.5 \
@@ -124,7 +130,7 @@ demand-economy-live-replay:
 		--fixture-variants naive_persona \
 		--feedback-mode closed_loop \
 		--scenarios baseline,transfer_shock,rate_hike,job_risk_shock,belief_feedback \
-		--output-dir outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
+		--output-dir "$(DEMAND_ECONOMY_REPLAY_OUTPUT)"
 
 demand-vintage-oos-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.demand_vintage_oos \
@@ -148,9 +154,10 @@ macro-performance-fixture: demand-economy-fixture demand-vintage-oos-fixture
 		--vintage-oos-dir outputs/demand_vintage_oos_fixture \
 		--output-dir outputs/macro_performance_gate_fixture
 
-macro-validity-scorecard: demand-economy-live-replay
+macro-validity-scorecard:
+	@test -d "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" || { echo "Missing $(DEMAND_ECONOMY_REPLAY_OUTPUT). Run demand-economy-live-replay with a fresh DEMAND_ECONOMY_REPLAY_OUTPUT first."; exit 2; }
 	PYTHONPATH=src python3 -m macro_llm_tournament.macro_validity \
-		--demand-run-dir outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5 \
+		--demand-run-dir "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" \
 		--vintage-panel-dir work/fred_vintage_panel \
 		--output-dir outputs/macro_validity_scorecard
 
