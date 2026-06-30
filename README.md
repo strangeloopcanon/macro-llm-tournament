@@ -2,7 +2,7 @@
 
 Research code for running as-of macro forecast tournaments against public Survey of Professional Forecasters data and simple statistical controls.
 
-The repository contains the reusable harness only. Generated reports, model outputs, caches, and research notes are local artifacts and are not part of the public source tree.
+The repository contains the reusable harness, plus one current handoff report at [`reports/macro_simulation_report.md`](reports/macro_simulation_report.md). Generated run reports, model outputs, caches, and research notes are local artifacts and are not part of the public source tree.
 
 ## What is in the repo
 
@@ -19,6 +19,10 @@ The repository contains the reusable harness only. Generated reports, model outp
 - `src/macro_llm_tournament/persona_belief_panel.py` runs data-grounded persona belief panels and scores cross-sectional gradients, within-group spread, distribution distance, and common-core correlation.
 - `src/macro_llm_tournament/persona_ecology.py` runs respondent-seeded belief ecologies with profile, prior-expectation, external-information, behavior, and aggregate-feedback modules.
 - `src/macro_llm_tournament/demand_economy.py` runs the abstract HANK-lite demand economy: household belief modules form inflation, income, job-risk, confidence, and precautionary-saving beliefs; deterministic structural code converts those beliefs into budget-constrained consumption, aggregate demand, output, employment, sticky inflation, and policy feedback.
+- `src/macro_llm_tournament/demand_vintage_oos.py` builds date-free vintage demand cards, hidden targets, baseline forecasts, leakage audits, and OOS score summaries.
+- `src/macro_llm_tournament/macro_playground.py` wraps the demand kernel in a branchable scenario sandbox with bounded household, firm, policy/narrative, and critic actor payloads.
+- `src/macro_llm_tournament/macro_performance_gate.py` scores the macro lab and vintage OOS artifacts against an executable target catalog without promoting fixture runs to empirical validity.
+- `src/macro_llm_tournament/macro_validity.py` builds the external-validity bridge scorecard for micro behavior, IRF shape, and vintage-data readiness.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
 
 ## Quick start
@@ -136,6 +140,14 @@ make audit-fixture
 ```
 
 This reruns the SPF fixture if needed, then emits reviewer-style audit files under `outputs/forecast_audit_fixture`.
+
+Run the zero-cost macro performance gate:
+
+```bash
+make macro-performance-fixture
+```
+
+This runs the demand-economy fixture, the date-free vintage OOS fixture, and the performance gate. It writes `outputs/macro_performance_gate_fixture/` with the target catalog copy, target-level scores, variant summary, baseline attribution, vintage-readiness table, manifest, and `macro_performance_report.md`.
 
 ## Live LLM runs
 
@@ -397,13 +409,37 @@ python3 -m macro_llm_tournament.demand_economy \
 
 Current verified live result: the 12-cell, 20-period, five-scenario GPT-5.5 run in `outputs/demand_economy_live_gpt55_p20_12cell_full_v4` returns `hank_lite_belief_lab_ready`. The LLM belief module passes all 19 validation metrics, clears all 54 required metrics across the ablation surface, holds accounting to numerical tolerance, and is the only variant in that run to pass belief-feedback amplification while preserving transfer MPC, liquidity/income MPC gradients, monetary-shock contraction, and job-risk precaution.
 
+Run the fixture-first playable macro engine:
+
+```bash
+make macro-playground-fixture
+```
+
+This writes `outputs/macro_playground_fixture/` with a normalized date-free scenario spec, branch table, actor payloads, event log, period paths, household decisions, accounting audit, critic flags, QA scorecard, and `macro_playground_report.md`. The runner is separate from macro-validity: its success verdict is `macro_playground_fixture_ready`, meaning the branchable internal engine is playable and accounting-safe. Households emit bounded belief payloads, firms emit bounded hiring/price/credit reactions, policy/narrative emits bounded rate/transfer/confidence/job-risk/dispersion modifiers, and deterministic code owns budgets, behavior, aggregation, feedback, and identities. Live mode is intentionally blocked until fixture and replay provenance gates pass.
+
+Run the date-free vintage OOS fixture:
+
+```bash
+make demand-vintage-oos-fixture
+```
+
+This writes `outputs/demand_vintage_oos_fixture/` with prompt-facing cards, hidden targets, baseline forecasts, errors, summary scores, a leakage audit, and `demand_vintage_oos_report.md`. Prompt payloads use relative periods and omit calendar dates, named crises, as-of dates, target observation dates, and target values. Fixture mode validates the scoring and leakage surface; panel mode can use `work/fred_vintage_panel/` when that local data bundle is present.
+
+Run the macro simulation performance gate:
+
+```bash
+make macro-performance-fixture
+```
+
+This writes `outputs/macro_performance_gate_fixture/` with `macro_performance_report.md`. The verdict `macro_lab_performance_ready` means the belief-demand economy clears accounting, transfer MPC, liquidity/income heterogeneity, monetary-shock, precautionary-saving, belief-feedback, and IRF-shape targets in a zero-cost fixture run. The stronger verdict `macro_empirical_oos_ready` is reserved for non-fixture gate runs backed by non-fixture scored vintage OOS artifacts and no blocking LLM-belief target gaps.
+
 Replay the verified GPT-5.5 belief payloads through the current demand-economy mechanisms and run the macro-validity bridge scorecard:
 
 ```bash
 make macro-validity-scorecard
 ```
 
-This writes `outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5/`, `outputs/macro_validity_scorecard/`, and a tracked readable copy at [`reports/macro_validity_scorecard_report.md`](reports/macro_validity_scorecard_report.md). The replay spends zero new LLM calls: it uses the prior GPT-5.5 live belief payloads and reruns the deterministic structural economy. The current mechanism layer includes transfer windfall allocation across consumption, debt repayment, and liquid saving; debt-stock accounting; decaying buffer-relief support; and gradual rate pass-through. The scorecard separates three gates: micro behavior evidence, scenario-minus-baseline impulse-response shape, and vintage out-of-sample readiness. Vintage as-of context coverage is not counted as actual OOS performance until a date-free vintage card/target/scoring runner exists.
+This writes `outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5/` and `outputs/macro_validity_scorecard/`. The replay spends zero new LLM calls: it uses the prior GPT-5.5 live belief payloads and reruns the deterministic structural economy. The current mechanism layer includes transfer windfall allocation across consumption, debt repayment, and liquid saving; debt-stock accounting; decaying buffer-relief support; and gradual rate pass-through. The scorecard separates three gates: micro behavior evidence, scenario-minus-baseline impulse-response shape, and vintage data readiness. Use the macro performance gate when the question is whether the whole simulation clears an executable lab/OOS target catalog.
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 

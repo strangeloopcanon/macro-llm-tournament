@@ -19,7 +19,7 @@ MACRO_VALIDITY_VERSION = "macro_validity_scorecard_v1"
 DEFAULT_DEMAND_RUN_DIR = OUTPUT_ROOT / "demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5"
 DEFAULT_OUTPUT_DIR = OUTPUT_ROOT / "macro_validity_scorecard"
 DEFAULT_VINTAGE_PANEL_DIR = WORK_ROOT / "fred_vintage_panel"
-DEFAULT_REPORT_PATH = Path("reports") / "macro_validity_scorecard_report.md"
+DEFAULT_REPORT_PATH = ""
 LLM_BELIEF_VARIANT = "llm_belief"
 IRF_VARIABLES = (
     "aggregate_consumption",

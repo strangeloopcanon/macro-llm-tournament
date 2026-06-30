@@ -1,0 +1,108 @@
+{
+  "scenario_spec_version": "macro_playground_spec_v1",
+  "run_id": "fixture_playable_macro_v0_2",
+  "horizon": 20,
+  "household_count": 12,
+  "initial_environment": {
+    "output_gap_pct": 0.0,
+    "employment_rate": 0.955,
+    "inflation_rate": 2.0,
+    "policy_rate": 3.0
+  },
+  "branches": [
+    {
+      "branch_id": "baseline",
+      "from_period": 0,
+      "label": "No exogenous shock; closed-loop internal dynamics only.",
+      "shocks": {},
+      "policy_regime": {},
+      "narrative_regime": {},
+      "actor_modes": {}
+    },
+    {
+      "branch_id": "transfer_shock",
+      "from_period": 0,
+      "label": "One-period household transfer.",
+      "shocks": {
+        "transfer": {
+          "period": 1,
+          "amount": 1000.0
+        }
+      },
+      "policy_regime": {},
+      "narrative_regime": {},
+      "actor_modes": {}
+    },
+    {
+      "branch_id": "rate_hike",
+      "from_period": 0,
+      "label": "Temporary policy-rate tightening with bounded firm response.",
+      "shocks": {
+        "rate_hike": {
+          "start": 1,
+          "end": 4,
+          "pp": 1.0
+        },
+        "firm": {
+          "start": 1,
+          "end": 5,
+          "planned_output_gap_pct": -0.6,
+          "hiring_gap_pp": -0.08,
+          "price_pressure_pp": -0.04,
+          "credit_tightening_index": 0.3
+        }
+      },
+      "policy_regime": {},
+      "narrative_regime": {},
+      "actor_modes": {}
+    },
+    {
+      "branch_id": "job_risk_shock",
+      "from_period": 0,
+      "label": "Perceived job-risk news before realized income moves.",
+      "shocks": {
+        "job_risk": {
+          "start": 1,
+          "end": 4,
+          "pp": 8.0
+        },
+        "narrative": {
+          "start": 1,
+          "end": 4,
+          "communication_confidence_shift": -3.0,
+          "job_risk_attention_shift_pp": 2.0,
+          "dispersion_multiplier": 1.1
+        }
+      },
+      "policy_regime": {},
+      "narrative_regime": {},
+      "actor_modes": {}
+    },
+    {
+      "branch_id": "belief_feedback",
+      "from_period": 0,
+      "label": "Higher belief dispersion and feedback gain.",
+      "shocks": {
+        "belief_feedback": {
+          "dispersion_multiplier": 1.8,
+          "feedback_gain": 1.35
+        },
+        "firm": {
+          "start": 1,
+          "end": 12,
+          "planned_output_gap_pct": -0.3,
+          "hiring_gap_pp": -0.05,
+          "price_pressure_pp": 0.03,
+          "credit_tightening_index": 0.2
+        }
+      },
+      "policy_regime": {},
+      "narrative_regime": {
+        "communication_confidence_shift": -1.0,
+        "job_risk_attention_shift_pp": 0.6,
+        "dispersion_multiplier": 1.05
+      },
+      "actor_modes": {}
+    }
+  ]
+}
