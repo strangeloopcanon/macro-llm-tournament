@@ -124,7 +124,7 @@ Prepare the enriched persona holdout CSVs used by the live canaries:
 make persona-holdouts
 ```
 
-This writes `work/persona_beliefs/sce_micro_holdout.csv` and `work/persona_beliefs/sce_panel_holdout.csv` from the local public survey-belief aggregate file and `work/fred_vintage_panel/` as-of macro context. These are synthetic enriched persona targets, not true respondent microdata. They are useful for live ecology wiring, prompt leakage checks, and closed-loop emergent-feedback canaries; empirical respondent-level claims still require real SCE, Michigan, PSID, SCF, or comparable microdata.
+This writes `work/persona_beliefs/sce_micro_holdout.csv` and `work/persona_beliefs/sce_panel_holdout.csv` from the local public survey-belief aggregate file and `work/fred_vintage_panel/` as-of macro context. The default 54-row static panel is the minimum full fixture grid for income, education, age, and gender, so high-income and high-liquidity contrasts are present. These are synthetic enriched persona targets, not true respondent microdata. They are useful for live ecology wiring, prompt leakage checks, and closed-loop emergent-feedback canaries; empirical respondent-level claims still require real SCE, Michigan, PSID, SCF, or comparable microdata.
 
 Run the zero-cost post-cutoff household behavior proxy fixture:
 

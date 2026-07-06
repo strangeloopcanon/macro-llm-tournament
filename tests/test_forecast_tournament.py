@@ -2492,6 +2492,15 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertIn("observed_inflation_1y", panel)
             self.assertEqual(panel["period_id"].nunique(), 2)
 
+    def test_persona_holdout_default_covers_income_and_liquidity_contrasts(self):
+        respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="synthetic_enriched")
+
+        self.assertEqual(set(respondents["income_group"]), {"low", "middle", "high"})
+        self.assertTrue({"low", "middle", "high"}.issubset(set(respondents["liquid_wealth_group"])))
+        counts = respondents.groupby(["income_group", "education_group", "age_group", "gender"]).size()
+        self.assertEqual(int(counts.min()), 1)
+        self.assertEqual(int(counts.max()), 1)
+
     def test_agent_economy_same_origin_cards_share_prior_state(self):
         cards = build_forecast_cards(
             spf_fixture(),

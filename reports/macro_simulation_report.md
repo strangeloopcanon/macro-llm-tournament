@@ -75,7 +75,7 @@ The full live persona panel ran on 36 synthetic-enriched SCE-style respondents, 
 
 After fixing the scorer so missing income contrasts are skipped rather than counted as failures, the persona panel verdict is `partial_distribution_failure`.
 
-The good part: demographic gradients and spread mostly work. The scoreable sign rate is `16/18 = 88.89%`, the median within-variance ratio is `1.1626`, and the maximum cross-model common-core correlation is `0.8501`, below the `0.95` failure threshold. Six income contrasts are skipped because this synthetic holdout has `low` and `middle` income groups but no `high` income group.
+The good part: demographic gradients and spread mostly work. The scoreable sign rate is `16/18 = 88.89%`, the median within-variance ratio is `1.1626`, and the maximum cross-model common-core correlation is `0.8501`, below the `0.95` failure threshold. In this 36-row live run, six income contrasts are skipped because the old synthetic holdout had `low` and `middle` income groups but no `high` income group. The holdout generator has since been fixed to produce the full 54-row fixture grid; the expanded high-income rows require fresh live calls before they can be included in the GPT panel result.
 
 The bad part: distribution shape still fails. The maximum KS statistic is `0.7500`, above the `0.35` threshold. Unemployment expectations are the main problem: the synthetic target mean is `4.6813`, while GPT-5.4 predicts `5.5472` and GPT-5.5 predicts `5.4778`. Inflation is compressed and shifted upward as well. GPT-5.4 is closer on real income growth; GPT-5.5 undershoots it.
 
@@ -103,9 +103,10 @@ The next claim is not ready:
 
 The next work should not add more agent theater. It should make the belief-to-behavior layer harder to fool.
 
-1. Rebuild the persona holdout so all scored demographic and liquidity contrasts are actually present, including high-income and high-liquidity groups.
-2. Calibrate the persona belief layer on validation only, targeting distribution shape as well as gradient signs. The immediate misses are unemployment level/shape and inflation compression.
-3. Feed the calibrated belief distributions into the behavior economy and score real behavior targets: transfer MPC by liquidity, debt repayment, saving, and liquidity/portfolio shifts.
-4. Keep the current forecast audit fixed in the report: AR(2), RLS, bootstrap intervals, DM-style tests, exact recall, qualitative recall, belief-structure audit, and cutoff status.
+1. Run the expanded 54-row persona panel, or replace it with real respondent-level microdata. The local synthetic holdout generator now includes high-income and high-liquidity groups; the remaining work is live scoring or data replacement.
+2. Add a behavior-side baseline scoreboard that treats the existing liquidity rule, flat rule, permanent-income rule, and LLM ablations the way the forecast gate treats no-change, AR(2), and RLS.
+3. Calibrate the persona belief layer on validation only, targeting obvious level shifts and distribution shape without chasing a synthetic KS threshold. The immediate misses are unemployment level/shape and inflation compression.
+4. Feed the calibrated belief distributions into the behavior economy and score real behavior targets: transfer MPC by liquidity, debt repayment, saving, and liquidity/portfolio shifts.
+5. Keep the current forecast audit fixed in the report: AR(2), RLS, bootstrap intervals, DM-style tests, exact recall, qualitative recall, belief-structure audit, and cutoff status.
 
 That is the path from "the belief engine contains signal" to "the simulated economy produces useful macro behavior."

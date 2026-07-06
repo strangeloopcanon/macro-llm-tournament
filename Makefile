@@ -60,7 +60,7 @@ behavior-fixture:
 
 persona-holdouts:
 	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_persona_holdouts \
-		--respondent-count 36 \
+		--respondent-count 54 \
 		--period-count 3 \
 		--start-as-of 2024-10-01 \
 		--output-dir work/persona_beliefs

@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--static-output", default="sce_micro_holdout.csv")
     parser.add_argument("--panel-output", default="sce_panel_holdout.csv")
-    parser.add_argument("--respondent-count", type=int, default=36)
+    parser.add_argument("--respondent-count", type=int, default=54)
     parser.add_argument("--period-count", type=int, default=3)
     parser.add_argument("--start-as-of", default="2024-10-01")
     parser.add_argument("--panel-kind", default=PANEL_KIND)
