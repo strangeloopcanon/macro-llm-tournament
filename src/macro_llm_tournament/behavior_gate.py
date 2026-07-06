@@ -35,6 +35,7 @@ BEHAVIOR_BASELINE_SOURCES = ("liquidity_rule", "flat_30pct_rule", "permanent_inc
 BEHAVIOR_BASELINE_TIE_TOLERANCE = 1e-9
 BEHAVIOR_SELECTION_SPLIT = "behavior_selection_v1"
 BEHAVIOR_HOLDOUT_SPLIT = "behavior_holdout_v1"
+BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT = "behavior_holdout_ui_v1"
 BEHAVIOR_PRESPECIFIED_SUFFIX = "__liquidity_prior_50"
 BEHAVIOR_PRIMITIVE_FIELDS = [
     "perceived_job_loss_risk_pp",
@@ -81,6 +82,9 @@ class BehaviorScenario:
     horizon_months: int
     prompt_context: str
     contamination_label: str
+    scenario_type: str = "transfer"
+    income_loss_pct: float = 0.0
+    ui_month: int = 0
 
 
 BEHAVIOR_SCENARIOS: tuple[BehaviorScenario, ...] = (
@@ -155,6 +159,54 @@ BEHAVIOR_SCENARIOS: tuple[BehaviorScenario, ...] = (
             "The payment is much larger than a routine rebate, so gradual saving and durable adjustment are plausible."
         ),
         "external_lottery_holdout",
+    ),
+    BehaviorScenario(
+        "ui_onset_income_loss_style",
+        "Job loss with unemployment insurance beginning",
+        "date_free_holdout",
+        0.0,
+        1,
+        (
+            "A worker loses their job and begins receiving unemployment insurance benefits. "
+            "Monthly household income falls, but UI partially replaces lost wages. "
+            "The response is the spending drop relative to the household's pre-unemployment monthly spending."
+        ),
+        "external_ui_exhaustion_holdout",
+        "income_loss",
+        0.22,
+        0,
+    ),
+    BehaviorScenario(
+        "ui_receipt_monthly_path_style",
+        "Ongoing unemployment insurance receipt before exhaustion",
+        "date_free_holdout",
+        0.0,
+        1,
+        (
+            "A worker remains unemployed while receiving regular unemployment insurance benefits. "
+            "The job loss is already known, benefits are still arriving, and the task is to estimate the additional "
+            "month-to-month spending drift relative to the prior month."
+        ),
+        "external_ui_exhaustion_holdout",
+        "income_loss",
+        0.00,
+        3,
+    ),
+    BehaviorScenario(
+        "ui_exhaustion_income_loss_style",
+        "Predictable unemployment insurance benefit exhaustion",
+        "date_free_holdout",
+        0.0,
+        1,
+        (
+            "A worker has been unemployed long enough that unemployment insurance benefits now expire. "
+            "The benefit exhaustion is predictable and creates a large monthly income drop. "
+            "The response is the spending drop relative to spending while benefits were still arriving."
+        ),
+        "external_ui_exhaustion_holdout",
+        "income_loss",
+        0.33,
+        6,
     ),
 )
 
@@ -271,7 +323,13 @@ def main() -> int:
         holdout_scores = score_behavior_targets(aggregates, holdout_targets)
         holdout_cell_scores = score_cell_behavior_targets(all_actions, holdout_cell_targets)
         holdout_baseline_comparison = build_behavior_baseline_comparison(holdout_scores, holdout_cell_scores)
+        ui_holdout_targets = behavior_targets_frame(target_scope="aggregate", evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT)
+        ui_holdout_cell_targets = behavior_targets_frame(target_scope="cell", evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT)
+        ui_holdout_scores = score_behavior_targets(aggregates, ui_holdout_targets)
+        ui_holdout_cell_scores = score_cell_behavior_targets(all_actions, ui_holdout_cell_targets)
+        ui_holdout_baseline_comparison = build_behavior_baseline_comparison(ui_holdout_scores, ui_holdout_cell_scores)
         prespecified_source = f"llm_{args.provider}_{args.model}{BEHAVIOR_PRESPECIFIED_SUFFIX}"
+        raw_llm_source = f"llm_{args.provider}_{args.model}"
         primitive_source = f"primitive_{args.provider}_{args.model}"
         holdout_verdict = prespecified_behavior_holdout_verdict(
             holdout_baseline_comparison,
@@ -283,11 +341,25 @@ def main() -> int:
             candidate_source=primitive_source,
             target_scope="aggregate",
         )
+        ui_raw_holdout_verdict = prespecified_behavior_holdout_verdict(
+            ui_holdout_baseline_comparison,
+            candidate_source=raw_llm_source,
+            target_scope="aggregate",
+            evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+        )
+        ui_primitive_holdout_verdict = prespecified_behavior_holdout_verdict(
+            ui_holdout_baseline_comparison,
+            candidate_source=primitive_source,
+            target_scope="aggregate",
+            evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+        )
         scenarios.to_csv(output_dir / "behavior_scenarios.csv", index=False)
         targets.to_csv(output_dir / "behavior_targets.csv", index=False)
         cell_targets.to_csv(output_dir / "behavior_cell_targets.csv", index=False)
         holdout_targets.to_csv(output_dir / "behavior_holdout_targets.csv", index=False)
         holdout_cell_targets.to_csv(output_dir / "behavior_holdout_cell_targets.csv", index=False)
+        ui_holdout_targets.to_csv(output_dir / "behavior_ui_exhaustion_holdout_targets.csv", index=False)
+        ui_holdout_cell_targets.to_csv(output_dir / "behavior_ui_exhaustion_holdout_cell_targets.csv", index=False)
         target_catalog.to_csv(output_dir / "behavior_target_catalog.csv", index=False)
         type_cells.to_csv(output_dir / "household_type_cells.csv", index=False)
         primitive_actions.to_csv(output_dir / "household_behavior_primitive_actions.csv", index=False)
@@ -315,6 +387,9 @@ def main() -> int:
         holdout_scores.to_csv(output_dir / "behavior_holdout_target_scores.csv", index=False)
         holdout_cell_scores.to_csv(output_dir / "behavior_holdout_cell_target_scores.csv", index=False)
         holdout_baseline_comparison.to_csv(output_dir / "behavior_holdout_baseline_comparison.csv", index=False)
+        ui_holdout_scores.to_csv(output_dir / "behavior_ui_exhaustion_holdout_target_scores.csv", index=False)
+        ui_holdout_cell_scores.to_csv(output_dir / "behavior_ui_exhaustion_holdout_cell_target_scores.csv", index=False)
+        ui_holdout_baseline_comparison.to_csv(output_dir / "behavior_ui_exhaustion_holdout_baseline_comparison.csv", index=False)
         (output_dir / "behavior_llm_raw_records.json").write_text(json.dumps(llm_client.raw_records, indent=2, sort_keys=True), encoding="utf-8")
         manifest.update(
             {
@@ -346,10 +421,16 @@ def main() -> int:
                 "holdout_target_rows": int(holdout_targets.shape[0] + holdout_cell_targets.shape[0]),
                 "holdout_score_rows": int(holdout_scores.shape[0] + holdout_cell_scores.shape[0]),
                 "holdout_baseline_comparison_rows": int(holdout_baseline_comparison.shape[0]),
+                "ui_exhaustion_holdout_split": BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+                "ui_exhaustion_holdout_target_rows": int(ui_holdout_targets.shape[0] + ui_holdout_cell_targets.shape[0]),
+                "ui_exhaustion_holdout_score_rows": int(ui_holdout_scores.shape[0] + ui_holdout_cell_scores.shape[0]),
+                "ui_exhaustion_holdout_baseline_comparison_rows": int(ui_holdout_baseline_comparison.shape[0]),
                 "prespecified_behavior_source": prespecified_source,
                 "prespecified_holdout_verdict": holdout_verdict,
                 "primitive_behavior_source": primitive_source,
                 "primitive_holdout_verdict": primitive_holdout_verdict,
+                "ui_exhaustion_raw_llm_holdout_verdict": ui_raw_holdout_verdict,
+                "ui_exhaustion_primitive_holdout_verdict": ui_primitive_holdout_verdict,
                 "aggregate_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="aggregate"),
                 "cell_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="cell"),
                 "raw_llm_holdout_baseline_verdict": behavior_baseline_verdict(
@@ -362,6 +443,18 @@ def main() -> int:
                     holdout_baseline_comparison,
                     target_scope="aggregate",
                     evaluation_split=BEHAVIOR_HOLDOUT_SPLIT,
+                    source_kinds=("primitive",),
+                ),
+                "ui_exhaustion_raw_llm_baseline_verdict": behavior_baseline_verdict(
+                    ui_holdout_baseline_comparison,
+                    target_scope="aggregate",
+                    evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+                    source_kinds=("llm",),
+                ),
+                "ui_exhaustion_primitive_baseline_verdict": behavior_baseline_verdict(
+                    ui_holdout_baseline_comparison,
+                    target_scope="aggregate",
+                    evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
                     source_kinds=("primitive",),
                 ),
                 "primitive_aggregate_baseline_verdict": behavior_baseline_verdict(
@@ -393,6 +486,8 @@ def main() -> int:
                     "behavior_cell_targets.csv",
                     "behavior_holdout_targets.csv",
                     "behavior_holdout_cell_targets.csv",
+                    "behavior_ui_exhaustion_holdout_targets.csv",
+                    "behavior_ui_exhaustion_holdout_cell_targets.csv",
                     "behavior_target_catalog.csv",
                     "household_type_cells.csv",
                     "household_behavior_primitive_actions.csv",
@@ -409,6 +504,9 @@ def main() -> int:
                     "behavior_holdout_target_scores.csv",
                     "behavior_holdout_cell_target_scores.csv",
                     "behavior_holdout_baseline_comparison.csv",
+                    "behavior_ui_exhaustion_holdout_target_scores.csv",
+                    "behavior_ui_exhaustion_holdout_cell_target_scores.csv",
+                    "behavior_ui_exhaustion_holdout_baseline_comparison.csv",
                     "behavior_llm_raw_records.json",
                     "behavior_gate_report.md",
                 ],
@@ -427,6 +525,8 @@ def main() -> int:
             baseline_comparison=baseline_comparison,
             holdout_baseline_comparison=holdout_baseline_comparison,
             holdout_targets=holdout_targets,
+            ui_holdout_baseline_comparison=ui_holdout_baseline_comparison,
+            ui_holdout_targets=ui_holdout_targets,
             primitive_sign_audit=primitive_sign_audit,
         )
         (output_dir / "behavior_gate_report.md").write_text(report, encoding="utf-8")
@@ -689,11 +789,13 @@ def _base_action_from_merged(row: pd.Series, *, source: str, reason: str) -> dic
     return {
         "schema_version": row["schema_version_llm"],
         "scenario_id": row["scenario_id"],
+        "scenario_type": row.get("scenario_type_llm", row.get("scenario_type", "transfer")),
         "source": source,
         "type_id": row["type_id"],
         "population_weight": float(row["population_weight_llm"]),
         "liquidity_group": row["liquidity_group_llm"],
         "transfer_amount": float(row["transfer_amount_llm"]),
+        "income_loss_pct": float(row.get("income_loss_pct_llm", row.get("income_loss_pct", 0.0))),
         "confidence": 0.5,
         "reason": reason,
     }
@@ -737,6 +839,8 @@ def _normalize_action_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
+    if scenario.scenario_type == "income_loss":
+        return behavior_income_loss_prompt(scenario, type_cells)
     payload = {
         "prompt_version": BEHAVIOR_PROMPT_VERSION,
         "task": "Allocate a one-time household transfer into spending, debt repayment, and liquid saving.",
@@ -780,7 +884,55 @@ def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def behavior_income_loss_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
+    payload = {
+        "prompt_version": BEHAVIOR_PROMPT_VERSION,
+        "task": "Estimate bounded household spending and balance-sheet responses to an income-loss scenario.",
+        "as_of_rule": "Use only the scenario and type-cell information below. Do not cite realized study estimates.",
+        "scenario": {
+            "scenario_id": scenario.scenario_id,
+            "label": scenario.label,
+            "as_of_date": scenario.as_of_date,
+            "scenario_type": scenario.scenario_type,
+            "income_loss_pct": scenario.income_loss_pct,
+            "ui_month": scenario.ui_month,
+            "horizon_months": scenario.horizon_months,
+            "context": scenario.prompt_context,
+        },
+        "household_type_cells": [
+            {
+                "type_id": row["type_id"],
+                "label": row["label"],
+                "population_weight": round_or_none(row["population_weight"]),
+                "annual_income": round_or_none(row["annual_income"]),
+                "liquid_assets": round_or_none(row["liquid_assets"]),
+                "illiquid_assets": round_or_none(row["illiquid_assets"]),
+                "debt": round_or_none(row["debt"]),
+                "liquid_buffer_months": round_or_none(row["liquid_buffer_months"]),
+            }
+            for _, row in type_cells.iterrows()
+        ],
+        "required_response": {
+            "household_actions": [
+                {
+                    "type_id": "one supplied type_id",
+                    "total_spending_share": "0 to 1 spending-drop share relative to the relevant pre-shock monthly spending baseline",
+                    "nondurable_spending_share": "0 to 1 nondurable-spending-drop share relative to the relevant pre-shock monthly nondurable baseline",
+                    "durable_spending_share": "0 to 1 durable-spending-drop share relative to the relevant pre-shock monthly durable baseline",
+                    "debt_repayment_share": "0 to 1 debt-repayment reduction or missed-payment adjustment share",
+                    "liquid_saving_share": "0 to 1 liquid-saving reduction or buffer drawdown share",
+                    "confidence": "0 to 1",
+                    "reason": "short reason",
+                }
+            ]
+        },
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
 def behavior_primitive_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
+    if scenario.scenario_type == "income_loss":
+        return behavior_income_loss_primitive_prompt(scenario, type_cells)
     payload = {
         "prompt_version": BEHAVIOR_PRIMITIVE_PROMPT_VERSION,
         "task": "Infer household behavioral primitives for a one-time transfer. Do not output spending, saving, or debt allocation shares.",
@@ -818,6 +970,55 @@ def behavior_primitive_prompt(scenario: BehaviorScenario, type_cells: pd.DataFra
                     "durable_purchase_pull_forward": "0 to 1",
                     "shock_size_normalized": "0 to 1, where 0 is a small routine payment and 1 is life-changing relative to income",
                     "shock_size_log_income_ratio": "-4 to 2, log10(transfer_amount / annual_income); keep prize-size gradation instead of clipping large windfalls",
+                    "confidence": "0 to 1",
+                    "reason": "short reason",
+                }
+            ]
+        },
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def behavior_income_loss_primitive_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
+    payload = {
+        "prompt_version": BEHAVIOR_PRIMITIVE_PROMPT_VERSION,
+        "task": "Infer household behavioral primitives for an income-loss scenario. Do not output spending, saving, or debt allocation shares.",
+        "as_of_rule": "Use only the scenario and type-cell information below. Do not cite realized study estimates.",
+        "scenario": {
+            "scenario_id": scenario.scenario_id,
+            "label": scenario.label,
+            "as_of_date": scenario.as_of_date,
+            "scenario_type": scenario.scenario_type,
+            "income_loss_pct": scenario.income_loss_pct,
+            "ui_month": scenario.ui_month,
+            "horizon_months": scenario.horizon_months,
+            "context": scenario.prompt_context,
+        },
+        "household_type_cells": [
+            {
+                "type_id": row["type_id"],
+                "label": row["label"],
+                "population_weight": round_or_none(row["population_weight"]),
+                "annual_income": round_or_none(row["annual_income"]),
+                "liquid_assets": round_or_none(row["liquid_assets"]),
+                "illiquid_assets": round_or_none(row["illiquid_assets"]),
+                "debt": round_or_none(row["debt"]),
+                "liquid_buffer_months": round_or_none(row["liquid_buffer_months"]),
+            }
+            for _, row in type_cells.iterrows()
+        ],
+        "required_response": {
+            "household_primitives": [
+                {
+                    "type_id": "one supplied type_id",
+                    "perceived_job_loss_risk_pp": "0 to 100 subjective job-loss or continued-unemployment risk in percentage points",
+                    "expected_income_growth_pct": "-20 to 20 expected income growth over the scenario horizon",
+                    "precautionary_saving_motive": "0 to 1",
+                    "liquidity_stress": "0 to 1",
+                    "debt_repayment_urgency": "0 to 1",
+                    "durable_purchase_pull_forward": "0 to 1, usually low for income-loss scenarios",
+                    "shock_size_normalized": "0 to 1 severity of the income-loss shock",
+                    "shock_size_log_income_ratio": "-4 to 2, log10(abs(monthly_income_loss) / annual_income)",
                     "confidence": "0 to 1",
                     "reason": "short reason",
                 }
@@ -940,7 +1141,22 @@ def normalize_behavior_primitive_payload(scenario: BehaviorScenario, type_cells:
 def fixture_behavior_primitives(scenario: BehaviorScenario, type_cell: pd.Series) -> dict[str, float]:
     buffer_months = float(type_cell.get("liquid_buffer_months", 2.0))
     debt_ratio = float(type_cell.get("debt_to_asset", 0.0))
-    transfer_income_ratio = float(scenario.transfer_amount) / max(float(type_cell.get("annual_income", 50000.0)), 1.0)
+    shock_income_ratio = _scenario_shock_income_ratio(scenario, type_cell)
+    if scenario.scenario_type == "income_loss":
+        severity = float(np.clip(float(scenario.income_loss_pct) / 0.35, 0.0, 1.0))
+        exhaustion = 1.0 if scenario.scenario_id == "ui_exhaustion_income_loss_style" else 0.0
+        ongoing = 1.0 if scenario.scenario_id == "ui_receipt_monthly_path_style" else 0.0
+        return {
+            "perceived_job_loss_risk_pp": float(np.clip(45.0 + 18.0 * exhaustion - 12.0 * ongoing - 0.45 * buffer_months, 0.0, 100.0)),
+            "expected_income_growth_pct": float(np.clip(-3.0 - 8.0 * severity - 3.0 * exhaustion + 2.0 * ongoing, -20.0, 20.0)),
+            "precautionary_saving_motive": float(np.clip(0.32 + 0.34 * severity + 0.16 * exhaustion + 0.03 * buffer_months, 0.0, 1.0)),
+            "liquidity_stress": float(np.clip(0.62 + 0.22 * severity + 0.12 * exhaustion - 0.10 * buffer_months + 0.08 * debt_ratio, 0.0, 1.0)),
+            "debt_repayment_urgency": float(np.clip(0.22 + 0.38 * debt_ratio + 0.10 * severity, 0.0, 1.0)),
+            "durable_purchase_pull_forward": float(np.clip(0.04 - 0.03 * severity, 0.0, 1.0)),
+            "shock_size_normalized": float(np.clip(severity, 0.0, 1.0)),
+            "shock_size_log_income_ratio": float(np.clip(np.log10(max(shock_income_ratio, 1e-4)), -4.0, 2.0)),
+            "confidence": 0.60,
+        }
     shutdown = 1.0 if scenario.scenario_id == "eip_2020_style" else 0.0
     recession = 1.0 if scenario.scenario_id in {"stimulus_2008_style", "eip_2020_style"} else 0.0
     return {
@@ -950,8 +1166,8 @@ def fixture_behavior_primitives(scenario: BehaviorScenario, type_cell: pd.Series
         "liquidity_stress": float(np.clip(0.70 - 0.10 * buffer_months + 0.08 * debt_ratio, 0.0, 1.0)),
         "debt_repayment_urgency": float(np.clip(0.12 + 0.45 * debt_ratio, 0.0, 1.0)),
         "durable_purchase_pull_forward": float(np.clip(0.16 + 0.10 * (scenario.horizon_months >= 6) - 0.15 * shutdown, 0.0, 1.0)),
-        "shock_size_normalized": float(np.clip(transfer_income_ratio / 0.50, 0.0, 1.0)),
-        "shock_size_log_income_ratio": float(np.clip(np.log10(max(transfer_income_ratio, 1e-4)), -4.0, 2.0)),
+        "shock_size_normalized": float(np.clip(shock_income_ratio / 0.50, 0.0, 1.0)),
+        "shock_size_log_income_ratio": float(np.clip(np.log10(max(shock_income_ratio, 1e-4)), -4.0, 2.0)),
         "confidence": 0.60,
     }
 
@@ -982,6 +1198,8 @@ def primitive_policy_action(
     *,
     policy_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if scenario.scenario_type == "income_loss":
+        return primitive_income_loss_policy_action(scenario, type_cell, primitive, policy_params=policy_params)
     params = policy_params if policy_params is not None else primitive_policy_parameters()
     job_risk = float(primitive["perceived_job_loss_risk_pp"]) / 100.0
     income_growth = float(primitive["expected_income_growth_pct"]) / 10.0
@@ -1029,6 +1247,54 @@ def primitive_policy_action(
                 f"{params.get('source', 'primitive_policy')}: liquidity stress raises spending; "
                 "precaution and job risk raise saving; debt urgency raises repayment; "
                 "larger windfalls lower immediate MPC through log shock size"
+            ),
+        }
+    )
+
+
+def primitive_income_loss_policy_action(
+    scenario: BehaviorScenario,
+    type_cell: pd.Series,
+    primitive: dict[str, Any],
+    *,
+    policy_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params = policy_params if policy_params is not None else primitive_policy_parameters()
+    job_risk = float(primitive["perceived_job_loss_risk_pp"]) / 100.0
+    income_loss = max(0.0, -float(primitive["expected_income_growth_pct"]) / 20.0)
+    liquidity_stress = float(primitive["liquidity_stress"])
+    precaution = float(primitive["precautionary_saving_motive"])
+    debt_urgency = float(primitive["debt_repayment_urgency"])
+    shock_size = float(primitive["shock_size_normalized"])
+    exhaustion = 1.0 if scenario.scenario_id == "ui_exhaustion_income_loss_style" else 0.0
+    ongoing = 1.0 if scenario.scenario_id == "ui_receipt_monthly_path_style" else 0.0
+
+    total_drop = (
+        0.010
+        + 0.045 * liquidity_stress
+        + 0.035 * precaution
+        + 0.030 * job_risk
+        + 0.080 * income_loss
+        + 0.035 * shock_size
+        + 0.040 * exhaustion
+        - 0.060 * ongoing
+    )
+    debt_adjustment = 0.020 + 0.090 * debt_urgency + 0.030 * shock_size
+    buffer_adjustment = 0.040 + 0.100 * liquidity_stress + 0.050 * precaution
+    total_drop = float(np.clip(total_drop, 0.0, 0.30))
+    nondurable = float(np.clip(0.72 * total_drop, 0.0, total_drop))
+    durable = max(0.0, total_drop - nondurable)
+    return _normalize_action_row(
+        {
+            "total_spending_share": total_drop,
+            "nondurable_spending_share": nondurable,
+            "durable_spending_share": durable,
+            "debt_repayment_share": float(np.clip(debt_adjustment, 0.0, 0.50)),
+            "liquid_saving_share": float(np.clip(buffer_adjustment, 0.0, 0.50)),
+            "confidence": float(primitive["confidence"]),
+            "reason": (
+                f"{params.get('source', 'primitive_income_loss_policy')}: income loss, liquidity stress, "
+                "precaution, and exhaustion raise spending-drop responses; ongoing UI receipt dampens drift"
             ),
         }
     )
@@ -1311,6 +1577,9 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
         scenario_id, source = keys
         low = group[group["liquidity_group"] == "low"]
         high = group[group["liquidity_group"] == "high"]
+        aggregate_total = _weighted_average(group, "total_spending_share")
+        aggregate_nondurable = _weighted_average(group, "nondurable_spending_share")
+        aggregate_durable = _weighted_average(group, "durable_spending_share")
         low_spend = _weighted_average(low, "total_spending_share")
         high_spend = _weighted_average(high, "total_spending_share")
         low_debt = _weighted_average(low, "debt_repayment_share")
@@ -1322,14 +1591,20 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
                 "scenario_id": scenario_id,
                 "source": source,
                 "n_types": int(group.shape[0]),
-                "aggregate_total_spending_share": _weighted_average(group, "total_spending_share"),
-                "aggregate_nondurable_spending_share": _weighted_average(group, "nondurable_spending_share"),
-                "aggregate_durable_spending_share": _weighted_average(group, "durable_spending_share"),
+                "aggregate_total_spending_share": aggregate_total,
+                "aggregate_nondurable_spending_share": aggregate_nondurable,
+                "aggregate_durable_spending_share": aggregate_durable,
+                "aggregate_total_spending_drop_share": aggregate_total,
+                "aggregate_nondurable_spending_drop_share": aggregate_nondurable,
+                "aggregate_durable_spending_drop_share": aggregate_durable,
                 "aggregate_debt_repayment_share": _weighted_average(group, "debt_repayment_share"),
                 "aggregate_liquid_saving_share": _weighted_average(group, "liquid_saving_share"),
                 "low_liquidity_total_spending_share": low_spend,
                 "high_liquidity_total_spending_share": high_spend,
                 "low_high_liquidity_spending_ratio": low_spend / max(high_spend, 1e-9),
+                "low_liquidity_total_spending_drop_share": low_spend,
+                "high_liquidity_total_spending_drop_share": high_spend,
+                "low_high_liquidity_spending_drop_ratio": low_spend / max(high_spend, 1e-9),
                 "low_liquidity_debt_repayment_share": low_debt,
                 "high_liquidity_debt_repayment_share": high_debt,
                 "low_minus_high_debt_repayment_share": low_debt - high_debt,
@@ -1600,16 +1875,26 @@ def behavior_target_catalog(*, include_unscored: bool = True) -> pd.DataFrame:
         frame["type_id"] = ""
     frame["type_id"] = frame["type_id"].fillna("").astype(str)
     if "evaluation_split" not in frame:
-        holdout = frame["target_family"].astype(str).str.startswith("holdout_")
-        frame["evaluation_split"] = np.where(
-            ~frame["scored"],
-            "unscored_gap",
-            np.where(holdout, BEHAVIOR_HOLDOUT_SPLIT, BEHAVIOR_SELECTION_SPLIT),
-        )
-    frame["evaluation_split"] = frame["evaluation_split"].fillna("").replace("", BEHAVIOR_SELECTION_SPLIT)
+        frame["evaluation_split"] = ""
+    frame["evaluation_split"] = frame["evaluation_split"].fillna("").astype(str)
+    inferred_split = _infer_behavior_evaluation_split(frame)
+    frame["evaluation_split"] = np.where(frame["evaluation_split"].str.strip().eq(""), inferred_split, frame["evaluation_split"])
+    frame["evaluation_split"] = np.where(~frame["scored"], "unscored_gap", frame["evaluation_split"])
     if not include_unscored:
         frame = frame[frame["scored"] & (frame["source_status"] == "verified_public")].copy()
     return frame.reset_index(drop=True)
+
+
+def _infer_behavior_evaluation_split(frame: pd.DataFrame) -> np.ndarray:
+    family = frame["target_family"].fillna("").astype(str)
+    inferred = np.full(frame.shape[0], BEHAVIOR_SELECTION_SPLIT, dtype=object)
+    inferred[family.str.startswith("holdout_ui_").to_numpy()] = BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT
+    inferred[family.str.startswith("holdout_lottery").to_numpy()] = BEHAVIOR_HOLDOUT_SPLIT
+    other_holdout = family.str.startswith("holdout_").to_numpy() & (inferred == BEHAVIOR_SELECTION_SPLIT)
+    inferred[other_holdout] = BEHAVIOR_HOLDOUT_SPLIT
+    scored = frame["scored"].astype(bool).to_numpy()
+    inferred[~scored] = "unscored_gap"
+    return inferred
 
 
 def behavior_targets_frame(
@@ -1646,6 +1931,8 @@ def build_behavior_gate_report(
     baseline_comparison: pd.DataFrame | None = None,
     holdout_baseline_comparison: pd.DataFrame | None = None,
     holdout_targets: pd.DataFrame | None = None,
+    ui_holdout_baseline_comparison: pd.DataFrame | None = None,
+    ui_holdout_targets: pd.DataFrame | None = None,
     primitive_sign_audit: pd.DataFrame | None = None,
 ) -> str:
     target_catalog = target_catalog if target_catalog is not None else behavior_target_catalog(include_unscored=True)
@@ -1655,6 +1942,8 @@ def build_behavior_gate_report(
     baseline_comparison = baseline_comparison if baseline_comparison is not None else build_behavior_baseline_comparison(scores, cell_scores)
     holdout_baseline_comparison = holdout_baseline_comparison if holdout_baseline_comparison is not None else pd.DataFrame()
     holdout_targets = holdout_targets if holdout_targets is not None else pd.DataFrame()
+    ui_holdout_baseline_comparison = ui_holdout_baseline_comparison if ui_holdout_baseline_comparison is not None else pd.DataFrame()
+    ui_holdout_targets = ui_holdout_targets if ui_holdout_targets is not None else pd.DataFrame()
     primitive_sign_audit = primitive_sign_audit if primitive_sign_audit is not None else pd.DataFrame()
     gaps = target_catalog[~target_catalog["scored"]].copy() if "scored" in target_catalog else pd.DataFrame()
     lines = [
@@ -1688,6 +1977,12 @@ def build_behavior_gate_report(
         "",
         markdown_table(_baseline_comparison_table(holdout_baseline_comparison)),
         "",
+        "## UI-Exhaustion Holdout Gate",
+        _prespecified_holdout_sentence(manifest.get("ui_exhaustion_raw_llm_holdout_verdict", {})),
+        _prespecified_holdout_sentence(manifest.get("ui_exhaustion_primitive_holdout_verdict", {})),
+        "",
+        markdown_table(_baseline_comparison_table(ui_holdout_baseline_comparison)),
+        "",
         "## Primitive Mechanism Audit",
         f"- Fixed policy version: `{manifest.get('primitive_fixed_policy_version')}`",
         f"- Calibrated policy version: `{manifest.get('primitive_calibrated_policy_version')}`",
@@ -1715,6 +2010,26 @@ def build_behavior_gate_report(
             ]
             if not holdout_targets.empty
             else holdout_targets
+        ),
+        "",
+        "## UI-Exhaustion Holdout Targets",
+        markdown_table(
+            ui_holdout_targets[
+                [
+                    "scenario_id",
+                    "target_name",
+                    "target_family",
+                    "response_variable",
+                    "target_low",
+                    "target_high",
+                    "target_value",
+                    "source_label",
+                    "evaluation_split",
+                    "notes",
+                ]
+            ]
+            if not ui_holdout_targets.empty
+            else ui_holdout_targets
         ),
         "",
         "## Aggregate Scoreboard By Split",
@@ -1814,11 +2129,13 @@ def _behavior_action_row(scenario: BehaviorScenario, type_cell: pd.Series, respo
     return {
         "schema_version": AGENT_ECONOMY_VERSION,
         "scenario_id": scenario.scenario_id,
+        "scenario_type": scenario.scenario_type,
         "source": source,
         "type_id": str(type_cell["type_id"]),
         "population_weight": float(type_cell["population_weight"]),
         "liquidity_group": _liquidity_group(type_cell),
         "transfer_amount": float(scenario.transfer_amount),
+        "income_loss_pct": float(scenario.income_loss_pct),
         "total_spending_share": float(response["total_spending_share"]),
         "nondurable_spending_share": float(response["nondurable_spending_share"]),
         "durable_spending_share": float(response["durable_spending_share"]),
@@ -1829,7 +2146,9 @@ def _behavior_action_row(scenario: BehaviorScenario, type_cell: pd.Series, respo
     }
 
 
-def _liquidity_rule_response(_scenario: BehaviorScenario, type_cell: pd.Series) -> dict[str, Any]:
+def _liquidity_rule_response(scenario: BehaviorScenario, type_cell: pd.Series) -> dict[str, Any]:
+    if scenario.scenario_type == "income_loss":
+        return _liquidity_rule_income_loss_response(scenario, type_cell)
     buffer_months = float(type_cell.get("liquid_buffer_months", 2.0))
     debt_ratio = float(type_cell.get("debt_to_asset", 0.0))
     spend = float(np.clip(0.52 - 0.045 * buffer_months + 0.05 * debt_ratio, 0.08, 0.62))
@@ -1848,7 +2167,47 @@ def _liquidity_rule_response(_scenario: BehaviorScenario, type_cell: pd.Series) 
     }
 
 
-def _flat_rule_response(_scenario: BehaviorScenario, _type_cell: pd.Series) -> dict[str, Any]:
+def _liquidity_rule_income_loss_response(scenario: BehaviorScenario, type_cell: pd.Series) -> dict[str, Any]:
+    buffer_months = float(type_cell.get("liquid_buffer_months", 2.0))
+    debt_ratio = float(type_cell.get("debt_to_asset", 0.0))
+    severity = float(np.clip(float(scenario.income_loss_pct) / 0.35, 0.0, 1.0))
+    exhaustion = 1.0 if scenario.scenario_id == "ui_exhaustion_income_loss_style" else 0.0
+    ongoing = 1.0 if scenario.scenario_id == "ui_receipt_monthly_path_style" else 0.0
+    total_drop = float(
+        np.clip(
+            0.015 + 0.060 * severity + 0.025 * exhaustion - 0.055 * ongoing - 0.010 * buffer_months + 0.015 * debt_ratio,
+            0.0,
+            0.22,
+        )
+    )
+    nondurable = float(np.clip(0.78 * total_drop, 0.0, total_drop))
+    durable = max(0.0, total_drop - nondurable)
+    debt = float(np.clip(0.035 + 0.10 * debt_ratio + 0.04 * severity, 0.0, 0.35))
+    liquid = float(np.clip(0.07 + 0.08 * severity + 0.06 * max(0.0, 2.0 - buffer_months), 0.0, 0.50))
+    return {
+        "total_spending_share": total_drop,
+        "nondurable_spending_share": nondurable,
+        "durable_spending_share": durable,
+        "debt_repayment_share": debt,
+        "liquid_saving_share": liquid,
+        "confidence": 0.65,
+        "reason": "liquidity rule for income-loss spending drops based on cash buffer and debt intensity",
+    }
+
+
+def _flat_rule_response(scenario: BehaviorScenario, _type_cell: pd.Series) -> dict[str, Any]:
+    if scenario.scenario_type == "income_loss":
+        total_drop = 0.08 if scenario.scenario_id != "ui_receipt_monthly_path_style" else 0.005
+        nondurable = 0.75 * total_drop
+        return {
+            "total_spending_share": total_drop,
+            "nondurable_spending_share": nondurable,
+            "durable_spending_share": total_drop - nondurable,
+            "debt_repayment_share": 0.08,
+            "liquid_saving_share": 0.10,
+            "confidence": 0.50,
+            "reason": "flat spending-drop rule for UI income-loss scenarios",
+        }
     return {
         "total_spending_share": 0.30,
         "nondurable_spending_share": 0.24,
@@ -1860,7 +2219,20 @@ def _flat_rule_response(_scenario: BehaviorScenario, _type_cell: pd.Series) -> d
     }
 
 
-def _permanent_income_response(_scenario: BehaviorScenario, _type_cell: pd.Series) -> dict[str, Any]:
+def _permanent_income_response(scenario: BehaviorScenario, _type_cell: pd.Series) -> dict[str, Any]:
+    if scenario.scenario_type == "income_loss":
+        exhaustion = scenario.scenario_id == "ui_exhaustion_income_loss_style"
+        total_drop = 0.025 if exhaustion else (0.040 if scenario.scenario_id == "ui_onset_income_loss_style" else 0.002)
+        nondurable = 0.80 * total_drop
+        return {
+            "total_spending_share": total_drop,
+            "nondurable_spending_share": nondurable,
+            "durable_spending_share": total_drop - nondurable,
+            "debt_repayment_share": 0.04,
+            "liquid_saving_share": 0.12,
+            "confidence": 0.50,
+            "reason": "permanent-income benchmark smooths predictable benefit exhaustion",
+        }
     return {
         "total_spending_share": 0.10,
         "nondurable_spending_share": 0.08,
@@ -1899,6 +2271,14 @@ def _liquidity_group(type_cell: pd.Series) -> str:
     if type_id in {"retiree_liquid_assets", "high_income_illiquid_rich", "business_owner_top_wealth"}:
         return "high"
     return "middle"
+
+
+def _scenario_shock_income_ratio(scenario: BehaviorScenario, type_cell: pd.Series) -> float:
+    annual_income = max(float(type_cell.get("annual_income", 50000.0)), 1.0)
+    if scenario.scenario_type == "income_loss":
+        monthly_income = annual_income / 12.0
+        return abs(float(scenario.income_loss_pct)) * monthly_income / annual_income
+    return float(scenario.transfer_amount) / annual_income
 
 
 def _weighted_average(group: pd.DataFrame, column: str) -> float:
@@ -2005,7 +2385,10 @@ def _behavior_bottom_line(
     holdout_overall = scores[
         (scores["evaluation_split"] == BEHAVIOR_HOLDOUT_SPLIT) & (scores["target_family"] == "ALL")
     ].sort_values("rmse_range")
-    if selection_overall.empty and holdout_overall.empty:
+    ui_holdout_overall = scores[
+        (scores["evaluation_split"] == BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT) & (scores["target_family"] == "ALL")
+    ].sort_values("rmse_range")
+    if selection_overall.empty and holdout_overall.empty and ui_holdout_overall.empty:
         return "Behavior target scoring produced no split-level overall row."
     selection_line = "Selection-split aggregate scoring is unmeasured."
     if not selection_overall.empty:
@@ -2014,13 +2397,8 @@ def _behavior_bottom_line(
             f"Selection-split aggregate best source is `{best['source']}` with range RMSE "
             f"`{float(best['rmse_range']):.4f}` across `{int(best['n'])}` targets."
         )
-    holdout_line = " Holdout aggregate scoring is unmeasured."
-    if not holdout_overall.empty:
-        holdout_best = holdout_overall.iloc[0]
-        holdout_line = (
-            f" Holdout aggregate best source is `{holdout_best['source']}` with range RMSE "
-            f"`{float(holdout_best['rmse_range']):.4f}` across `{int(holdout_best['n'])}` targets."
-        )
+    holdout_line = _split_best_line(holdout_overall, label="Lottery holdout aggregate")
+    ui_holdout_line = _split_best_line(ui_holdout_overall, label="UI-exhaustion holdout aggregate")
     cell_line = ""
     if cell_scores is not None and not cell_scores.empty:
         cell_overall = cell_scores[
@@ -2036,8 +2414,19 @@ def _behavior_bottom_line(
     return (
         f"{selection_line}"
         f"{holdout_line}"
+        f"{ui_holdout_line}"
         f"{cell_line}"
         f" {_baseline_verdict_sentence(baseline_comparison if baseline_comparison is not None else build_behavior_baseline_comparison(scores, cell_scores))}"
+    )
+
+
+def _split_best_line(overall: pd.DataFrame, *, label: str) -> str:
+    if overall.empty:
+        return f" {label} scoring is unmeasured."
+    best = overall.iloc[0]
+    return (
+        f" {label} best source is `{best['source']}` with range RMSE "
+        f"`{float(best['rmse_range']):.4f}` across `{int(best['n'])}` targets."
     )
 
 
@@ -2080,6 +2469,18 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
         evaluation_split=BEHAVIOR_HOLDOUT_SPLIT,
         source_kinds=("primitive",),
     )
+    raw_ui_holdout = behavior_baseline_verdict(
+        comparison,
+        target_scope="aggregate",
+        evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+        source_kinds=("llm",),
+    )
+    primitive_ui_holdout = behavior_baseline_verdict(
+        comparison,
+        target_scope="aggregate",
+        evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+        source_kinds=("primitive",),
+    )
 
     def clause(label: str, verdict: dict[str, Any], *, subject: str) -> str:
         verdict_name = str(verdict.get("verdict", "behavior_baseline_unmeasured"))
@@ -2104,6 +2505,8 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
             clause("Aggregate", aggregate, subject="best LLM/ablation"),
             clause("Holdout aggregate", raw_holdout, subject="raw LLM"),
             clause("Holdout aggregate", primitive_holdout, subject="primitive-driven"),
+            clause("UI holdout aggregate", raw_ui_holdout, subject="raw LLM"),
+            clause("UI holdout aggregate", primitive_ui_holdout, subject="primitive-driven"),
             clause("Cell-level", raw_cell, subject="raw LLM"),
             clause("Cell-level", primitive_cell, subject="primitive-driven"),
             clause("Cell-level", cell, subject="best LLM/ablation"),

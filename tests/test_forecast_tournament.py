@@ -27,6 +27,7 @@ from macro_llm_tournament.behavior_gate import (
     BEHAVIOR_HOLDOUT_SPLIT,
     BEHAVIOR_PRESPECIFIED_SUFFIX,
     BEHAVIOR_SELECTION_SPLIT,
+    BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
     BehaviorLLMClient,
     aggregate_behavior_actions,
     behavior_baseline_verdict,
@@ -986,14 +987,29 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(ablations.groupby(["scenario_id", "source"])["type_id"].nunique().min(), type_cells.shape[0])
         self.assertFalse(scores.empty)
         self.assertIn("evaluation_split", scores.columns)
-        self.assertEqual(set(scores[scores["target_family"] == "ALL"]["evaluation_split"]), {BEHAVIOR_SELECTION_SPLIT, BEHAVIOR_HOLDOUT_SPLIT})
+        self.assertEqual(
+            set(scores[scores["target_family"] == "ALL"]["evaluation_split"]),
+            {BEHAVIOR_SELECTION_SPLIT, BEHAVIOR_HOLDOUT_SPLIT, BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT},
+        )
         self.assertIn("debt_saving", set(scores["target_family"]))
         self.assertIn("directional_debt_saving", set(scores["target_family"]))
         self.assertIn("liquidity_gradient", set(scores["target_family"]))
         self.assertIn("holdout_lottery_mpc", set(scores["target_family"]))
+        self.assertIn("holdout_ui_exhaustion_path", set(scores["target_family"]))
         self.assertFalse(holdout_targets.empty)
         self.assertEqual(set(holdout_targets["evaluation_split"]), {BEHAVIOR_HOLDOUT_SPLIT})
         self.assertEqual(set(holdout_targets["target_scope"]), {"aggregate"})
+        ui_holdout_targets = behavior_targets_frame(
+            target_scope="aggregate",
+            evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+        )
+        self.assertFalse(ui_holdout_targets.empty)
+        self.assertEqual(set(ui_holdout_targets["evaluation_split"]), {BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT})
+        self.assertEqual(set(ui_holdout_targets["scenario_id"]), {
+            "ui_onset_income_loss_style",
+            "ui_receipt_monthly_path_style",
+            "ui_exhaustion_income_loss_style",
+        })
         self.assertFalse(holdout_comparison.empty)
         self.assertEqual(set(holdout_comparison["evaluation_split"]), {BEHAVIOR_HOLDOUT_SPLIT})
         self.assertEqual(prespecified_verdict["candidate_source"], "llm_codex_cli_gpt-5.5__liquidity_prior_50")
@@ -1093,6 +1109,7 @@ class ForecastTournamentTests(unittest.TestCase):
         scored = behavior_targets_frame()
         cell_scored = behavior_targets_frame(target_scope="cell")
         holdout_scored = behavior_targets_frame(evaluation_split=BEHAVIOR_HOLDOUT_SPLIT)
+        ui_holdout_scored = behavior_targets_frame(evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT)
 
         self.assertGreater(catalog.shape[0], scored.shape[0])
         self.assertEqual(set(scored["source_status"]), {"verified_public"})
@@ -1100,8 +1117,12 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(set(scored["target_scope"]), {"aggregate"})
         self.assertEqual(set(cell_scored["target_scope"]), {"cell"})
         self.assertFalse(holdout_scored.empty)
-        self.assertTrue(holdout_scored["target_family"].str.startswith("holdout_").all())
+        self.assertTrue(holdout_scored["target_family"].str.startswith("holdout_lottery").all())
         self.assertEqual(set(holdout_scored["evaluation_split"]), {BEHAVIOR_HOLDOUT_SPLIT})
+        self.assertFalse(ui_holdout_scored.empty)
+        self.assertTrue(ui_holdout_scored["target_family"].str.startswith("holdout_ui").all())
+        self.assertEqual(set(ui_holdout_scored["evaluation_split"]), {BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT})
+        self.assertTrue(set(holdout_scored["target_id"]).isdisjoint(set(ui_holdout_scored["target_id"])))
         self.assertIn("eip_2020_low_gt_high_debt_share", set(scored["target_id"]))
         self.assertIn("eip_2020_high_gt_low_saving_share", set(scored["target_id"]))
         self.assertTrue(cell_scored["type_id"].astype(str).str.len().gt(0).all())

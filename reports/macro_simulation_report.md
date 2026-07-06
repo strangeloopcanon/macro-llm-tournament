@@ -6,11 +6,11 @@ We tested whether frontier LLMs can act as macroeconomic belief engines: forecas
 
 First, the forecast result is real. On a 147-card, date-free vintage macro split with hidden targets, raw GPT-5.5 and GPT-5.4 beat no-change, rolling mean, rolling trend, AR(2), and recursive least-squares baselines in aggregate, and the win survives origin-cluster bootstrapping. Live recall probes show the models are not retrieving remembered outcomes: exact realized-value recall was zero across all 147 cards, and the qualitative recall edge over a majority baseline is near zero.
 
-Second, the behavior result splits by domain, and the split is the finding. On stimulus-style targets the mechanisms were designed around, raw GPT-5.5 loses to a hand-tuned liquidity rule. On a held-out lottery-windfall family the rules never saw, every rule baseline breaks and raw GPT-5.5 wins. LLM behavioral priors generalize out of domain; calibrated rules do not.
+Second, the behavior result now splits by shock type, and that split is the finding. On stimulus-style targets the mechanisms were designed around, raw GPT-5.5 loses to a hand-tuned liquidity rule. On a held-out lottery-windfall family, the rules break and raw GPT-5.5 wins. On a new UI-exhaustion income-loss holdout, raw GPT-5.5 loses to a simple flat rule. The behavioral signal is real but not generic: it transfers to windfall-size reasoning, not yet to predictable income-loss dynamics.
 
 Third, we cannot yet carry that signal into an interpretable simulated economy. A pre-registered blend mechanism failed its holdout test. A primitive-to-action kernel — the model emits beliefs and stresses, deterministic code turns them into spending, saving, and debt repayment — passes every sign audit but destroys the out-of-domain signal, and calibrating it on selection targets overfits. The interpretable layer is the open problem, and we know precisely where it fails.
 
-The claim this evidence supports: **LLMs contain genuine, contamination-audited macro belief signal, and that signal generalizes to behavioral domains where hand-tuned rules break. Turning it into a validated simulated economy still requires a behavior kernel that preserves the signal and a persona layer scored on real microdata.**
+The claim this evidence supports: **LLMs contain genuine, contamination-audited macro belief signal, and raw GPT-5.5 contains useful household-behavior priors in at least one out-of-domain shock family. Turning that into a validated simulated economy still requires a behavior architecture that preserves the signal across shock types and a persona layer scored on real microdata.**
 
 ## The Forecast Result
 
@@ -45,18 +45,24 @@ The forecasts also do not look like a disguised trend extrapolator. GPT-5.5's un
 
 ## The Behavior Result
 
-The behavior gate scores household responses to transfer scenarios against published moments — MPC by liquidity, debt repayment, liquid saving — from the tax-rebate, 2008 stimulus, and 2020 EIP literature, with three rule baselines: a liquidity rule, a flat 30 percent rule, and a permanent-income rule. Targets are split into a selection set (11 aggregate plus 6 cell-level targets used during development) and a pre-registered holdout: 5 lottery-windfall targets from Fagereng-Holm-Natvik that no mechanism was selected against. Scoreboards and verdicts never pool the two splits.
+The behavior gate scores household responses against published moments with three rule baselines: a liquidity rule, a flat rule, and a permanent-income rule. Targets are split explicitly, and scoreboards never pool splits:
+
+- `behavior_selection_v1`: 11 aggregate plus 6 cell-level stimulus/rebate targets used during development.
+- `behavior_holdout_v1`: 5 lottery-windfall targets from Fagereng-Holm-Natvik. This holdout is spent and frozen.
+- `behavior_holdout_ui_v1`: 3 UI-exhaustion path targets from Ganong-Noel: about a 6% nondurable-spending drop at unemployment onset, less than 1% monthly drift during UI receipt, and about a 12% drop at predictable benefit exhaustion. The checking/liquidity gradient remains an unscored gap until a directly scoreable public number is pinned down.
 
 On the selection split, raw GPT-5.5 loses to the liquidity rule: range RMSE `0.0762` versus `0.0560` on aggregate targets, `0.0387` versus `0.0272` on cell-level EIP MPC. In-domain, a rule tuned to the literature is still the better predictor.
 
 On the lottery holdout, the ordering inverts. Raw GPT-5.5 scores `0.0844`. The best rule, the flat 30 percent rule, scores `0.2608`. The liquidity rule — the in-domain champion — scores `1.1231`, predicting spending shares above one and a liquidity gradient of `5.0` against a target of `2.0`. The model tracks what the rules cannot: lottery MPC falls with prize size, and raw GPT-5.5 carries that shock-size gradient (`0.0843` on the shock-size family, best of all sources).
+
+On the UI-exhaustion holdout, the result flips back against the model. Raw GPT-5.5 scores `0.0397`; the best rule, the flat UI spending-drop rule, scores `0.0289`. The residual-over-liquidity ablation scores `0.0353`, and the primitive path scores `0.0311`; both lose. This is a clean negative result for the broad “LLM behavior generalizes out of domain” claim. The lottery win is not enough: income-gain windfalls and predictable income-loss exhaustion are different mechanisms.
 
 Two mechanisms tried to make that signal usable, and both failed informatively:
 
 - **The fixed 50 percent liquidity-prior blend**, pre-specified after it won on selection cell targets, fails the holdout at `0.3857` versus the flat rule's `0.2608`. Demoted to an ablation.
 - **The primitive-to-action kernel** has GPT-5.5 emit bounded primitives only — perceived job-loss risk, expected income growth, precautionary motive, liquidity stress, debt-repayment urgency, durable pull-forward, log shock size, confidence — and the payload fails closed if the model outputs allocation shares. A deterministic kernel maps primitives to actions. It passes all sign audits: liquidity stress raises MPC, job risk raises saving, debt urgency raises repayment, larger windfalls lower MPC. Calibrated on the selection split only and locked, it narrowly beats the liquidity rule there (`0.0539` versus `0.0560`) and then fails the holdout at `0.8510`. Sign-correct, interpretable, and wrong out of domain.
 
-The diagnosis is that the kernel's functional form, not the model, is the bottleneck: the signal exists in raw GPT-5.5's outputs and dies at the primitive interface. The lottery holdout has now been scored against three mechanisms and is frozen; the next kernel gets developed on the selection split and tested once against a new holdout family.
+The diagnosis is sharper now. The raw model has windfall signal that the rules miss, but it does not automatically solve predictable income-loss behavior. The primitive kernel still destroys the lottery signal and only nearly matches the flat rule on UI. The next architecture has to preserve behavior across shock types, not just pass sign audits or fit the selection split.
 
 Underneath the gate, the HANK-lite demand economy passes its full lab surface: transfer MPC gradients, rate-hike contraction, job-risk precaution, belief feedback, and per-period accounting identities, with the GPT-5.5 belief module clearing all 19 validation metrics in the live 12-cell run. The sandbox is playable and accounting-safe; what it awaits is a behavior layer worth putting inside it.
 
@@ -71,8 +77,8 @@ The scope note that governs this section: the targets are synthetic, anchored to
 ## What Comes Next
 
 1. **Real microdata for the persona layer.** This is the gating input for everything unproven. The 500-respondent, two-model design run is specified and costs about 1,000 calls once the data exists.
-2. **A new behavior holdout family** — UI-exhaustion spending drops (Ganong-Noel) are the natural candidate, an income-loss shock unlike anything the current mechanisms were shaped by. The lottery holdout is spent and stays frozen.
-3. **A behavior kernel that preserves the signal.** Either a richer primitive interface, or reframe the interpretable layer as distillation: match raw GPT-5.5 within tolerance rather than beat baselines directly.
+2. **Architecture fidelity, developed only on the selection split.** Compare constrained-raw, constrained-choice, and primitive-kernel behavior paths. The winner should be the most interpretable architecture within a pre-declared tolerance of raw GPT-5.5 on the UI holdout.
+3. **A behavior kernel that preserves signal across shock types.** The lottery and UI results say the hard problem is not “make a plausible rule.” It is preserving the model's useful windfall reasoning while adding a mechanism for predictable income-loss responses.
 4. **Let the post-cutoff forecast gate accrue.** Frozen post-cutoff cards get rescored as public data arrives, converting the forecast claim from recall-audit-defended to genuinely post-cutoff over time.
 
 The forecast audit — baselines, bootstrap intervals, DM-style tests, both recall probes, belief-structure audit, cutoff status — stays fixed in this report as the evidence base.
