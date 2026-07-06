@@ -24,6 +24,8 @@ from macro_llm_tournament.agent_economy import (
 )
 from macro_llm_tournament.behavior_gate import (
     BEHAVIOR_SCENARIOS,
+    BEHAVIOR_HOLDOUT_SPLIT,
+    BEHAVIOR_PRESPECIFIED_SUFFIX,
     BehaviorLLMClient,
     aggregate_behavior_actions,
     behavior_baseline_verdict,
@@ -33,6 +35,7 @@ from macro_llm_tournament.behavior_gate import (
     fixture_behavior_payload,
     join_cell_behavior_target_errors,
     normalize_behavior_payload,
+    prespecified_behavior_holdout_verdict,
     run_behavior_ablations,
     run_behavior_controls,
     run_behavior_gate,
@@ -914,6 +917,14 @@ class ForecastTournamentTests(unittest.TestCase):
         cell_joined = join_cell_behavior_target_errors(all_actions, cell_targets)
         cell_scores = score_cell_behavior_targets(all_actions, cell_targets)
         baseline_comparison = build_behavior_baseline_comparison(scores, cell_scores)
+        holdout_targets = behavior_targets_frame(target_scope="aggregate", evaluation_split=BEHAVIOR_HOLDOUT_SPLIT)
+        holdout_scores = score_behavior_targets(aggregates, holdout_targets)
+        holdout_comparison = build_behavior_baseline_comparison(holdout_scores)
+        prespecified_verdict = prespecified_behavior_holdout_verdict(
+            holdout_comparison,
+            candidate_source=f"llm_codex_cli_gpt-5.5{BEHAVIOR_PRESPECIFIED_SUFFIX}",
+            target_scope="aggregate",
+        )
         aggregate_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="aggregate")
         cell_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="cell")
         raw_aggregate_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="aggregate", source_kinds=("llm",))
@@ -931,6 +942,17 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn("debt_saving", set(scores["target_family"]))
         self.assertIn("directional_debt_saving", set(scores["target_family"]))
         self.assertIn("liquidity_gradient", set(scores["target_family"]))
+        self.assertIn("holdout_lottery_mpc", set(scores["target_family"]))
+        self.assertFalse(holdout_targets.empty)
+        self.assertEqual(set(holdout_targets["evaluation_split"]), {BEHAVIOR_HOLDOUT_SPLIT})
+        self.assertEqual(set(holdout_targets["target_scope"]), {"aggregate"})
+        self.assertFalse(holdout_comparison.empty)
+        self.assertEqual(prespecified_verdict["candidate_source"], "llm_codex_cli_gpt-5.5__liquidity_prior_50")
+        self.assertIn(
+            prespecified_verdict["verdict"],
+            {"holdout_beats_best_baseline", "holdout_ties_best_baseline", "holdout_loses_to_best_baseline"},
+        )
+        self.assertEqual(prespecified_verdict["n"], holdout_targets.shape[0])
         self.assertIn("low_minus_high_debt_repayment_share", aggregates.columns)
         self.assertIn("high_minus_low_liquid_saving_share", aggregates.columns)
         self.assertFalse(cell_targets.empty)
@@ -1011,12 +1033,16 @@ class ForecastTournamentTests(unittest.TestCase):
         catalog = behavior_target_catalog(include_unscored=True)
         scored = behavior_targets_frame()
         cell_scored = behavior_targets_frame(target_scope="cell")
+        holdout_scored = behavior_targets_frame(evaluation_split=BEHAVIOR_HOLDOUT_SPLIT)
 
         self.assertGreater(catalog.shape[0], scored.shape[0])
         self.assertEqual(set(scored["source_status"]), {"verified_public"})
         self.assertTrue(scored["scored"].all())
         self.assertEqual(set(scored["target_scope"]), {"aggregate"})
         self.assertEqual(set(cell_scored["target_scope"]), {"cell"})
+        self.assertFalse(holdout_scored.empty)
+        self.assertTrue(holdout_scored["target_family"].str.startswith("holdout_").all())
+        self.assertEqual(set(holdout_scored["evaluation_split"]), {BEHAVIOR_HOLDOUT_SPLIT})
         self.assertIn("eip_2020_low_gt_high_debt_share", set(scored["target_id"]))
         self.assertIn("eip_2020_high_gt_low_saving_share", set(scored["target_id"]))
         self.assertTrue(cell_scored["type_id"].astype(str).str.len().gt(0).all())

@@ -30,6 +30,9 @@ BEHAVIOR_SHARE_COLUMNS = [
 ]
 BEHAVIOR_BASELINE_SOURCES = ("liquidity_rule", "flat_30pct_rule", "permanent_income_rule")
 BEHAVIOR_BASELINE_TIE_TOLERANCE = 1e-9
+BEHAVIOR_SELECTION_SPLIT = "behavior_selection_v1"
+BEHAVIOR_HOLDOUT_SPLIT = "behavior_holdout_v1"
+BEHAVIOR_PRESPECIFIED_SUFFIX = "__liquidity_prior_50"
 BEHAVIOR_BASELINE_COMPARISON_COLUMNS = [
     "source",
     "source_kind",
@@ -102,6 +105,42 @@ BEHAVIOR_SCENARIOS: tuple[BehaviorScenario, ...] = (
         ),
         "historical_pre_model_cutoff_confounded",
     ),
+    BehaviorScenario(
+        "lottery_windfall_style",
+        "Unexpected medium-sized lottery windfall",
+        "date_free_holdout",
+        5000.0,
+        12,
+        (
+            "A household unexpectedly receives a medium-sized lottery windfall. "
+            "The payment is a transitory gain, not a recurring income change. Durable goods are available."
+        ),
+        "external_lottery_holdout",
+    ),
+    BehaviorScenario(
+        "small_lottery_windfall_style",
+        "Unexpected small lottery windfall",
+        "date_free_holdout",
+        1500.0,
+        12,
+        (
+            "A household unexpectedly receives a small lottery windfall. "
+            "The payment is salient but modest relative to annual income."
+        ),
+        "external_lottery_holdout",
+    ),
+    BehaviorScenario(
+        "large_lottery_windfall_style",
+        "Unexpected large lottery windfall",
+        "date_free_holdout",
+        50000.0,
+        12,
+        (
+            "A household unexpectedly receives a large lottery windfall. "
+            "The payment is much larger than a routine rebate, so gradual saving and durable adjustment are plausible."
+        ),
+        "external_lottery_holdout",
+    ),
 )
 
 
@@ -164,9 +203,22 @@ def main() -> int:
         cell_joined_errors = join_cell_behavior_target_errors(all_actions, cell_targets)
         cell_scores = score_cell_behavior_targets(all_actions, cell_targets)
         baseline_comparison = build_behavior_baseline_comparison(scores, cell_scores)
+        holdout_targets = behavior_targets_frame(target_scope="aggregate", evaluation_split=BEHAVIOR_HOLDOUT_SPLIT)
+        holdout_cell_targets = behavior_targets_frame(target_scope="cell", evaluation_split=BEHAVIOR_HOLDOUT_SPLIT)
+        holdout_scores = score_behavior_targets(aggregates, holdout_targets)
+        holdout_cell_scores = score_cell_behavior_targets(all_actions, holdout_cell_targets)
+        holdout_baseline_comparison = build_behavior_baseline_comparison(holdout_scores, holdout_cell_scores)
+        prespecified_source = f"llm_{args.provider}_{args.model}{BEHAVIOR_PRESPECIFIED_SUFFIX}"
+        holdout_verdict = prespecified_behavior_holdout_verdict(
+            holdout_baseline_comparison,
+            candidate_source=prespecified_source,
+            target_scope="aggregate",
+        )
         scenarios.to_csv(output_dir / "behavior_scenarios.csv", index=False)
         targets.to_csv(output_dir / "behavior_targets.csv", index=False)
         cell_targets.to_csv(output_dir / "behavior_cell_targets.csv", index=False)
+        holdout_targets.to_csv(output_dir / "behavior_holdout_targets.csv", index=False)
+        holdout_cell_targets.to_csv(output_dir / "behavior_holdout_cell_targets.csv", index=False)
         target_catalog.to_csv(output_dir / "behavior_target_catalog.csv", index=False)
         type_cells.to_csv(output_dir / "household_type_cells.csv", index=False)
         ablations.to_csv(output_dir / "household_behavior_ablations.csv", index=False)
@@ -176,6 +228,9 @@ def main() -> int:
         cell_joined_errors.to_csv(output_dir / "behavior_cell_target_joined_errors.csv", index=False)
         cell_scores.to_csv(output_dir / "behavior_cell_target_scores.csv", index=False)
         baseline_comparison.to_csv(output_dir / "behavior_baseline_comparison.csv", index=False)
+        holdout_scores.to_csv(output_dir / "behavior_holdout_target_scores.csv", index=False)
+        holdout_cell_scores.to_csv(output_dir / "behavior_holdout_cell_target_scores.csv", index=False)
+        holdout_baseline_comparison.to_csv(output_dir / "behavior_holdout_baseline_comparison.csv", index=False)
         (output_dir / "behavior_llm_raw_records.json").write_text(json.dumps(llm_client.raw_records, indent=2, sort_keys=True), encoding="utf-8")
         manifest.update(
             {
@@ -195,6 +250,12 @@ def main() -> int:
                 "cell_score_rows": int(cell_scores.shape[0]),
                 "cell_joined_error_rows": int(cell_joined_errors.shape[0]),
                 "baseline_comparison_rows": int(baseline_comparison.shape[0]),
+                "holdout_split": BEHAVIOR_HOLDOUT_SPLIT,
+                "holdout_target_rows": int(holdout_targets.shape[0] + holdout_cell_targets.shape[0]),
+                "holdout_score_rows": int(holdout_scores.shape[0] + holdout_cell_scores.shape[0]),
+                "holdout_baseline_comparison_rows": int(holdout_baseline_comparison.shape[0]),
+                "prespecified_behavior_source": prespecified_source,
+                "prespecified_holdout_verdict": holdout_verdict,
                 "aggregate_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="aggregate"),
                 "cell_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="cell"),
                 "raw_llm_aggregate_baseline_verdict": behavior_baseline_verdict(
@@ -214,6 +275,8 @@ def main() -> int:
                     "behavior_scenarios.csv",
                     "behavior_targets.csv",
                     "behavior_cell_targets.csv",
+                    "behavior_holdout_targets.csv",
+                    "behavior_holdout_cell_targets.csv",
                     "behavior_target_catalog.csv",
                     "household_type_cells.csv",
                     "household_behavior_ablations.csv",
@@ -223,6 +286,9 @@ def main() -> int:
                     "behavior_cell_target_joined_errors.csv",
                     "behavior_cell_target_scores.csv",
                     "behavior_baseline_comparison.csv",
+                    "behavior_holdout_target_scores.csv",
+                    "behavior_holdout_cell_target_scores.csv",
+                    "behavior_holdout_baseline_comparison.csv",
                     "behavior_llm_raw_records.json",
                     "behavior_gate_report.md",
                 ],
@@ -239,6 +305,8 @@ def main() -> int:
             cell_scores=cell_scores,
             cell_joined_errors=cell_joined_errors,
             baseline_comparison=baseline_comparison,
+            holdout_baseline_comparison=holdout_baseline_comparison,
+            holdout_targets=holdout_targets,
         )
         (output_dir / "behavior_gate_report.md").write_text(report, encoding="utf-8")
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -759,6 +827,51 @@ def behavior_baseline_verdict(
     }
 
 
+def prespecified_behavior_holdout_verdict(
+    comparison: pd.DataFrame,
+    *,
+    candidate_source: str,
+    target_scope: str,
+) -> dict[str, Any]:
+    if comparison.empty:
+        return {
+            "verdict": "holdout_unmeasured",
+            "reason": "No holdout baseline comparison rows were produced.",
+            "candidate_source": candidate_source,
+            "target_scope": target_scope,
+        }
+    overall = comparison[
+        (comparison["target_scope"].astype(str) == target_scope)
+        & (comparison["target_family"].astype(str) == "ALL")
+        & (comparison["source"].astype(str) == candidate_source)
+    ].copy()
+    if overall.empty:
+        return {
+            "verdict": "holdout_unmeasured",
+            "reason": f"Candidate source {candidate_source} has no {target_scope} ALL holdout row.",
+            "candidate_source": candidate_source,
+            "target_scope": target_scope,
+        }
+    row = overall.iloc[0]
+    if bool(row["beats_best_baseline"]):
+        verdict = "holdout_beats_best_baseline"
+    elif bool(row["ties_best_baseline"]):
+        verdict = "holdout_ties_best_baseline"
+    else:
+        verdict = "holdout_loses_to_best_baseline"
+    return {
+        "verdict": verdict,
+        "candidate_source": candidate_source,
+        "target_scope": target_scope,
+        "best_baseline_source": str(row["best_baseline_source"]),
+        "rmse_range": float(row["rmse_range"]),
+        "best_baseline_rmse_range": float(row["best_baseline_rmse_range"]),
+        "rmse_range_delta_vs_baseline": float(row["rmse_range_delta_vs_baseline"]),
+        "rmse_range_pct_improvement_vs_baseline": float(row["rmse_range_pct_improvement_vs_baseline"]),
+        "n": int(row["n"]),
+    }
+
+
 def behavior_target_catalog(*, include_unscored: bool = True) -> pd.DataFrame:
     with resources.files(TARGET_CATALOG_PACKAGE).joinpath(TARGET_CATALOG_RESOURCE).open("r", encoding="utf-8") as handle:
         frame = pd.read_csv(handle)
@@ -772,17 +885,32 @@ def behavior_target_catalog(*, include_unscored: bool = True) -> pd.DataFrame:
     if "type_id" not in frame:
         frame["type_id"] = ""
     frame["type_id"] = frame["type_id"].fillna("").astype(str)
+    if "evaluation_split" not in frame:
+        holdout = frame["target_family"].astype(str).str.startswith("holdout_")
+        frame["evaluation_split"] = np.where(
+            ~frame["scored"],
+            "unscored_gap",
+            np.where(holdout, BEHAVIOR_HOLDOUT_SPLIT, BEHAVIOR_SELECTION_SPLIT),
+        )
+    frame["evaluation_split"] = frame["evaluation_split"].fillna("").replace("", BEHAVIOR_SELECTION_SPLIT)
     if not include_unscored:
         frame = frame[frame["scored"] & (frame["source_status"] == "verified_public")].copy()
     return frame.reset_index(drop=True)
 
 
-def behavior_targets_frame(*, include_unscored: bool = False, target_scope: str | None = "aggregate") -> pd.DataFrame:
+def behavior_targets_frame(
+    *,
+    include_unscored: bool = False,
+    target_scope: str | None = "aggregate",
+    evaluation_split: str | None = None,
+) -> pd.DataFrame:
     frame = behavior_target_catalog(include_unscored=include_unscored)
     if not include_unscored:
         frame = frame[frame["scored"] & (frame["source_status"] == "verified_public")].copy()
     if target_scope is not None:
         frame = frame[frame["target_scope"] == target_scope].copy()
+    if evaluation_split is not None:
+        frame = frame[frame["evaluation_split"] == evaluation_split].copy()
     return frame.reset_index(drop=True)
 
 
@@ -802,12 +930,16 @@ def build_behavior_gate_report(
     cell_scores: pd.DataFrame | None = None,
     cell_joined_errors: pd.DataFrame | None = None,
     baseline_comparison: pd.DataFrame | None = None,
+    holdout_baseline_comparison: pd.DataFrame | None = None,
+    holdout_targets: pd.DataFrame | None = None,
 ) -> str:
     target_catalog = target_catalog if target_catalog is not None else behavior_target_catalog(include_unscored=True)
     cell_targets = cell_targets if cell_targets is not None else behavior_targets_frame(target_scope="cell")
     cell_scores = cell_scores if cell_scores is not None else pd.DataFrame()
     cell_joined_errors = cell_joined_errors if cell_joined_errors is not None else pd.DataFrame()
     baseline_comparison = baseline_comparison if baseline_comparison is not None else build_behavior_baseline_comparison(scores, cell_scores)
+    holdout_baseline_comparison = holdout_baseline_comparison if holdout_baseline_comparison is not None else pd.DataFrame()
+    holdout_targets = holdout_targets if holdout_targets is not None else pd.DataFrame()
     gaps = target_catalog[~target_catalog["scored"]].copy() if "scored" in target_catalog else pd.DataFrame()
     lines = [
         "# Household Behavior Target Gate",
@@ -832,6 +964,31 @@ def build_behavior_gate_report(
         "",
         "## Baseline Comparison",
         markdown_table(_baseline_comparison_table(baseline_comparison)),
+        "",
+        "## Prespecified Holdout Gate",
+        _prespecified_holdout_sentence(manifest.get("prespecified_holdout_verdict", {})),
+        "",
+        markdown_table(_baseline_comparison_table(holdout_baseline_comparison)),
+        "",
+        "## Holdout Targets",
+        markdown_table(
+            holdout_targets[
+                [
+                    "scenario_id",
+                    "target_name",
+                    "target_family",
+                    "response_variable",
+                    "target_low",
+                    "target_high",
+                    "target_value",
+                    "source_label",
+                    "evaluation_split",
+                    "notes",
+                ]
+            ]
+            if not holdout_targets.empty
+            else holdout_targets
+        ),
         "",
         "## Aggregate Scoreboard",
         markdown_table(scores.sort_values(["target_family", "rmse_range", "source"])),
@@ -1145,6 +1302,23 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
             clause("Cell-level", raw_cell, subject="raw LLM"),
             clause("Cell-level", cell, subject="best LLM/ablation"),
         ]
+    )
+
+
+def _prespecified_holdout_sentence(verdict: dict[str, Any]) -> str:
+    verdict_name = str(verdict.get("verdict", "holdout_unmeasured"))
+    if verdict_name == "holdout_unmeasured":
+        return f"Holdout verdict is unmeasured: {verdict.get('reason', 'no reason provided')}."
+    verb = {
+        "holdout_beats_best_baseline": "beats",
+        "holdout_ties_best_baseline": "ties",
+        "holdout_loses_to_best_baseline": "loses to",
+    }.get(verdict_name, "compares with")
+    return (
+        f"Pre-specified source `{verdict.get('candidate_source')}` {verb} "
+        f"best rule baseline `{verdict.get('best_baseline_source')}` on `{verdict.get('target_scope')}` "
+        f"holdout targets (delta `{float(verdict.get('rmse_range_delta_vs_baseline', np.nan)):.4f}`, "
+        f"n `{int(verdict.get('n', 0))}`)."
     )
 
 
