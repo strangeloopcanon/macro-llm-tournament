@@ -47,6 +47,7 @@ class DirectRecallClient:
     max_live_calls: int
     live_call_count: int = 0
     cache_hit_count: int = 0
+    execution_cwd: Path | None = None
 
     def with_counts(
         self,
@@ -62,6 +63,7 @@ class DirectRecallClient:
             self.max_live_calls,
             self.live_call_count if live_call_count is None else live_call_count,
             self.cache_hit_count if cache_hit_count is None else cache_hit_count,
+            self.execution_cwd,
         )
 
 
@@ -824,6 +826,7 @@ def provider_json_call(
         client.cache_dir,
         mode=client.mode,
         max_live_calls=client.max_live_calls,
+        execution_cwd=client.execution_cwd,
     )
     llm_client.live_call_count = client.live_call_count
     llm_client.cache_hit_count = client.cache_hit_count

@@ -110,6 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--belief-mode", choices=["fixture", "replay", "live"], default="fixture")
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
+    parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--respondent-source", choices=["fixture", "csv"], default="fixture")
     parser.add_argument("--respondent-csv", default=None)
     parser.add_argument("--respondent-count", type=int, default=54)
@@ -141,7 +142,13 @@ def main() -> int:
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_ROOT / f"persona_belief_panel_{timestamp}"
-    cache_dir = output_dir / "fresh_persona_belief_cache" if args.fresh_cache else WORK_ROOT / "persona_belief_cache"
+    cache_dir = (
+        Path(args.cache_dir)
+        if args.cache_dir
+        else output_dir / "fresh_persona_belief_cache"
+        if args.fresh_cache
+        else WORK_ROOT / "persona_belief_cache"
+    )
     respondent_csv = Path(args.respondent_csv) if args.respondent_csv else None
     respondents = load_persona_respondents(
         source=args.respondent_source,
@@ -179,6 +186,7 @@ def main() -> int:
         "belief_mode": args.belief_mode,
         "max_live_calls": int(args.max_live_calls),
         "fresh_cache": bool(args.fresh_cache),
+        "cache_dir": _safe_relative(cache_dir),
         "respondent_source": args.respondent_source,
         "respondent_input": respondent_input,
         "respondent_count": int(respondents.shape[0]),
@@ -646,6 +654,7 @@ def score_regression_gradient_match(
                         "dimension": dimension,
                         "contrast": spec["label"],
                         "reference_group": high_group,
+                        "scoreable": bool(has_contrast),
                         "survey_coefficient": survey_coefficient,
                         "simulated_coefficient": simulated_coefficient,
                         "sign_match": sign_match,
@@ -676,6 +685,7 @@ def score_gradient_match(
             for dimension, spec in DEMOGRAPHIC_DIMENSIONS.items():
                 survey_gradient = _two_group_gradient(target_group, dimension, spec["low"], spec["high"], f"actual_{target}")
                 simulated_gradient = _two_group_gradient(target_group, dimension, spec["low"], spec["high"], "prediction")
+                scoreable = bool(np.isfinite(survey_gradient) and np.isfinite(simulated_gradient))
                 sign_match = _sign_match(survey_gradient, simulated_gradient)
                 rows.append(
                     {
@@ -683,6 +693,7 @@ def score_gradient_match(
                         "target_name": target,
                         "dimension": dimension,
                         "contrast": spec["label"],
+                        "scoreable": scoreable,
                         "survey_gradient": survey_gradient,
                         "simulated_gradient": simulated_gradient,
                         "sign_match": sign_match,
@@ -839,7 +850,15 @@ def classify_persona_evidence(
     common_core: pd.DataFrame,
     distribution_scores: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    sign_rate = float(regression_scores["sign_match"].mean()) if not regression_scores.empty else np.nan
+    if regression_scores.empty:
+        scoreable_regressions = pd.DataFrame()
+    elif "scoreable" in regression_scores:
+        scoreable_regressions = regression_scores[regression_scores["scoreable"].astype(bool)].copy()
+    else:
+        scoreable_regressions = regression_scores.copy()
+    sign_rate = float(scoreable_regressions["sign_match"].mean()) if not scoreable_regressions.empty else np.nan
+    scoreable_contrast_count = int(scoreable_regressions.shape[0])
+    skipped_contrast_count = int(regression_scores.shape[0] - scoreable_contrast_count) if not regression_scores.empty else 0
     median_within_ratio = float(variance_scores["within_variance_ratio"].median()) if not variance_scores.empty else np.nan
     common_core_max = float(common_core["mean_pairwise_correlation"].max()) if not common_core.empty else np.nan
     distribution_scores = distribution_scores if distribution_scores is not None else pd.DataFrame()
@@ -895,6 +914,8 @@ def classify_persona_evidence(
         "decision_tree_branch": branch,
         "thresholds": EVIDENCE_THRESHOLDS,
         "regression_sign_rate": sign_rate,
+        "scoreable_contrast_count": scoreable_contrast_count,
+        "skipped_contrast_count": skipped_contrast_count,
         "median_within_variance_ratio": median_within_ratio,
         "max_distribution_ks_stat": max_ks_stat,
         "median_distribution_std_ratio": median_std_ratio,

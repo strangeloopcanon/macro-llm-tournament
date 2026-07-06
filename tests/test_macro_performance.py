@@ -33,6 +33,13 @@ from macro_llm_tournament.demand_vintage_oos import (
     vintage_forecast_cache_name,
 )
 from macro_llm_tournament.belief_calibration import BELIEF_CALIBRATION_VERSION
+from macro_llm_tournament.demand_vintage_audit import run_qualitative_recall_adaptive
+from macro_llm_tournament.forecast_audit import (
+    DirectRecallClient,
+    fixture_qualitative_recall_payload,
+    qualitative_recall_cache_name,
+    qualitative_recall_prompt,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -699,6 +706,162 @@ class MacroPerformanceTests(unittest.TestCase):
             self.assertLess(float(output["mean_loss_reduction"]), 0.0)
             self.assertIn("dm_z_stat", family.columns)
             self.assertIn("dm_two_sided_p", family.columns)
+
+    def test_demand_vintage_audit_fixture_writes_recall_and_belief_outputs(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vintage_dir = root / "vintage"
+            audit_dir = root / "audit"
+            vintage = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--max-origins",
+                    "8",
+                    "--output-dir",
+                    str(vintage_dir),
+                ]
+            )
+            self.assertEqual(vintage.returncode, 0, vintage.stderr)
+
+            audit = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_audit",
+                    "--run-dir",
+                    str(vintage_dir),
+                    "--recall-mode",
+                    "fixture",
+                    "--qualitative-recall-mode",
+                    "fixture",
+                    "--models",
+                    "gpt-5.5,gpt-5.4",
+                    "--output-dir",
+                    str(audit_dir),
+                ]
+            )
+
+            self.assertEqual(audit.returncode, 0, audit.stderr)
+            manifest = json.loads((audit_dir / "manifest.json").read_text(encoding="utf-8"))
+            recall = pd.read_csv(audit_dir / "direct_recall_scores.csv")
+            qualitative = pd.read_csv(audit_dir / "qualitative_recall_scores.csv")
+            cutoff = pd.read_csv(audit_dir / "cutoff_status.csv")
+            belief = pd.read_csv(audit_dir / "audit_belief_structure_summary.csv")
+
+            self.assertEqual(manifest["status"], "ok")
+            self.assertGreater(manifest["card_count"], 0)
+            self.assertEqual(manifest["live_call_count"], 0)
+            self.assertIn("adaptive_live_call_ceiling", manifest)
+            self.assertEqual(manifest["qualitative_recall_batch_size"], 49)
+            self.assertEqual(manifest["qualitative_recall_min_batch_size"], 12)
+            self.assertTrue(manifest["cache_root"])
+            self.assertEqual(set(recall["model"]), {"gpt-5.5", "gpt-5.4"})
+            self.assertIn("ALL", set(recall["variable"]))
+            self.assertIn("ALL", set(qualitative["group"]))
+            self.assertIn("gpt-5.4-user-supplied", set(cutoff["cutoff_label"]))
+            self.assertIn("ALL", set(belief["variable"]))
+
+    def test_demand_vintage_audit_replay_splits_qualitative_child_caches(self):
+        with TemporaryDirectory() as temp_dir:
+            cache_root = Path(temp_dir) / "cache"
+            provider = "codex_cli"
+            model = "gpt-5.4"
+            targets = pd.DataFrame(
+                [
+                    {
+                        "card_id": f"card_{idx}",
+                        "variable": "real_consumption_growth_pct",
+                        "variable_name": "Real consumption growth",
+                        "origin": f"period_{idx}",
+                        "horizon": 1,
+                        "target_quarter_label": f"period_{idx + 1}",
+                    }
+                    for idx in range(4)
+                ]
+            )
+            write_client = DirectRecallClient(provider, model, cache_root, mode="replay", max_live_calls=0)
+            provider_dir = cache_root / provider
+            provider_dir.mkdir(parents=True, exist_ok=True)
+            for start in (0, 2):
+                batch = targets.iloc[start : start + 2].copy()
+                prompt = qualitative_recall_prompt(batch)
+                cache_name = qualitative_recall_cache_name(write_client, prompt)
+                path = provider_dir / f"{cache_name}.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "provider": provider,
+                            "model": model,
+                            "payload": fixture_qualitative_recall_payload(batch),
+                            "cache_hit": False,
+                            "cache_path": str(path),
+                            "response_created_utc": "2026-01-01T00:00:00+00:00",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            predictions, raw_records, replay_client = run_qualitative_recall_adaptive(
+                targets,
+                write_client,
+                batch_size=4,
+                min_batch_size=2,
+            )
+
+            self.assertEqual(predictions.shape[0], 4)
+            self.assertEqual(replay_client.cache_hit_count, 2)
+            self.assertTrue(any(record["split_batch"] for record in raw_records))
+
+    def test_demand_vintage_audit_failed_replay_marks_manifest_failed(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            vintage_dir = root / "vintage"
+            audit_dir = root / "audit"
+            vintage = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_oos",
+                    "--mode",
+                    "fixture",
+                    "--max-origins",
+                    "2",
+                    "--output-dir",
+                    str(vintage_dir),
+                ]
+            )
+            self.assertEqual(vintage.returncode, 0, vintage.stderr)
+
+            audit = _run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.demand_vintage_audit",
+                    "--run-dir",
+                    str(vintage_dir),
+                    "--recall-mode",
+                    "off",
+                    "--qualitative-recall-mode",
+                    "replay",
+                    "--qualitative-recall-batch-size",
+                    "4",
+                    "--qualitative-recall-min-batch-size",
+                    "2",
+                    "--models",
+                    "gpt-5.4",
+                    "--output-dir",
+                    str(audit_dir),
+                ]
+            )
+
+            self.assertNotEqual(audit.returncode, 0)
+            manifest = json.loads((audit_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "failed")
+            self.assertIn("Replay mode cache miss", manifest["error"])
 
     def test_belief_calibration_fits_validation_and_scores_evaluation(self):
         with TemporaryDirectory() as temp_dir:
