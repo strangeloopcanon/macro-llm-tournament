@@ -130,8 +130,10 @@ def main() -> int:
         raise SystemExit(f"Unknown target fields: {', '.join(unknown_targets)}")
     if args.belief_mode == "live" and args.max_live_calls <= 0:
         raise SystemExit("--max-live-calls must be positive when --belief-mode live is used")
-    if args.belief_mode == "live" and not args.fresh_cache:
-        raise SystemExit("--fresh-cache is required when --belief-mode live is used")
+    if args.belief_mode == "live" and not args.fresh_cache and not args.cache_dir:
+        raise SystemExit("--fresh-cache or --cache-dir is required when --belief-mode live is used")
+    if args.belief_mode == "live" and args.fresh_cache and args.cache_dir:
+        raise SystemExit("--fresh-cache and --cache-dir cannot be combined; use one fresh run or one explicit resume cache")
     if not models:
         raise SystemExit("--models must contain at least one model")
     if args.respondent_source == "csv":
@@ -186,6 +188,7 @@ def main() -> int:
         "belief_mode": args.belief_mode,
         "max_live_calls": int(args.max_live_calls),
         "fresh_cache": bool(args.fresh_cache),
+        "explicit_cache_dir": bool(args.cache_dir),
         "cache_dir": _safe_relative(cache_dir),
         "respondent_source": args.respondent_source,
         "respondent_input": respondent_input,
@@ -194,7 +197,7 @@ def main() -> int:
         "target_fields": target_fields,
         "required_call_count": required_calls,
         "provider_execution_cwd": _safe_relative(provider_execution_cwd) if provider_execution_cwd else None,
-        "shared_cache_allowed": bool(not args.fresh_cache),
+        "shared_cache_allowed": bool(not args.fresh_cache and not args.cache_dir),
         "status": "running",
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")

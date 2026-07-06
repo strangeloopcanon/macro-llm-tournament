@@ -26,8 +26,10 @@ from macro_llm_tournament.behavior_gate import (
     BEHAVIOR_SCENARIOS,
     BehaviorLLMClient,
     aggregate_behavior_actions,
+    behavior_baseline_verdict,
     behavior_target_catalog,
     behavior_targets_frame,
+    build_behavior_baseline_comparison,
     fixture_behavior_payload,
     join_cell_behavior_target_errors,
     normalize_behavior_payload,
@@ -911,6 +913,9 @@ class ForecastTournamentTests(unittest.TestCase):
         cell_targets = behavior_targets_frame(target_scope="cell")
         cell_joined = join_cell_behavior_target_errors(all_actions, cell_targets)
         cell_scores = score_cell_behavior_targets(all_actions, cell_targets)
+        baseline_comparison = build_behavior_baseline_comparison(scores, cell_scores)
+        aggregate_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="aggregate")
+        cell_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="cell")
 
         self.assertEqual(actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
         self.assertEqual(len(client.raw_records), len(BEHAVIOR_SCENARIOS))
@@ -932,6 +937,22 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertFalse(cell_scores.empty)
         self.assertIn("cell_mpc_by_liquidity", set(cell_scores["target_family"]))
         self.assertEqual(set(cell_joined["target_scope"]), {"cell"})
+        self.assertFalse(baseline_comparison.empty)
+        self.assertIn("best_baseline_source", baseline_comparison.columns)
+        self.assertIn("rmse_range_delta_vs_baseline", baseline_comparison.columns)
+        aggregate_all = baseline_comparison[
+            (baseline_comparison["target_scope"] == "aggregate")
+            & (baseline_comparison["target_family"] == "ALL")
+            & (baseline_comparison["source"] == "llm_codex_cli_gpt-5.5")
+        ].iloc[0]
+        self.assertEqual(aggregate_all["best_baseline_source"], "liquidity_rule")
+        self.assertEqual(aggregate_all["baseline_verdict"], "ties_best_baseline")
+        self.assertEqual(aggregate_verdict["verdict"], "behavior_ties_best_baseline")
+        self.assertEqual(cell_verdict["verdict"], "behavior_ties_best_baseline")
+        no_baseline = build_behavior_baseline_comparison(scores, cell_scores, baseline_sources=("not_a_real_baseline",))
+        self.assertTrue(no_baseline.empty)
+        self.assertIn("best_baseline_source", no_baseline.columns)
+        self.assertEqual(behavior_baseline_verdict(no_baseline, target_scope="aggregate")["verdict"], "behavior_baseline_unmeasured")
 
     def test_household_behavior_target_range_scoring_rewards_inside_interval(self):
         targets = behavior_targets_frame()
@@ -2225,11 +2246,42 @@ class ForecastTournamentTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
+            ambiguous_resume = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_belief_panel",
+                    "--belief-mode",
+                    "live",
+                    "--fresh-cache",
+                    "--cache-dir",
+                    str(Path(temp_dir) / "cache"),
+                    "--max-live-calls",
+                    "1",
+                    "--models",
+                    "gpt-5.5",
+                    "--respondent-source",
+                    "fixture",
+                    "--respondent-count",
+                    "1",
+                    "--target-fields",
+                    "expected_inflation_1y",
+                    "--output-dir",
+                    str(Path(temp_dir) / "belief_ambiguous"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
 
             self.assertNotEqual(belief.returncode, 0)
             self.assertNotEqual(ecology.returncode, 0)
-            self.assertIn("--fresh-cache is required", belief.stderr)
+            self.assertNotEqual(ambiguous_resume.returncode, 0)
+            self.assertIn("--fresh-cache or --cache-dir is required", belief.stderr)
             self.assertIn("--fresh-cache is required", ecology.stderr)
+            self.assertIn("--fresh-cache and --cache-dir cannot be combined", ambiguous_resume.stderr)
 
     def test_persona_ecology_csv_fixture_anonymizes_and_records_input_manifest(self):
         with TemporaryDirectory() as temp_dir:

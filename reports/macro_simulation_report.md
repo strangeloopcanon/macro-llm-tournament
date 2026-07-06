@@ -15,7 +15,7 @@ The agent-behavior claim is still not done. The behavior economy passes accounti
 - Baselines: no-change, rolling mean, rolling trend, AR(2), recursive least squares.
 - Recall audit: exact realized-value recall plus qualitative path recall on the same 147 cards.
 - Belief-structure audit: underreaction, extrapolation, direction, confidence, and error structure.
-- Persona/SCE panel: 36 synthetic-enriched SCE-style respondents, 2 models, 72 live Codex calls, replay-rescored from cache.
+- Persona/SCE panel: 54 synthetic-enriched SCE-style respondents, 2 models, 108 total model responses: 72 cache hits from the prior live panel plus 36 new Codex live calls.
 - Behavior economy: HANK-lite demand economy with deterministic accounting and bounded belief inputs.
 
 The test targets run from `2020-01-01` to `2025-02-01`. Against the user-supplied GPT-5.4 cutoff of `2025-08-31`, `0/147` cards are post-cutoff. Against the Codex GPT-5 cutoff of `2024-09-30`, `14/147` cards are post-cutoff. So this is a hidden-target, date-free vintage test, not a clean post-cutoff test for the frontier models.
@@ -71,13 +71,13 @@ Confidence carries some signal: higher-confidence GPT forecasts have lower absol
 
 ## Persona/SCE Cross-Section
 
-The full live persona panel ran on 36 synthetic-enriched SCE-style respondents, with 72 Codex live calls across GPT-5.5 and GPT-5.4. The panel is anchored to public aggregate survey beliefs and vintage macro context. It is useful for wiring and scoring the ecology; it is not real respondent-level microdata.
+The expanded live persona panel ran on 54 synthetic-enriched SCE-style respondents across GPT-5.5 and GPT-5.4. It reused 72 cached responses from the prior run and added 36 fresh Codex live calls, giving 108 total model responses. The panel is anchored to public aggregate survey beliefs and vintage macro context. It is useful for wiring and scoring the ecology; it is not real respondent-level microdata.
 
-After fixing the scorer so missing income contrasts are skipped rather than counted as failures, the persona panel verdict is `partial_distribution_failure`.
+The expanded panel fixes the old coverage problem. The previous 36-row run had no high-income/high-liquidity group, so six income contrasts were skipped. The current run scores the full synthetic grid: `24/24` demographic contrasts are scoreable, with zero skipped contrasts.
 
-The good part: demographic gradients and spread mostly work. The scoreable sign rate is `16/18 = 88.89%`, the median within-variance ratio is `1.1626`, and the maximum cross-model common-core correlation is `0.8501`, below the `0.95` failure threshold. In this 36-row live run, six income contrasts are skipped because the old synthetic holdout had `low` and `middle` income groups but no `high` income group. The holdout generator has since been fixed to produce the full 54-row fixture grid; the expanded high-income rows require fresh live calls before they can be included in the GPT panel result.
+The good part: demographic gradients and spread now clear cleanly. The scoreable sign rate is `24/24 = 100.00%`, the median within-variance ratio is `1.1025`, and the maximum cross-model common-core correlation is `0.8912`, below the `0.95` failure threshold.
 
-The bad part: distribution shape still fails. The maximum KS statistic is `0.7500`, above the `0.35` threshold. Unemployment expectations are the main problem: the synthetic target mean is `4.6813`, while GPT-5.4 predicts `5.5472` and GPT-5.5 predicts `5.4778`. Inflation is compressed and shifted upward as well. GPT-5.4 is closer on real income growth; GPT-5.5 undershoots it.
+The bad part: distribution shape still fails. The panel verdict remains `partial_distribution_failure`. The maximum KS statistic is `0.7407`, above the `0.35` threshold. Unemployment expectations are the main problem: the synthetic target mean is `4.4262`, while GPT-5.4 predicts `5.3389` and GPT-5.5 predicts `5.2241`. Inflation is also shifted upward: the synthetic target mean is `3.6045`, while GPT-5.4 predicts `3.8889` and GPT-5.5 predicts `4.1630`. GPT-5.4 is closer on real income growth; GPT-5.5 undershoots it.
 
 So the persona layer now has useful structure, but it is not calibrated enough to be the behavioral engine's empirical input layer.
 
@@ -87,7 +87,9 @@ The HANK-lite behavior economy still passes its lab gate. Bounded beliefs feed i
 
 The behavior layer passes mechanism checks: transfer MPC gradients, rate-hike contraction, job-risk precaution, belief feedback, and household budget identities. That means the macro sandbox is playable and accounting-safe.
 
-It does not yet mean the simulated economy predicts real macro behavior better than a strong empirical model. The missing bridge is still behavior validation: MPCs, saving, debt repayment, liquidity shifts, and response dynamics against external targets.
+The behavior gate now also emits a baseline comparison against the existing rule controls: liquidity rule, flat 30 percent rule, and permanent-income rule. In fixture mode, the LLM-shaped behavior ties the liquidity rule on both aggregate targets and cell-level targets. It beats the weaker flat and permanent-income rules, but it does not yet beat the best behavior baseline.
+
+It does not yet mean the simulated economy predicts real macro behavior better than a strong empirical model. The missing bridge is still behavior validation: real or live calibrated behavior runs must beat the best rule baseline on MPCs, saving, debt repayment, liquidity shifts, and response dynamics.
 
 ## Current Claim
 
@@ -103,10 +105,9 @@ The next claim is not ready:
 
 The next work should not add more agent theater. It should make the belief-to-behavior layer harder to fool.
 
-1. Run the expanded 54-row persona panel, or replace it with real respondent-level microdata. The local synthetic holdout generator now includes high-income and high-liquidity groups; the remaining work is live scoring or data replacement.
-2. Add a behavior-side baseline scoreboard that treats the existing liquidity rule, flat rule, permanent-income rule, and LLM ablations the way the forecast gate treats no-change, AR(2), and RLS.
-3. Calibrate the persona belief layer on validation only, targeting obvious level shifts and distribution shape without chasing a synthetic KS threshold. The immediate misses are unemployment level/shape and inflation compression.
-4. Feed the calibrated belief distributions into the behavior economy and score real behavior targets: transfer MPC by liquidity, debt repayment, saving, and liquidity/portfolio shifts.
-5. Keep the current forecast audit fixed in the report: AR(2), RLS, bootstrap intervals, DM-style tests, exact recall, qualitative recall, belief-structure audit, and cutoff status.
+1. Replace the synthetic persona panel with real respondent-level microdata, or treat the current 54-row panel strictly as a wiring fixture. The synthetic coverage issue is fixed; the empirical data issue is not.
+2. Calibrate the persona belief layer on validation only, targeting obvious level shifts and distribution shape without chasing a synthetic KS threshold. The immediate misses are unemployment level/shape and inflation compression.
+3. Feed calibrated belief distributions into the behavior economy and require a win or justified tie against the behavior baseline scoreboard.
+4. Keep the current forecast audit fixed in the report: AR(2), RLS, bootstrap intervals, DM-style tests, exact recall, qualitative recall, belief-structure audit, and cutoff status.
 
 That is the path from "the belief engine contains signal" to "the simulated economy produces useful macro behavior."

@@ -28,6 +28,30 @@ BEHAVIOR_SHARE_COLUMNS = [
     "debt_repayment_share",
     "liquid_saving_share",
 ]
+BEHAVIOR_BASELINE_SOURCES = ("liquidity_rule", "flat_30pct_rule", "permanent_income_rule")
+BEHAVIOR_BASELINE_TIE_TOLERANCE = 1e-9
+BEHAVIOR_BASELINE_COMPARISON_COLUMNS = [
+    "source",
+    "source_kind",
+    "target_scope",
+    "target_family",
+    "n",
+    "effective_weight",
+    "rmse_range",
+    "mae_range",
+    "rmse_point",
+    "mae_point",
+    "best_baseline_source",
+    "best_baseline_rmse_range",
+    "best_baseline_mae_range",
+    "rmse_range_delta_vs_baseline",
+    "mae_range_delta_vs_baseline",
+    "rmse_range_pct_improvement_vs_baseline",
+    "mae_range_pct_improvement_vs_baseline",
+    "beats_best_baseline",
+    "ties_best_baseline",
+    "baseline_verdict",
+]
 
 
 @dataclass(frozen=True)
@@ -129,6 +153,7 @@ def main() -> int:
         scores = score_behavior_targets(aggregates, targets)
         cell_joined_errors = join_cell_behavior_target_errors(all_actions, cell_targets)
         cell_scores = score_cell_behavior_targets(all_actions, cell_targets)
+        baseline_comparison = build_behavior_baseline_comparison(scores, cell_scores)
         scenarios.to_csv(output_dir / "behavior_scenarios.csv", index=False)
         targets.to_csv(output_dir / "behavior_targets.csv", index=False)
         cell_targets.to_csv(output_dir / "behavior_cell_targets.csv", index=False)
@@ -140,6 +165,7 @@ def main() -> int:
         scores.to_csv(output_dir / "behavior_target_scores.csv", index=False)
         cell_joined_errors.to_csv(output_dir / "behavior_cell_target_joined_errors.csv", index=False)
         cell_scores.to_csv(output_dir / "behavior_cell_target_scores.csv", index=False)
+        baseline_comparison.to_csv(output_dir / "behavior_baseline_comparison.csv", index=False)
         (output_dir / "behavior_llm_raw_records.json").write_text(json.dumps(llm_client.raw_records, indent=2, sort_keys=True), encoding="utf-8")
         manifest.update(
             {
@@ -158,6 +184,9 @@ def main() -> int:
                 "score_rows": int(scores.shape[0]),
                 "cell_score_rows": int(cell_scores.shape[0]),
                 "cell_joined_error_rows": int(cell_joined_errors.shape[0]),
+                "baseline_comparison_rows": int(baseline_comparison.shape[0]),
+                "aggregate_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="aggregate"),
+                "cell_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="cell"),
                 "live_call_count": int(llm_client.live_call_count),
                 "cache_hit_count": int(llm_client.cache_hit_count),
                 "cache_dir": str(cache_dir.relative_to(Path.cwd()) if cache_dir.is_relative_to(Path.cwd()) else cache_dir),
@@ -173,6 +202,7 @@ def main() -> int:
                     "behavior_target_scores.csv",
                     "behavior_cell_target_joined_errors.csv",
                     "behavior_cell_target_scores.csv",
+                    "behavior_baseline_comparison.csv",
                     "behavior_llm_raw_records.json",
                     "behavior_gate_report.md",
                 ],
@@ -188,6 +218,7 @@ def main() -> int:
             cell_targets=cell_targets,
             cell_scores=cell_scores,
             cell_joined_errors=cell_joined_errors,
+            baseline_comparison=baseline_comparison,
         )
         (output_dir / "behavior_gate_report.md").write_text(report, encoding="utf-8")
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -602,6 +633,103 @@ def score_cell_behavior_targets(actions: pd.DataFrame, targets: pd.DataFrame) ->
     return pd.DataFrame(rows).sort_values(["target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
+def build_behavior_baseline_comparison(
+    scores: pd.DataFrame,
+    cell_scores: pd.DataFrame | None = None,
+    *,
+    baseline_sources: Iterable[str] = BEHAVIOR_BASELINE_SOURCES,
+) -> pd.DataFrame:
+    frames = [scores]
+    if cell_scores is not None and not cell_scores.empty:
+        frames.append(cell_scores)
+    valid_frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not valid_frames:
+        return pd.DataFrame(columns=BEHAVIOR_BASELINE_COMPARISON_COLUMNS)
+    combined = pd.concat(valid_frames, ignore_index=True)
+    baselines = set(str(source) for source in baseline_sources)
+    rows: list[dict[str, Any]] = []
+    for keys, group in combined.groupby(["target_scope", "target_family"], dropna=False):
+        target_scope, target_family = keys
+        baseline_group = group[group["source"].astype(str).isin(baselines)].sort_values(["rmse_range", "mae_range", "source"])
+        if baseline_group.empty:
+            continue
+        baseline = baseline_group.iloc[0]
+        baseline_rmse = float(baseline["rmse_range"])
+        baseline_mae = float(baseline["mae_range"])
+        for _, row in group.sort_values(["rmse_range", "source"]).iterrows():
+            source = str(row["source"])
+            if source in baselines:
+                continue
+            rmse = float(row["rmse_range"])
+            mae = float(row["mae_range"])
+            rows.append(
+                {
+                    "source": source,
+                    "source_kind": _behavior_source_kind(source),
+                    "target_scope": str(target_scope),
+                    "target_family": str(target_family),
+                    "n": int(row["n"]),
+                    "effective_weight": float(row.get("effective_weight", np.nan)),
+                    "rmse_range": rmse,
+                    "mae_range": mae,
+                    "rmse_point": float(row.get("rmse_point", np.nan)),
+                    "mae_point": float(row.get("mae_point", np.nan)),
+                    "best_baseline_source": str(baseline["source"]),
+                    "best_baseline_rmse_range": baseline_rmse,
+                    "best_baseline_mae_range": baseline_mae,
+                    "rmse_range_delta_vs_baseline": rmse - baseline_rmse,
+                    "mae_range_delta_vs_baseline": mae - baseline_mae,
+                    "rmse_range_pct_improvement_vs_baseline": _pct_improvement(baseline_rmse, rmse),
+                    "mae_range_pct_improvement_vs_baseline": _pct_improvement(baseline_mae, mae),
+                    "beats_best_baseline": bool(rmse < baseline_rmse - BEHAVIOR_BASELINE_TIE_TOLERANCE),
+                    "ties_best_baseline": bool(abs(rmse - baseline_rmse) <= BEHAVIOR_BASELINE_TIE_TOLERANCE),
+                    "baseline_verdict": _baseline_row_verdict(rmse, baseline_rmse),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=BEHAVIOR_BASELINE_COMPARISON_COLUMNS)
+    return pd.DataFrame(rows, columns=BEHAVIOR_BASELINE_COMPARISON_COLUMNS).sort_values(["target_scope", "target_family", "rmse_range", "source"]).reset_index(drop=True)
+
+
+def behavior_baseline_verdict(comparison: pd.DataFrame, *, target_scope: str) -> dict[str, Any]:
+    if comparison.empty:
+        return {
+            "verdict": "behavior_baseline_unmeasured",
+            "reason": "No behavior baseline comparison rows were produced.",
+            "target_scope": target_scope,
+        }
+    overall = comparison[
+        (comparison["target_scope"].astype(str) == target_scope)
+        & (comparison["target_family"].astype(str) == "ALL")
+        & (comparison["source_kind"].isin(["llm", "llm_ablation"]))
+    ].copy()
+    if overall.empty:
+        return {
+            "verdict": "behavior_baseline_unmeasured",
+            "reason": f"No {target_scope} ALL LLM or ablation rows were available.",
+            "target_scope": target_scope,
+        }
+    best = overall.sort_values(["rmse_range", "source"]).iloc[0]
+    if bool(best["beats_best_baseline"]):
+        verdict = "behavior_beats_best_baseline"
+    elif bool(best["ties_best_baseline"]):
+        verdict = "behavior_ties_best_baseline"
+    else:
+        verdict = "behavior_loses_to_best_baseline"
+    return {
+        "verdict": verdict,
+        "target_scope": target_scope,
+        "best_source": str(best["source"]),
+        "best_source_kind": str(best["source_kind"]),
+        "best_baseline_source": str(best["best_baseline_source"]),
+        "rmse_range": float(best["rmse_range"]),
+        "best_baseline_rmse_range": float(best["best_baseline_rmse_range"]),
+        "rmse_range_delta_vs_baseline": float(best["rmse_range_delta_vs_baseline"]),
+        "rmse_range_pct_improvement_vs_baseline": float(best["rmse_range_pct_improvement_vs_baseline"]),
+        "n": int(best["n"]),
+    }
+
+
 def behavior_target_catalog(*, include_unscored: bool = True) -> pd.DataFrame:
     with resources.files(TARGET_CATALOG_PACKAGE).joinpath(TARGET_CATALOG_RESOURCE).open("r", encoding="utf-8") as handle:
         frame = pd.read_csv(handle)
@@ -644,17 +772,19 @@ def build_behavior_gate_report(
     cell_targets: pd.DataFrame | None = None,
     cell_scores: pd.DataFrame | None = None,
     cell_joined_errors: pd.DataFrame | None = None,
+    baseline_comparison: pd.DataFrame | None = None,
 ) -> str:
     target_catalog = target_catalog if target_catalog is not None else behavior_target_catalog(include_unscored=True)
     cell_targets = cell_targets if cell_targets is not None else behavior_targets_frame(target_scope="cell")
     cell_scores = cell_scores if cell_scores is not None else pd.DataFrame()
     cell_joined_errors = cell_joined_errors if cell_joined_errors is not None else pd.DataFrame()
+    baseline_comparison = baseline_comparison if baseline_comparison is not None else build_behavior_baseline_comparison(scores, cell_scores)
     gaps = target_catalog[~target_catalog["scored"]].copy() if "scored" in target_catalog else pd.DataFrame()
     lines = [
         "# Household Behavior Target Gate",
         "",
         "## Bottom Line",
-        _behavior_bottom_line(scores, cell_scores),
+        _behavior_bottom_line(scores, cell_scores, baseline_comparison=baseline_comparison),
         "",
         "## Run Setup",
         f"- Provider/model: `{manifest.get('provider')}` / `{manifest.get('model')}`",
@@ -670,6 +800,9 @@ def build_behavior_gate_report(
         "",
         "## Behavior Ablation Tournament",
         markdown_table(_ablation_summary_table(scores, cell_scores)),
+        "",
+        "## Baseline Comparison",
+        markdown_table(_baseline_comparison_table(baseline_comparison)),
         "",
         "## Aggregate Scoreboard",
         markdown_table(scores.sort_values(["target_family", "rmse_range", "source"])),
@@ -902,7 +1035,36 @@ def _score_group(
     }
 
 
-def _behavior_bottom_line(scores: pd.DataFrame, cell_scores: pd.DataFrame | None = None) -> str:
+def _behavior_source_kind(source: str) -> str:
+    if source in BEHAVIOR_BASELINE_SOURCES:
+        return "baseline"
+    if source.startswith("llm_") and "__" in source:
+        return "llm_ablation"
+    if source.startswith("llm_"):
+        return "llm"
+    return "other"
+
+
+def _pct_improvement(baseline_value: float, candidate_value: float) -> float:
+    if not np.isfinite(baseline_value) or abs(baseline_value) <= BEHAVIOR_BASELINE_TIE_TOLERANCE:
+        return float("nan")
+    return float((baseline_value - candidate_value) / abs(baseline_value))
+
+
+def _baseline_row_verdict(candidate_rmse: float, baseline_rmse: float) -> str:
+    if candidate_rmse < baseline_rmse - BEHAVIOR_BASELINE_TIE_TOLERANCE:
+        return "beats_best_baseline"
+    if abs(candidate_rmse - baseline_rmse) <= BEHAVIOR_BASELINE_TIE_TOLERANCE:
+        return "ties_best_baseline"
+    return "loses_to_best_baseline"
+
+
+def _behavior_bottom_line(
+    scores: pd.DataFrame,
+    cell_scores: pd.DataFrame | None = None,
+    *,
+    baseline_comparison: pd.DataFrame | None = None,
+) -> str:
     if scores.empty:
         return "Behavior target scoring produced no rows."
     overall = scores[scores["target_family"] == "ALL"].sort_values("rmse_range")
@@ -922,7 +1084,30 @@ def _behavior_bottom_line(scores: pd.DataFrame, cell_scores: pd.DataFrame | None
         f"Aggregate best source is `{best['source']}` with range RMSE `{float(best['rmse_range']):.4f}` "
         f"across `{int(best['n'])}` behavior targets."
         f"{cell_line}"
+        f" {_baseline_verdict_sentence(baseline_comparison if baseline_comparison is not None else build_behavior_baseline_comparison(scores, cell_scores))}"
     )
+
+
+def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
+    aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate")
+    cell = behavior_baseline_verdict(comparison, target_scope="cell")
+
+    def clause(label: str, verdict: dict[str, Any]) -> str:
+        verdict_name = str(verdict.get("verdict", "behavior_baseline_unmeasured"))
+        if verdict_name == "behavior_baseline_unmeasured":
+            return f"{label} baseline comparison is unmeasured."
+        verb = {
+            "behavior_beats_best_baseline": "beats",
+            "behavior_ties_best_baseline": "ties",
+            "behavior_loses_to_best_baseline": "loses to",
+        }.get(verdict_name, "compares with")
+        return (
+            f"{label} best LLM/ablation source `{verdict.get('best_source')}` {verb} "
+            f"best rule baseline `{verdict.get('best_baseline_source')}` "
+            f"(delta `{float(verdict.get('rmse_range_delta_vs_baseline', np.nan)):.4f}`)."
+        )
+
+    return f"{clause('Aggregate', aggregate)} {clause('Cell-level', cell)}"
 
 
 def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -958,6 +1143,26 @@ def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | No
     if interesting.empty:
         interesting = aggregate
     return interesting.sort_values(["aggregate_rmse_range", "source"]).reset_index(drop=True)
+
+
+def _baseline_comparison_table(comparison: pd.DataFrame) -> pd.DataFrame:
+    if comparison.empty:
+        return comparison
+    columns = [
+        "target_scope",
+        "target_family",
+        "source",
+        "source_kind",
+        "n",
+        "rmse_range",
+        "best_baseline_source",
+        "best_baseline_rmse_range",
+        "rmse_range_delta_vs_baseline",
+        "rmse_range_pct_improvement_vs_baseline",
+        "baseline_verdict",
+    ]
+    selected = comparison[columns].copy()
+    return selected.sort_values(["target_scope", "target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
 if __name__ == "__main__":
