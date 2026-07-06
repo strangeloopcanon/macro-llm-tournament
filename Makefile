@@ -1,6 +1,6 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 
-.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -57,6 +57,12 @@ behavior-fixture:
 		--behavior-mode fixture \
 		--max-live-calls 0 \
 		--output-dir outputs/behavior_gate_fixture
+
+behavior-architecture-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.behavior_architecture_fidelity \
+		--mode fixture \
+		--max-live-calls 0 \
+		--output-dir outputs/behavior_architecture_fidelity_fixture
 
 persona-holdouts:
 	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_persona_holdouts \

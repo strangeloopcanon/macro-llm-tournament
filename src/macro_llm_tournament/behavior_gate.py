@@ -2350,6 +2350,8 @@ def _behavior_source_kind(source: str) -> str:
         return "primitive_fixed"
     if source.startswith("primitive_"):
         return "primitive"
+    if source.startswith("choice_"):
+        return "choice"
     if source.startswith("llm_") and "__" in source:
         return "llm_ablation"
     if source.startswith("llm_"):

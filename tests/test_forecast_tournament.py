@@ -50,6 +50,9 @@ from macro_llm_tournament.behavior_gate import (
     score_cell_behavior_targets,
     score_behavior_targets,
 )
+from macro_llm_tournament.behavior_architecture_fidelity import (
+    normalize_primitive_v3_payload,
+)
 from macro_llm_tournament.demand_economy import (
     DemandEconomyClient,
     build_fixture_demand_households,
@@ -1103,6 +1106,82 @@ class ForecastTournamentTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("--fresh-cache and --cache-dir cannot be combined", result.stderr)
+
+    def test_behavior_architecture_fidelity_fixture_writes_locked_report(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "architecture"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.behavior_architecture_fidelity",
+                    "--mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--output-dir",
+                    str(root),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            fidelity = pd.read_csv(root / "behavior_architecture_fidelity.csv")
+            scores = pd.read_csv(root / "behavior_architecture_scores.csv")
+            report = (root / "behavior_architecture_report.md").read_text(encoding="utf-8")
+
+            self.assertEqual(manifest["status"], "ok")
+            self.assertEqual(manifest["holdout_split"], BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT)
+            self.assertEqual(manifest["lottery_holdout_status"], "spent_and_not_scored_for_new_architectures")
+            self.assertIn("B_constrained_choice", manifest["locked_architectures"])
+            self.assertIn("C_primitive_v3", manifest["locked_architectures"])
+            self.assertEqual(
+                set(fidelity["architecture"]),
+                {"constrained_raw", "constrained_choice", "primitive_v3"},
+            )
+            self.assertEqual(
+                set(scores["evaluation_split"]),
+                {BEHAVIOR_SELECTION_SPLIT, BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT},
+            )
+            self.assertNotIn(BEHAVIOR_HOLDOUT_SPLIT, set(scores["evaluation_split"]))
+            self.assertTrue(fidelity["within_25pct_of_raw_ui"].isin([True, False]).all())
+            self.assertIn("Behavior Architecture Fidelity", report)
+            self.assertIn("UI holdout", report)
+
+    def test_primitive_v3_payload_rejects_final_allocation_fields(self):
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0].head(1)
+        scenario = BEHAVIOR_SCENARIOS[0]
+        payload = {
+            "payload": {
+                "household_primitives": [
+                    {
+                        "type_id": str(type_cells.iloc[0]["type_id"]),
+                        "perceived_job_loss_risk_pp": 5,
+                        "expected_income_growth_pct": 1,
+                        "precautionary_saving_motive": 0.2,
+                        "liquidity_stress": 0.3,
+                        "debt_repayment_urgency": 0.2,
+                        "durable_purchase_pull_forward": 0.1,
+                        "shock_size_normalized": 0.1,
+                        "shock_size_log_income_ratio": -2,
+                        "income_change_attention": 0.5,
+                        "predictable_drop_attention": 0.1,
+                        "windfall_permanence_belief": 0.2,
+                        "spending_commitment_share": 0.4,
+                        "confidence": 0.6,
+                        "total_spending_share": 0.2,
+                    }
+                ]
+            }
+        }
+
+        with self.assertRaises(LLMUnavailable):
+            normalize_primitive_v3_payload(scenario, type_cells, payload)
 
     def test_behavior_target_catalog_scores_only_verified_public_targets(self):
         catalog = behavior_target_catalog(include_unscored=True)

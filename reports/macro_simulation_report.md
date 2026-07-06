@@ -57,12 +57,18 @@ On the lottery holdout, the ordering inverts. Raw GPT-5.5 scores `0.0844`. The b
 
 On the UI-exhaustion holdout, the result flips back against the model. Raw GPT-5.5 scores `0.0397`; the best rule, the flat UI spending-drop rule, scores `0.0289`. The residual-over-liquidity ablation scores `0.0353`, and the primitive path scores `0.0311`; both lose. This is a clean negative result for the broad “LLM behavior generalizes out of domain” claim. The lottery win is not enough: income-gain windfalls and predictable income-loss exhaustion are different mechanisms.
 
+The architecture-fidelity run then tested three locked behavior architectures on the UI holdout, without rescoring the spent lottery holdout:
+
+- **A. Constrained raw:** raw GPT-5.5 allocation/drop shares, UI RMSE `0.0397`.
+- **B. Constrained choice:** the model chooses a named policy family and bounded parameters, then code executes it. This fails badly: UI RMSE `0.2325`, and selection RMSE explodes because the chosen policy can drive high-liquidity responses near zero, making liquidity-gradient ratios unstable.
+- **C. Primitive v3:** the model emits richer primitives — including income-change attention, predictable-drop attention, windfall permanence, and spending commitments — and deterministic code maps them into behavior. This is the current winner on the architecture-fidelity criterion: UI RMSE `0.0200`, beating both raw GPT-5.5 and the flat rule (`0.0289`) and sitting within the pre-declared 25% fidelity band around raw.
+
 Two mechanisms tried to make that signal usable, and both failed informatively:
 
 - **The fixed 50 percent liquidity-prior blend**, pre-specified after it won on selection cell targets, fails the holdout at `0.3857` versus the flat rule's `0.2608`. Demoted to an ablation.
 - **The primitive-to-action kernel** has GPT-5.5 emit bounded primitives only — perceived job-loss risk, expected income growth, precautionary motive, liquidity stress, debt-repayment urgency, durable pull-forward, log shock size, confidence — and the payload fails closed if the model outputs allocation shares. A deterministic kernel maps primitives to actions. It passes all sign audits: liquidity stress raises MPC, job risk raises saving, debt urgency raises repayment, larger windfalls lower MPC. Calibrated on the selection split only and locked, it narrowly beats the liquidity rule there (`0.0539` versus `0.0560`) and then fails the holdout at `0.8510`. Sign-correct, interpretable, and wrong out of domain.
 
-The diagnosis is sharper now. The raw model has windfall signal that the rules miss, but it does not automatically solve predictable income-loss behavior. The primitive kernel still destroys the lottery signal and only nearly matches the flat rule on UI. The next architecture has to preserve behavior across shock types, not just pass sign audits or fit the selection split.
+The diagnosis is sharper now. The raw model has windfall signal that the rules miss, but it does not automatically solve predictable income-loss behavior. Primitive v3 fixes the income-loss interface on the small UI holdout, but it is not a victory lap: its selection-split RMSE is still weak (`0.3401` versus raw `0.0762` and the liquidity rule `0.0560`). The next test is not another UI tweak. It is whether this architecture can be fed by real persona beliefs and beat an adaptive-expectations twin on a fresh post-cutoff behavior surface.
 
 Underneath the gate, the HANK-lite demand economy passes its full lab surface: transfer MPC gradients, rate-hike contraction, job-risk precaution, belief feedback, and per-period accounting identities, with the GPT-5.5 belief module clearing all 19 validation metrics in the live 12-cell run. The sandbox is playable and accounting-safe; what it awaits is a behavior layer worth putting inside it.
 
@@ -77,8 +83,8 @@ The scope note that governs this section: the targets are synthetic, anchored to
 ## What Comes Next
 
 1. **Real microdata for the persona layer.** This is the gating input for everything unproven. The 500-respondent, two-model design run is specified and costs about 1,000 calls once the data exists.
-2. **Architecture fidelity, developed only on the selection split.** Compare constrained-raw, constrained-choice, and primitive-kernel behavior paths. The winner should be the most interpretable architecture within a pre-declared tolerance of raw GPT-5.5 on the UI holdout.
-3. **A behavior kernel that preserves signal across shock types.** The lottery and UI results say the hard problem is not “make a plausible rule.” It is preserving the model's useful windfall reasoning while adding a mechanism for predictable income-loss responses.
+2. **Prepare real SCE/Michigan microdata ingestion.** The code path needs to accept public SCE-style columns, normalize weights and dates, and smoke-test without live calls so the real file can drop in cleanly.
+3. **End-to-end comparator setup.** Once real microdata exists, feed calibrated persona beliefs through primitive v3 inside the demand economy and compare against the fixed adaptive-expectations twin on the post-cutoff FRED behavior proxy gate.
 4. **Let the post-cutoff forecast gate accrue.** Frozen post-cutoff cards get rescored as public data arrives, converting the forecast claim from recall-audit-defended to genuinely post-cutoff over time.
 
 The forecast audit — baselines, bootstrap intervals, DM-style tests, both recall probes, belief-structure audit, cutoff status — stays fixed in this report as the evidence base.
