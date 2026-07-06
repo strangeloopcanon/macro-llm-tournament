@@ -916,6 +916,7 @@ class ForecastTournamentTests(unittest.TestCase):
         baseline_comparison = build_behavior_baseline_comparison(scores, cell_scores)
         aggregate_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="aggregate")
         cell_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="cell")
+        raw_aggregate_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="aggregate", source_kinds=("llm",))
 
         self.assertEqual(actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
         self.assertEqual(len(client.raw_records), len(BEHAVIOR_SCENARIOS))
@@ -949,6 +950,8 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(aggregate_all["baseline_verdict"], "ties_best_baseline")
         self.assertEqual(aggregate_verdict["verdict"], "behavior_ties_best_baseline")
         self.assertEqual(cell_verdict["verdict"], "behavior_ties_best_baseline")
+        self.assertEqual(raw_aggregate_verdict["best_source_kind"], "llm")
+        self.assertEqual(raw_aggregate_verdict["source_kinds"], ["llm"])
         no_baseline = build_behavior_baseline_comparison(scores, cell_scores, baseline_sources=("not_a_real_baseline",))
         self.assertTrue(no_baseline.empty)
         self.assertIn("best_baseline_source", no_baseline.columns)
@@ -976,6 +979,33 @@ class ForecastTournamentTests(unittest.TestCase):
         bad_all = scores[(scores["source"] == "bad") & (scores["target_family"] == "ALL")].iloc[0]
         self.assertAlmostEqual(float(exact_all["rmse_range"]), 0.0)
         self.assertGreater(float(bad_all["rmse_range"]), 0.0)
+
+    def test_behavior_gate_rejects_ambiguous_fresh_resume_cache(self):
+        with TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.behavior_gate",
+                    "--behavior-mode",
+                    "live",
+                    "--fresh-cache",
+                    "--cache-dir",
+                    str(Path(temp_dir) / "cache"),
+                    "--max-live-calls",
+                    "1",
+                    "--output-dir",
+                    str(Path(temp_dir) / "behavior"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--fresh-cache and --cache-dir cannot be combined", result.stderr)
 
     def test_behavior_target_catalog_scores_only_verified_public_targets(self):
         catalog = behavior_target_catalog(include_unscored=True)

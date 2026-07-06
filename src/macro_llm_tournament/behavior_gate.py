@@ -112,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--behavior-mode", choices=["fixture", "replay", "live"], default="fixture")
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
+    parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--scf-wave", type=int, default=2022)
     parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
@@ -121,10 +122,18 @@ def main() -> int:
     args = parse_args()
     if args.behavior_mode == "live" and args.max_live_calls <= 0:
         raise SystemExit("--max-live-calls must be positive when --behavior-mode live is used")
+    if args.fresh_cache and args.cache_dir:
+        raise SystemExit("--fresh-cache and --cache-dir cannot be combined; use one fresh run or one explicit resume cache")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_ROOT / f"behavior_gate_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir = output_dir / "fresh_behavior_cache" if args.fresh_cache else WORK_ROOT / "behavior_llm_cache"
+    cache_dir = (
+        Path(args.cache_dir)
+        if args.cache_dir
+        else output_dir / "fresh_behavior_cache"
+        if args.fresh_cache
+        else WORK_ROOT / "behavior_llm_cache"
+    )
 
     manifest: dict[str, Any] = {
         "schema_version": BEHAVIOR_GATE_VERSION,
@@ -134,6 +143,7 @@ def main() -> int:
         "behavior_mode": args.behavior_mode,
         "max_live_calls": int(args.max_live_calls),
         "fresh_cache": bool(args.fresh_cache),
+        "explicit_cache_dir": bool(args.cache_dir),
         "scf_wave": int(args.scf_wave),
         "status": "running",
     }
@@ -187,6 +197,16 @@ def main() -> int:
                 "baseline_comparison_rows": int(baseline_comparison.shape[0]),
                 "aggregate_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="aggregate"),
                 "cell_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="cell"),
+                "raw_llm_aggregate_baseline_verdict": behavior_baseline_verdict(
+                    baseline_comparison,
+                    target_scope="aggregate",
+                    source_kinds=("llm",),
+                ),
+                "raw_llm_cell_baseline_verdict": behavior_baseline_verdict(
+                    baseline_comparison,
+                    target_scope="cell",
+                    source_kinds=("llm",),
+                ),
                 "live_call_count": int(llm_client.live_call_count),
                 "cache_hit_count": int(llm_client.cache_hit_count),
                 "cache_dir": str(cache_dir.relative_to(Path.cwd()) if cache_dir.is_relative_to(Path.cwd()) else cache_dir),
@@ -691,23 +711,31 @@ def build_behavior_baseline_comparison(
     return pd.DataFrame(rows, columns=BEHAVIOR_BASELINE_COMPARISON_COLUMNS).sort_values(["target_scope", "target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
-def behavior_baseline_verdict(comparison: pd.DataFrame, *, target_scope: str) -> dict[str, Any]:
+def behavior_baseline_verdict(
+    comparison: pd.DataFrame,
+    *,
+    target_scope: str,
+    source_kinds: Iterable[str] = ("llm", "llm_ablation"),
+) -> dict[str, Any]:
+    source_kind_list = tuple(str(kind) for kind in source_kinds)
     if comparison.empty:
         return {
             "verdict": "behavior_baseline_unmeasured",
             "reason": "No behavior baseline comparison rows were produced.",
             "target_scope": target_scope,
+            "source_kinds": list(source_kind_list),
         }
     overall = comparison[
         (comparison["target_scope"].astype(str) == target_scope)
         & (comparison["target_family"].astype(str) == "ALL")
-        & (comparison["source_kind"].isin(["llm", "llm_ablation"]))
+        & (comparison["source_kind"].isin(source_kind_list))
     ].copy()
     if overall.empty:
         return {
             "verdict": "behavior_baseline_unmeasured",
-            "reason": f"No {target_scope} ALL LLM or ablation rows were available.",
+            "reason": f"No {target_scope} ALL rows were available for source kinds {', '.join(source_kind_list)}.",
             "target_scope": target_scope,
+            "source_kinds": list(source_kind_list),
         }
     best = overall.sort_values(["rmse_range", "source"]).iloc[0]
     if bool(best["beats_best_baseline"]):
@@ -719,6 +747,7 @@ def behavior_baseline_verdict(comparison: pd.DataFrame, *, target_scope: str) ->
     return {
         "verdict": verdict,
         "target_scope": target_scope,
+        "source_kinds": list(source_kind_list),
         "best_source": str(best["source"]),
         "best_source_kind": str(best["source_kind"]),
         "best_baseline_source": str(best["best_baseline_source"]),
@@ -1091,8 +1120,10 @@ def _behavior_bottom_line(
 def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
     aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate")
     cell = behavior_baseline_verdict(comparison, target_scope="cell")
+    raw_aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate", source_kinds=("llm",))
+    raw_cell = behavior_baseline_verdict(comparison, target_scope="cell", source_kinds=("llm",))
 
-    def clause(label: str, verdict: dict[str, Any]) -> str:
+    def clause(label: str, verdict: dict[str, Any], *, subject: str) -> str:
         verdict_name = str(verdict.get("verdict", "behavior_baseline_unmeasured"))
         if verdict_name == "behavior_baseline_unmeasured":
             return f"{label} baseline comparison is unmeasured."
@@ -1102,12 +1133,19 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
             "behavior_loses_to_best_baseline": "loses to",
         }.get(verdict_name, "compares with")
         return (
-            f"{label} best LLM/ablation source `{verdict.get('best_source')}` {verb} "
+            f"{label} {subject} source `{verdict.get('best_source')}` {verb} "
             f"best rule baseline `{verdict.get('best_baseline_source')}` "
             f"(delta `{float(verdict.get('rmse_range_delta_vs_baseline', np.nan)):.4f}`)."
         )
 
-    return f"{clause('Aggregate', aggregate)} {clause('Cell-level', cell)}"
+    return " ".join(
+        [
+            clause("Aggregate", raw_aggregate, subject="raw LLM"),
+            clause("Aggregate", aggregate, subject="best LLM/ablation"),
+            clause("Cell-level", raw_cell, subject="raw LLM"),
+            clause("Cell-level", cell, subject="best LLM/ablation"),
+        ]
+    )
 
 
 def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | None = None) -> pd.DataFrame:
