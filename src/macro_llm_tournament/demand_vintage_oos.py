@@ -333,11 +333,15 @@ def build_vintage_forecasts(cards: pd.DataFrame, targets: pd.DataFrame, *, inclu
         no_change = _no_change_forecast(str(target["transform"]), values[-1])
         rolling_mean = _rolling_mean_forecast(str(target["transform"]), values)
         rolling_trend = _rolling_trend_forecast(str(target["transform"]), values)
+        ar2 = _ar2_forecast(str(target["transform"]), values)
+        recursive_least_squares = _recursive_least_squares_forecast(str(target["transform"]), values)
         llm_fixture = 0.20 * no_change + 0.35 * rolling_mean + 0.45 * rolling_trend
         forecast_specs = [
             ("no_change", no_change, "no_change"),
             ("rolling_mean", rolling_mean, "rolling_mean"),
             ("rolling_trend", rolling_trend, "rolling_trend"),
+            ("ar2", ar2, "ar2"),
+            ("recursive_least_squares", recursive_least_squares, "recursive_least_squares"),
         ]
         if include_llm_fixture:
             forecast_specs.append(("llm_belief_fixture", llm_fixture, "llm_belief"))
@@ -835,6 +839,98 @@ def _rolling_trend_forecast(transform: str, values: list[float]) -> float:
         return float(values[-1])
     diffs = np.diff(values[-4:])
     return float(values[-1] + np.mean(diffs))
+
+
+def _ar2_forecast(transform: str, values: list[float]) -> float:
+    signal = _forecast_signal(transform, values)
+    if len(signal) < 4:
+        return _rolling_trend_forecast(transform, values)
+    pred = _ridge_autoregression_predict(signal, lags=2, ridge=1e-6)
+    return _clip_to_signal_envelope(pred, signal)
+
+
+def _recursive_least_squares_forecast(transform: str, values: list[float]) -> float:
+    signal = _forecast_signal(transform, values)
+    if len(signal) < 5:
+        return _ar2_forecast(transform, values)
+    rows: list[list[float]] = []
+    targets: list[float] = []
+    weights: list[float] = []
+    forgetting_factor = 0.92
+    for idx in range(2, len(signal)):
+        history = signal[:idx]
+        lag1 = float(history[-1])
+        lag2 = float(history[-2])
+        mean4 = float(np.mean(history[-4:]))
+        trend = float(history[-1] - history[-min(4, len(history))])
+        rows.append([1.0, lag1, lag2, mean4, trend])
+        targets.append(float(signal[idx]))
+        weights.append(float(forgetting_factor ** (len(signal) - idx - 1)))
+    if not rows:
+        return _ar2_forecast(transform, values)
+    x = np.asarray(rows, dtype=float)
+    y = np.asarray(targets, dtype=float)
+    w = np.sqrt(np.asarray(weights, dtype=float)).reshape(-1, 1)
+    ridge = np.eye(x.shape[1]) * 1e-3
+    ridge[0, 0] = 0.0
+    try:
+        beta = np.linalg.solve((x * w).T @ (x * w) + ridge, (x * w).T @ (y * w.ravel()))
+    except np.linalg.LinAlgError:
+        beta = np.linalg.pinv((x * w).T @ (x * w) + ridge) @ ((x * w).T @ (y * w.ravel()))
+    latest = np.asarray(
+        [
+            1.0,
+            float(signal[-1]),
+            float(signal[-2]),
+            float(np.mean(signal[-4:])),
+            float(signal[-1] - signal[-min(4, len(signal))]),
+        ],
+        dtype=float,
+    )
+    pred = float(latest @ beta)
+    return _clip_to_signal_envelope(pred, signal)
+
+
+def _forecast_signal(transform: str, values: list[float]) -> np.ndarray:
+    finite_values = np.asarray([float(value) for value in values if np.isfinite(float(value))], dtype=float)
+    if transform == "pct_change":
+        return np.asarray(_pct_changes(finite_values.tolist()), dtype=float)
+    return finite_values
+
+
+def _ridge_autoregression_predict(signal: np.ndarray, *, lags: int, ridge: float) -> float:
+    signal = np.asarray(signal, dtype=float)
+    if len(signal) <= lags:
+        return float(signal[-1]) if len(signal) else np.nan
+    rows: list[list[float]] = []
+    targets: list[float] = []
+    for idx in range(lags, len(signal)):
+        rows.append([1.0, *[float(signal[idx - lag]) for lag in range(1, lags + 1)]])
+        targets.append(float(signal[idx]))
+    x = np.asarray(rows, dtype=float)
+    y = np.asarray(targets, dtype=float)
+    penalty = np.eye(x.shape[1]) * max(0.0, float(ridge))
+    penalty[0, 0] = 0.0
+    try:
+        beta = np.linalg.solve(x.T @ x + penalty, x.T @ y)
+    except np.linalg.LinAlgError:
+        beta = np.linalg.pinv(x.T @ x + penalty) @ (x.T @ y)
+    latest = np.asarray([1.0, *[float(signal[-lag]) for lag in range(1, lags + 1)]], dtype=float)
+    return float(latest @ beta)
+
+
+def _clip_to_signal_envelope(prediction: float, signal: np.ndarray) -> float:
+    signal = np.asarray(signal, dtype=float)
+    signal = signal[np.isfinite(signal)]
+    if not np.isfinite(prediction) or len(signal) == 0:
+        return float(signal[-1]) if len(signal) else 0.0
+    scale = float(np.nanstd(signal))
+    if len(signal) > 1:
+        scale = max(scale, float(np.nanmedian(np.abs(np.diff(signal)))))
+    scale = max(scale, 1e-9)
+    lower = float(np.nanmin(signal) - 4.0 * scale)
+    upper = float(np.nanmax(signal) + 4.0 * scale)
+    return float(np.clip(prediction, lower, upper))
 
 
 def _pct_changes(values: list[float]) -> list[float]:

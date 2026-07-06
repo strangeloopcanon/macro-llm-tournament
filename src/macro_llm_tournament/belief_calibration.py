@@ -26,13 +26,15 @@ from .macro_performance_gate import build_oos_pairwise_comparison
 BELIEF_CALIBRATION_VERSION = "belief_dynamics_calibration_v1"
 DEFAULT_OUTPUT_DIR = OUTPUT_ROOT / "belief_calibration"
 LLM_VARIANT = "llm_belief"
-BASELINE_SOURCES = {"no_change", "rolling_mean", "rolling_trend"}
+BASELINE_SOURCES = {"no_change", "rolling_mean", "rolling_trend", "ar2", "recursive_least_squares"}
 FEATURE_COLUMNS = [
     "forecast_value",
     "confidence",
     "no_change",
     "rolling_mean",
     "rolling_trend",
+    "ar2",
+    "recursive_least_squares",
     "recent_change",
     "mean_change_4",
     "trend_gap",
@@ -168,7 +170,11 @@ def build_calibration_feature_frame(cards: pd.DataFrame, forecasts: pd.DataFrame
     for source in BASELINE_SOURCES:
         if source not in baseline:
             baseline[source] = np.nan
-    features = features.merge(baseline[["card_id", "no_change", "rolling_mean", "rolling_trend"]], on="card_id", how="left")
+    features = features.merge(
+        baseline[["card_id", "no_change", "rolling_mean", "rolling_trend", "ar2", "recursive_least_squares"]],
+        on="card_id",
+        how="left",
+    )
     features["trend_gap"] = pd.to_numeric(features["rolling_trend"], errors="coerce") - pd.to_numeric(
         features["rolling_mean"], errors="coerce"
     )
@@ -273,8 +279,16 @@ def apply_calibration_models(features: pd.DataFrame, model: pd.DataFrame) -> tup
         original = float(row["forecast_value"])
         blend = float(spec.get("selected_blend", 0.0) or 0.0)
         scale = float(row.get("default_scale", 1.0) or 1.0)
-        lower = min(original, float(row.get("no_change", original)), float(row.get("rolling_mean", original)), float(row.get("rolling_trend", original))) - 8.0 * scale
-        upper = max(original, float(row.get("no_change", original)), float(row.get("rolling_mean", original)), float(row.get("rolling_trend", original))) + 8.0 * scale
+        baseline_bounds = [
+            original,
+            float(row.get("no_change", original)),
+            float(row.get("rolling_mean", original)),
+            float(row.get("rolling_trend", original)),
+            float(row.get("ar2", original)),
+            float(row.get("recursive_least_squares", original)),
+        ]
+        lower = min(baseline_bounds) - 8.0 * scale
+        upper = max(baseline_bounds) + 8.0 * scale
         calibrated = float(np.clip((1.0 - blend) * original + blend * prediction, lower, upper))
         calibrated_source = f"{row['source']}_calibrated"
         confidence = _calibrated_confidence(float(row.get("confidence", 0.5)), spec, row)

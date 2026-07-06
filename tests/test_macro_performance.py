@@ -14,6 +14,7 @@ from macro_llm_tournament.macro_performance_gate import (
     _bottom_line,
     _vintage_oos_provenance,
     _vintage_oos_empirical_eligible,
+    build_oos_family_pairwise_comparison,
     build_oos_pairwise_comparison,
     build_performance_attribution,
     build_performance_vintage_readiness,
@@ -85,6 +86,7 @@ class MacroPerformanceTests(unittest.TestCase):
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
             cards = pd.read_csv(root / "demand_vintage_oos_cards.csv")
             targets = pd.read_csv(root / "demand_vintage_oos_targets.csv")
+            forecasts = pd.read_csv(root / "demand_vintage_oos_forecasts.csv")
             scores = pd.read_csv(root / "demand_vintage_oos_scores.csv")
             leakage = pd.read_csv(root / "demand_vintage_oos_leakage_audit.csv")
 
@@ -92,6 +94,11 @@ class MacroPerformanceTests(unittest.TestCase):
             self.assertTrue(manifest["passed"])
             self.assertFalse(cards.empty)
             self.assertFalse(targets.empty)
+            self.assertTrue(
+                {"no_change", "rolling_mean", "rolling_trend", "ar2", "recursive_least_squares"}.issubset(
+                    set(forecasts["source"])
+                )
+            )
             self.assertFalse(scores.empty)
             self.assertTrue(leakage.empty)
 
@@ -617,6 +624,8 @@ class MacroPerformanceTests(unittest.TestCase):
                     for source, variant, loss in [
                         ("llm_live", "llm_belief", 1.0),
                         ("rolling_trend", "rolling_trend", 3.0),
+                        ("ar2", "ar2", 2.5),
+                        ("recursive_least_squares", "recursive_least_squares", 2.0),
                         ("rolling_mean", "rolling_mean", 4.0),
                         ("no_change", "no_change", 5.0),
                     ]:
@@ -634,11 +643,62 @@ class MacroPerformanceTests(unittest.TestCase):
             pairwise = build_oos_pairwise_comparison(root, bootstrap_samples=200, seed=7)
 
             self.assertEqual(pairwise.loc[0, "llm_source"], "llm_live")
-            self.assertEqual(pairwise.loc[0, "best_baseline_source"], "rolling_trend")
+            self.assertEqual(pairwise.loc[0, "best_baseline_source"], "recursive_least_squares")
             self.assertEqual(int(pairwise.loc[0, "n_clusters"]), 2)
-            self.assertEqual(pairwise.loc[0, "mean_loss_reduction"], 2.0)
-            self.assertAlmostEqual(float(pairwise.loc[0, "improvement_pct"]), 66.6666666667)
+            self.assertEqual(pairwise.loc[0, "mean_loss_reduction"], 1.0)
+            self.assertAlmostEqual(float(pairwise.loc[0, "improvement_pct"]), 50.0)
             self.assertEqual(pairwise.loc[0, "bootstrap_share_positive"], 1.0)
+
+    def test_oos_family_pairwise_comparison_reports_family_bootstrap_and_dm(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rows = []
+            for origin_id in ["origin_a", "origin_b", "origin_c", "origin_d"]:
+                for target_name, llm_loss, baseline_loss in [
+                    ("inflation_growth_pct", 1.0, 2.0),
+                    ("output_growth_pct", 3.0, 1.0),
+                ]:
+                    card_id = f"{origin_id}_{target_name}"
+                    rows.extend(
+                        [
+                            {
+                                "source": "llm_live",
+                                "variant": "llm_belief",
+                                "origin_id": origin_id,
+                                "card_id": card_id,
+                                "target_name": target_name,
+                                "normalized_abs_error": llm_loss,
+                            },
+                            {
+                                "source": "recursive_least_squares",
+                                "variant": "recursive_least_squares",
+                                "origin_id": origin_id,
+                                "card_id": card_id,
+                                "target_name": target_name,
+                                "normalized_abs_error": baseline_loss,
+                            },
+                            {
+                                "source": "no_change",
+                                "variant": "no_change",
+                                "origin_id": origin_id,
+                                "card_id": card_id,
+                                "target_name": target_name,
+                                "normalized_abs_error": baseline_loss + 1.0,
+                            },
+                        ]
+                    )
+            pd.DataFrame(rows).to_csv(root / "demand_vintage_oos_joined_errors.csv", index=False)
+
+            family = build_oos_family_pairwise_comparison(root, bootstrap_samples=200, seed=7)
+
+            self.assertEqual(set(family["target_family"]), {"inflation_growth_pct", "output_growth_pct"})
+            inflation = family[family["target_family"] == "inflation_growth_pct"].iloc[0]
+            output = family[family["target_family"] == "output_growth_pct"].iloc[0]
+            self.assertEqual(inflation["best_baseline_source"], "recursive_least_squares")
+            self.assertGreater(float(inflation["mean_loss_reduction"]), 0.0)
+            self.assertLess(float(output["mean_loss_reduction"]), 0.0)
+            self.assertIn("dm_z_stat", family.columns)
+            self.assertIn("dm_two_sided_p", family.columns)
 
     def test_belief_calibration_fits_validation_and_scores_evaluation(self):
         with TemporaryDirectory() as temp_dir:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,7 @@ DEFAULT_VINTAGE_OOS_DIR = OUTPUT_ROOT / "demand_vintage_oos_fixture"
 DEFAULT_TARGET_CATALOG = Path(__file__).resolve().parent / "data" / "macro_performance_targets.csv"
 ALLOWED_SOURCE_STATUSES = {"verified_public", "internal_mechanism", "empirical_shape", "vintage_oos"}
 DETERMINISTIC_BASELINE_VARIANTS = {"representative", "adaptive"}
-VINTAGE_OOS_BASELINE_VARIANTS = {"no_change", "rolling_mean", "rolling_trend"}
+VINTAGE_OOS_BASELINE_VARIANTS = {"no_change", "rolling_mean", "rolling_trend", "ar2", "recursive_least_squares"}
 LLM_VARIANT = "llm_belief"
 PERFORMANCE_MODES = ("fixture", "replay", "live")
 
@@ -135,6 +136,7 @@ def build_macro_performance_gate(
     variant_summary = summarize_variant_performance(scores)
     attribution = build_performance_attribution(variant_summary, scores=scores)
     oos_pairwise = build_oos_pairwise_comparison(vintage_oos_dir)
+    oos_family_pairwise = build_oos_family_pairwise_comparison(vintage_oos_dir)
     vintage_readiness = build_performance_vintage_readiness(vintage_panel_dir, vintage_oos_dir)
     manifest = build_macro_performance_manifest(
         artifacts_manifest=artifacts.manifest,
@@ -148,9 +150,18 @@ def build_macro_performance_gate(
         variant_summary=variant_summary,
         attribution=attribution,
         oos_pairwise=oos_pairwise,
+        oos_family_pairwise=oos_family_pairwise,
         vintage_readiness=vintage_readiness,
     )
-    report = build_macro_performance_report(manifest, variant_summary, attribution, oos_pairwise, scores, vintage_readiness)
+    report = build_macro_performance_report(
+        manifest,
+        variant_summary,
+        attribution,
+        oos_pairwise,
+        oos_family_pairwise,
+        scores,
+        vintage_readiness,
+    )
     return {
         "manifest": manifest,
         "target_catalog": catalog,
@@ -158,6 +169,7 @@ def build_macro_performance_gate(
         "variant_summary": variant_summary,
         "attribution": attribution,
         "oos_pairwise": oos_pairwise,
+        "oos_family_pairwise": oos_family_pairwise,
         "vintage_readiness": vintage_readiness,
         "report": report,
     }
@@ -414,6 +426,104 @@ def build_oos_pairwise_comparison(vintage_oos_dir: Path, *, bootstrap_samples: i
     return pd.DataFrame(rows).sort_values(["mean_loss_reduction", "llm_source"], ascending=[False, True]).reset_index(drop=True)
 
 
+def build_oos_family_pairwise_comparison(
+    vintage_oos_dir: Path,
+    *,
+    bootstrap_samples: int = 10000,
+    seed: int = 20260630,
+) -> pd.DataFrame:
+    joined_path = vintage_oos_dir / "demand_vintage_oos_joined_errors.csv"
+    if not joined_path.exists():
+        return pd.DataFrame()
+    joined = pd.read_csv(joined_path)
+    required = {"source", "variant", "origin_id", "card_id", "target_name", "normalized_abs_error"}
+    if joined.empty or not required.issubset(set(joined.columns)):
+        return pd.DataFrame()
+    joined = joined.copy()
+    joined["normalized_abs_error"] = pd.to_numeric(joined["normalized_abs_error"], errors="coerce")
+    joined = joined.dropna(subset=["normalized_abs_error", "origin_id", "card_id", "target_name"])
+    llm_sources = sorted(joined.loc[joined["variant"].astype(str) == LLM_VARIANT, "source"].astype(str).unique().tolist())
+    baselines = joined[joined["variant"].astype(str).isin(VINTAGE_OOS_BASELINE_VARIANTS)].copy()
+    if not llm_sources or baselines.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for target_name, family_frame in joined.groupby("target_name", sort=True):
+        family_baselines = baselines[baselines["target_name"].astype(str) == str(target_name)]
+        if family_baselines.empty:
+            continue
+        baseline_losses = (
+            family_baselines.groupby(["source", "variant"], as_index=False)["normalized_abs_error"]
+            .mean()
+            .sort_values(["normalized_abs_error", "source"])
+        )
+        if baseline_losses.empty:
+            continue
+        best_baseline_source = str(baseline_losses.iloc[0]["source"])
+        best_baseline_variant = str(baseline_losses.iloc[0]["variant"])
+        best_baseline = family_baselines[family_baselines["source"].astype(str) == best_baseline_source][
+            ["card_id", "origin_id", "normalized_abs_error"]
+        ].rename(columns={"normalized_abs_error": "baseline_loss"})
+        for llm_source in llm_sources:
+            llm = family_frame[family_frame["source"].astype(str) == llm_source][
+                ["card_id", "origin_id", "normalized_abs_error"]
+            ].rename(columns={"normalized_abs_error": "llm_loss"})
+            paired = llm.merge(best_baseline, on=["card_id", "origin_id"], how="inner")
+            if paired.empty:
+                continue
+            origin_diffs = (
+                paired.assign(loss_reduction=paired["baseline_loss"] - paired["llm_loss"])
+                .groupby("origin_id", as_index=False)
+                .agg(
+                    llm_loss=("llm_loss", "mean"),
+                    baseline_loss=("baseline_loss", "mean"),
+                    loss_reduction=("loss_reduction", "mean"),
+                )
+            )
+            diffs = pd.to_numeric(origin_diffs["loss_reduction"], errors="coerce").dropna().to_numpy(dtype=float)
+            if len(diffs) == 0:
+                continue
+            boot = _bootstrap_mean(diffs, samples=bootstrap_samples, seed=seed)
+            dm_stat, dm_p = _dm_z_test(diffs)
+            mean_llm_loss = float(origin_diffs["llm_loss"].mean())
+            mean_baseline_loss = float(origin_diffs["baseline_loss"].mean())
+            mean_reduction = float(np.mean(diffs))
+            rows.append(
+                {
+                    "target_family": str(target_name),
+                    "llm_source": llm_source,
+                    "best_baseline_source": best_baseline_source,
+                    "best_baseline_variant": best_baseline_variant,
+                    "n_clusters": int(len(diffs)),
+                    "mean_llm_loss": mean_llm_loss,
+                    "mean_baseline_loss": mean_baseline_loss,
+                    "mean_loss_reduction": mean_reduction,
+                    "improvement_pct": 100.0 * mean_reduction / mean_baseline_loss if mean_baseline_loss > 0 else np.nan,
+                    "bootstrap_mean_ci_low": float(np.quantile(boot, 0.025)) if len(boot) else np.nan,
+                    "bootstrap_mean_ci_high": float(np.quantile(boot, 0.975)) if len(boot) else np.nan,
+                    "bootstrap_share_positive": float(np.mean(boot > 0.0)) if len(boot) else np.nan,
+                    "dm_z_stat": dm_stat,
+                    "dm_two_sided_p": dm_p,
+                }
+            )
+    return pd.DataFrame(rows).sort_values(["target_family", "mean_loss_reduction", "llm_source"], ascending=[True, False, True]).reset_index(drop=True)
+
+
+def _dm_z_test(values: np.ndarray) -> tuple[float, float]:
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 2:
+        return np.nan, np.nan
+    std = float(np.std(values, ddof=1))
+    if not np.isfinite(std) or std <= 0:
+        mean = float(np.mean(values))
+        if abs(mean) <= 1e-12:
+            return 0.0, 1.0
+        return (math.copysign(float("inf"), mean), 0.0)
+    z = float(np.mean(values) / (std / math.sqrt(values.size)))
+    p = float(math.erfc(abs(z) / math.sqrt(2.0)))
+    return z, p
+
+
 def _bootstrap_mean(values: np.ndarray, *, samples: int, seed: int) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     if values.size == 0:
@@ -436,6 +546,7 @@ def build_macro_performance_manifest(
     variant_summary: pd.DataFrame,
     attribution: pd.DataFrame,
     oos_pairwise: pd.DataFrame,
+    oos_family_pairwise: pd.DataFrame,
     vintage_readiness: pd.DataFrame,
 ) -> dict[str, Any]:
     oos_available = _oos_scores_available(vintage_oos_dir)
@@ -473,6 +584,7 @@ def build_macro_performance_manifest(
         "target_rows": int(scores.shape[0]),
         "variant_summary_rows": int(variant_summary.shape[0]),
         "oos_pairwise_rows": int(oos_pairwise.shape[0]),
+        "oos_family_pairwise_rows": int(oos_family_pairwise.shape[0]),
         "oos_pairwise_best_bootstrap_share_positive": _best_oos_pairwise_share_positive(oos_pairwise),
         "vintage_readiness_status": _scorecard_status(vintage_readiness),
         "outputs": [
@@ -481,6 +593,7 @@ def build_macro_performance_manifest(
             "macro_performance_variant_summary.csv",
             "macro_performance_attribution.csv",
             "macro_performance_oos_pairwise.csv",
+            "macro_performance_oos_family_pairwise.csv",
             "macro_performance_vintage_readiness.csv",
             "macro_performance_report.md",
             "manifest.json",
@@ -533,6 +646,7 @@ def build_macro_performance_report(
     variant_summary: pd.DataFrame,
     attribution: pd.DataFrame,
     oos_pairwise: pd.DataFrame,
+    oos_family_pairwise: pd.DataFrame,
     scores: pd.DataFrame,
     vintage_readiness: pd.DataFrame,
 ) -> str:
@@ -551,6 +665,9 @@ def build_macro_performance_report(
         "",
         "## OOS Paired Comparison",
         markdown_table(oos_pairwise),
+        "",
+        "## OOS Family Paired Comparison",
+        markdown_table(oos_family_pairwise),
         "",
         "## Blocking Target Misses",
         markdown_table(failed.head(40) if not failed.empty else failed),
@@ -577,6 +694,7 @@ def write_macro_performance_outputs(result: dict[str, Any], output_dir: Path) ->
     result.get("variant_summary", pd.DataFrame()).to_csv(output_dir / "macro_performance_variant_summary.csv", index=False)
     result.get("attribution", pd.DataFrame()).to_csv(output_dir / "macro_performance_attribution.csv", index=False)
     result.get("oos_pairwise", pd.DataFrame()).to_csv(output_dir / "macro_performance_oos_pairwise.csv", index=False)
+    result.get("oos_family_pairwise", pd.DataFrame()).to_csv(output_dir / "macro_performance_oos_family_pairwise.csv", index=False)
     result.get("vintage_readiness", pd.DataFrame()).to_csv(output_dir / "macro_performance_vintage_readiness.csv", index=False)
     (output_dir / "macro_performance_report.md").write_text(result.get("report", ""), encoding="utf-8")
     (output_dir / "manifest.json").write_text(json.dumps(_jsonable(result["manifest"]), indent=2, sort_keys=True), encoding="utf-8")
@@ -879,7 +997,15 @@ def _live_blocked_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "attribution": pd.DataFrame(),
         "vintage_readiness": pd.DataFrame(),
         "oos_pairwise": pd.DataFrame(),
-        "report": build_macro_performance_report(manifest, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
+        "report": build_macro_performance_report(
+            manifest,
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        ),
     }
 
 
@@ -937,7 +1063,17 @@ def _variant_from_source(source: str) -> str:
     text = str(source)
     if text.startswith("llm_belief"):
         return LLM_VARIANT
-    for variant in ["representative", "adaptive", "naive_persona", "no_change", "rolling_mean", "rolling_trend", "llm_belief_fixture"]:
+    for variant in [
+        "representative",
+        "adaptive",
+        "naive_persona",
+        "no_change",
+        "rolling_mean",
+        "rolling_trend",
+        "ar2",
+        "recursive_least_squares",
+        "llm_belief_fixture",
+    ]:
         if text.startswith(variant):
             return variant
     return text
