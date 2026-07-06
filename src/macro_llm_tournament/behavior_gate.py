@@ -17,10 +17,11 @@ from .agent_types import build_household_type_cells
 from .llm_common import LLMUnavailable
 
 
-BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v3"
+BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v4"
 BEHAVIOR_PROMPT_VERSION = "household_behavior_target_gate_v1"
-BEHAVIOR_PRIMITIVE_PROMPT_VERSION = "household_behavior_primitives_v1"
-BEHAVIOR_PRIMITIVE_POLICY_VERSION = "primitive_to_action_policy_fixed_theory_v1"
+BEHAVIOR_PRIMITIVE_PROMPT_VERSION = "household_behavior_primitives_v2"
+BEHAVIOR_PRIMITIVE_POLICY_VERSION = "primitive_to_action_policy_log_shock_v1"
+BEHAVIOR_PRIMITIVE_CALIBRATED_POLICY_VERSION = "primitive_to_action_policy_selection_calibrated_v1"
 TARGET_CATALOG_PACKAGE = "macro_llm_tournament"
 TARGET_CATALOG_RESOURCE = "data/public_behavior_targets.csv"
 BEHAVIOR_SHARE_COLUMNS = [
@@ -43,12 +44,14 @@ BEHAVIOR_PRIMITIVE_FIELDS = [
     "debt_repayment_urgency",
     "durable_purchase_pull_forward",
     "shock_size_normalized",
+    "shock_size_log_income_ratio",
     "confidence",
 ]
 BEHAVIOR_BASELINE_COMPARISON_COLUMNS = [
     "source",
     "source_kind",
     "target_scope",
+    "evaluation_split",
     "target_family",
     "n",
     "effective_weight",
@@ -199,9 +202,11 @@ def main() -> int:
         "model": args.model,
         "behavior_mode": args.behavior_mode,
         "primitive_mode": primitive_mode,
-        "primitive_policy_version": BEHAVIOR_PRIMITIVE_POLICY_VERSION if primitive_mode != "off" else None,
-        "primitive_policy_parameter_source": "fixed_theory_coefficients_declared_before_scoring" if primitive_mode != "off" else None,
-        "primitive_policy_parameters": primitive_policy_parameters() if primitive_mode != "off" else {},
+        "primitive_fixed_policy_version": BEHAVIOR_PRIMITIVE_POLICY_VERSION if primitive_mode != "off" else None,
+        "primitive_fixed_policy_parameter_source": "fixed_theory_coefficients_declared_before_scoring" if primitive_mode != "off" else None,
+        "primitive_fixed_policy_parameters": primitive_policy_parameters() if primitive_mode != "off" else {},
+        "primitive_calibrated_policy_version": BEHAVIOR_PRIMITIVE_CALIBRATED_POLICY_VERSION if primitive_mode != "off" else None,
+        "primitive_calibration_split": BEHAVIOR_SELECTION_SPLIT if primitive_mode != "off" else None,
         "max_live_calls": int(args.max_live_calls),
         "fresh_cache": bool(args.fresh_cache),
         "explicit_cache_dir": bool(args.cache_dir),
@@ -218,16 +223,41 @@ def main() -> int:
         llm_client = BehaviorLLMClient(args.provider, args.model, cache_dir, mode=args.behavior_mode, max_live_calls=args.max_live_calls)
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=llm_client)
         primitive_actions = pd.DataFrame(columns=actions.columns)
+        primitive_fixed_actions = pd.DataFrame(columns=actions.columns)
+        primitive_calibrated_actions = pd.DataFrame(columns=actions.columns)
         primitive_payloads = pd.DataFrame()
         primitive_sign_audit = pd.DataFrame()
+        primitive_calibrated_policy_parameters: dict[str, Any] = {}
+        primitive_calibration_report: dict[str, Any] = {}
         if primitive_mode != "off":
-            primitive_actions, primitive_payloads = run_primitive_behavior_gate(
+            primitive_fixed_actions, primitive_payloads = run_primitive_behavior_gate(
                 BEHAVIOR_SCENARIOS,
                 type_cells,
                 llm_client=llm_client,
                 primitive_mode=primitive_mode,
             )
-            primitive_sign_audit = primitive_behavior_sign_audit(primitive_actions, primitive_payloads)
+            selection_targets = targets[targets["evaluation_split"] == BEHAVIOR_SELECTION_SPLIT].copy()
+            selection_cell_targets = cell_targets[cell_targets["evaluation_split"] == BEHAVIOR_SELECTION_SPLIT].copy()
+            primitive_calibrated_policy_parameters, primitive_calibration_report = calibrate_primitive_policy_parameters(
+                BEHAVIOR_SCENARIOS,
+                type_cells,
+                primitive_payloads,
+                selection_targets,
+                selection_cell_targets,
+            )
+            primitive_calibrated_actions = build_primitive_actions_from_payloads(
+                BEHAVIOR_SCENARIOS,
+                type_cells,
+                primitive_payloads,
+                source=f"primitive_{args.provider}_{args.model}",
+                policy_params=primitive_calibrated_policy_parameters,
+            )
+            primitive_actions = pd.concat([primitive_fixed_actions, primitive_calibrated_actions], ignore_index=True)
+            primitive_sign_audit = primitive_behavior_sign_audit(
+                primitive_calibrated_actions,
+                primitive_payloads,
+                policy_params=primitive_calibrated_policy_parameters,
+            )
         controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
         ablations = run_behavior_ablations(pd.concat([actions, controls], ignore_index=True))
         all_actions = pd.concat([actions, primitive_actions, controls, ablations], ignore_index=True)
@@ -263,6 +293,18 @@ def main() -> int:
         primitive_actions.to_csv(output_dir / "household_behavior_primitive_actions.csv", index=False)
         primitive_payloads.to_csv(output_dir / "household_behavior_primitives.csv", index=False)
         primitive_sign_audit.to_csv(output_dir / "behavior_primitive_sign_audit.csv", index=False)
+        (output_dir / "primitive_policy_calibration.json").write_text(
+            json.dumps(
+                {
+                    "policy_version": BEHAVIOR_PRIMITIVE_CALIBRATED_POLICY_VERSION if primitive_mode != "off" else None,
+                    "parameters": primitive_calibrated_policy_parameters,
+                    "calibration_report": primitive_calibration_report,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         ablations.to_csv(output_dir / "household_behavior_ablations.csv", index=False)
         all_actions.to_csv(output_dir / "household_behavior_actions.csv", index=False)
         aggregates.to_csv(output_dir / "behavior_aggregates.csv", index=False)
@@ -286,7 +328,11 @@ def main() -> int:
                 "household_type_count": int(type_cells.shape[0]),
                 "action_rows": int(all_actions.shape[0]),
                 "primitive_action_rows": int(primitive_actions.shape[0]),
+                "primitive_fixed_action_rows": int(primitive_fixed_actions.shape[0]),
+                "primitive_calibrated_action_rows": int(primitive_calibrated_actions.shape[0]),
                 "primitive_payload_rows": int(primitive_payloads.shape[0]),
+                "primitive_calibrated_policy_parameters": primitive_calibrated_policy_parameters,
+                "primitive_calibration_report": primitive_calibration_report,
                 "primitive_sign_audit_rows": int(primitive_sign_audit.shape[0]),
                 "primitive_sign_audit_passed": bool(primitive_sign_audit["passed"].all()) if not primitive_sign_audit.empty else False,
                 "ablation_action_rows": int(ablations.shape[0]),
@@ -306,6 +352,18 @@ def main() -> int:
                 "primitive_holdout_verdict": primitive_holdout_verdict,
                 "aggregate_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="aggregate"),
                 "cell_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="cell"),
+                "raw_llm_holdout_baseline_verdict": behavior_baseline_verdict(
+                    holdout_baseline_comparison,
+                    target_scope="aggregate",
+                    evaluation_split=BEHAVIOR_HOLDOUT_SPLIT,
+                    source_kinds=("llm",),
+                ),
+                "primitive_holdout_baseline_verdict": behavior_baseline_verdict(
+                    holdout_baseline_comparison,
+                    target_scope="aggregate",
+                    evaluation_split=BEHAVIOR_HOLDOUT_SPLIT,
+                    source_kinds=("primitive",),
+                ),
                 "primitive_aggregate_baseline_verdict": behavior_baseline_verdict(
                     baseline_comparison,
                     target_scope="aggregate",
@@ -340,6 +398,7 @@ def main() -> int:
                     "household_behavior_primitive_actions.csv",
                     "household_behavior_primitives.csv",
                     "behavior_primitive_sign_audit.csv",
+                    "primitive_policy_calibration.json",
                     "household_behavior_ablations.csv",
                     "household_behavior_actions.csv",
                     "behavior_aggregates.csv",
@@ -473,18 +532,20 @@ def run_primitive_behavior_gate(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     action_rows: list[dict[str, Any]] = []
     primitive_rows: list[dict[str, Any]] = []
-    source = f"primitive_{llm_client.provider}_{llm_client.model}"
+    action_source = f"primitive_fixed_{llm_client.provider}_{llm_client.model}"
+    payload_source = f"primitive_payload_{llm_client.provider}_{llm_client.model}"
+    fixed_params = primitive_policy_parameters()
     for scenario in scenarios:
         payload = llm_client.primitive_panel(scenario, type_cells, primitive_mode=primitive_mode)
         for _, type_cell in type_cells.iterrows():
             primitive = payload["primitives_by_type"][str(type_cell["type_id"])]
-            action = primitive_policy_action(scenario, type_cell, primitive)
-            action_rows.append(_behavior_action_row(scenario, type_cell, action, source=source))
+            action = primitive_policy_action(scenario, type_cell, primitive, policy_params=fixed_params)
+            action_rows.append(_behavior_action_row(scenario, type_cell, action, source=action_source))
             primitive_rows.append(
                 {
                     "schema_version": BEHAVIOR_PRIMITIVE_PROMPT_VERSION,
                     "scenario_id": scenario.scenario_id,
-                    "source": source,
+                    "source": payload_source,
                     "type_id": str(type_cell["type_id"]),
                     "population_weight": float(type_cell["population_weight"]),
                     "liquidity_group": _liquidity_group(type_cell),
@@ -493,6 +554,33 @@ def run_primitive_behavior_gate(
                 }
             )
     return pd.DataFrame(action_rows), pd.DataFrame(primitive_rows)
+
+
+def build_primitive_actions_from_payloads(
+    scenarios: Iterable[BehaviorScenario],
+    type_cells: pd.DataFrame,
+    primitive_payloads: pd.DataFrame,
+    *,
+    source: str,
+    policy_params: dict[str, Any],
+) -> pd.DataFrame:
+    if primitive_payloads.empty:
+        return pd.DataFrame()
+    scenario_by_id = {scenario.scenario_id: scenario for scenario in scenarios}
+    type_by_id = {str(row["type_id"]): row for _, row in type_cells.iterrows()}
+    rows: list[dict[str, Any]] = []
+    for _, primitive_row in primitive_payloads.iterrows():
+        scenario_id = str(primitive_row["scenario_id"])
+        type_id = str(primitive_row["type_id"])
+        scenario = scenario_by_id.get(scenario_id)
+        type_cell = type_by_id.get(type_id)
+        if scenario is None or type_cell is None:
+            continue
+        primitive = {field: float(primitive_row[field]) for field in BEHAVIOR_PRIMITIVE_FIELDS}
+        primitive["confidence"] = float(primitive_row.get("confidence", 0.5))
+        action = primitive_policy_action(scenario, type_cell, primitive, policy_params=policy_params)
+        rows.append(_behavior_action_row(scenario, type_cell, action, source=source))
+    return pd.DataFrame(rows)
 
 
 def run_behavior_controls(scenarios: Iterable[BehaviorScenario], type_cells: pd.DataFrame) -> pd.DataFrame:
@@ -729,6 +817,7 @@ def behavior_primitive_prompt(scenario: BehaviorScenario, type_cells: pd.DataFra
                     "debt_repayment_urgency": "0 to 1",
                     "durable_purchase_pull_forward": "0 to 1",
                     "shock_size_normalized": "0 to 1, where 0 is a small routine payment and 1 is life-changing relative to income",
+                    "shock_size_log_income_ratio": "-4 to 2, log10(transfer_amount / annual_income); keep prize-size gradation instead of clipping large windfalls",
                     "confidence": "0 to 1",
                     "reason": "short reason",
                 }
@@ -838,6 +927,7 @@ def normalize_behavior_primitive_payload(scenario: BehaviorScenario, type_cells:
             "debt_repayment_urgency": bounded_number(primitive, "debt_repayment_urgency", 0.0, 1.0),
             "durable_purchase_pull_forward": bounded_number(primitive, "durable_purchase_pull_forward", 0.0, 1.0),
             "shock_size_normalized": bounded_number(primitive, "shock_size_normalized", 0.0, 1.0),
+            "shock_size_log_income_ratio": bounded_number(primitive, "shock_size_log_income_ratio", -4.0, 2.0),
             "confidence": bounded_number(primitive, "confidence", 0.0, 1.0),
             "reason": str(primitive.get("reason", ""))[:300],
         }
@@ -861,6 +951,7 @@ def fixture_behavior_primitives(scenario: BehaviorScenario, type_cell: pd.Series
         "debt_repayment_urgency": float(np.clip(0.12 + 0.45 * debt_ratio, 0.0, 1.0)),
         "durable_purchase_pull_forward": float(np.clip(0.16 + 0.10 * (scenario.horizon_months >= 6) - 0.15 * shutdown, 0.0, 1.0)),
         "shock_size_normalized": float(np.clip(transfer_income_ratio / 0.50, 0.0, 1.0)),
+        "shock_size_log_income_ratio": float(np.clip(np.log10(max(transfer_income_ratio, 1e-4)), -4.0, 2.0)),
         "confidence": 0.60,
     }
 
@@ -874,7 +965,7 @@ def primitive_policy_parameters() -> dict[str, float | str]:
         "positive_income_growth_to_spending": 0.05,
         "precaution_to_spending": -0.16,
         "job_risk_to_spending": -0.10,
-        "shock_size_to_spending": -0.18,
+        "shock_log_to_spending": -0.12,
         "base_debt_repayment_share": 0.06,
         "debt_urgency_to_debt_repayment": 0.34,
         "job_risk_to_debt_repayment": 0.04,
@@ -884,15 +975,21 @@ def primitive_policy_parameters() -> dict[str, float | str]:
     }
 
 
-def primitive_policy_action(scenario: BehaviorScenario, type_cell: pd.Series, primitive: dict[str, Any]) -> dict[str, Any]:
-    params = primitive_policy_parameters()
+def primitive_policy_action(
+    scenario: BehaviorScenario,
+    type_cell: pd.Series,
+    primitive: dict[str, Any],
+    *,
+    policy_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params = policy_params if policy_params is not None else primitive_policy_parameters()
     job_risk = float(primitive["perceived_job_loss_risk_pp"]) / 100.0
     income_growth = float(primitive["expected_income_growth_pct"]) / 10.0
     liquidity_stress = float(primitive["liquidity_stress"])
     precaution = float(primitive["precautionary_saving_motive"])
     debt_urgency = float(primitive["debt_repayment_urgency"])
     durable_pull = float(primitive["durable_purchase_pull_forward"])
-    shock_size = float(primitive["shock_size_normalized"])
+    shock_size_log = float(primitive["shock_size_log_income_ratio"])
     shutdown = 1.0 if scenario.scenario_id == "eip_2020_style" else 0.0
 
     total = (
@@ -902,7 +999,7 @@ def primitive_policy_action(scenario: BehaviorScenario, type_cell: pd.Series, pr
         + float(params["positive_income_growth_to_spending"]) * max(income_growth, 0.0)
         + float(params["precaution_to_spending"]) * precaution
         + float(params["job_risk_to_spending"]) * job_risk
-        + float(params["shock_size_to_spending"]) * shock_size
+        + float(params["shock_log_to_spending"]) * shock_size_log
     )
     debt = (
         float(params["base_debt_repayment_share"])
@@ -929,26 +1026,185 @@ def primitive_policy_action(scenario: BehaviorScenario, type_cell: pd.Series, pr
             "liquid_saving_share": liquid,
             "confidence": float(primitive["confidence"]),
             "reason": (
-                "fixed primitive policy: liquidity stress raises spending; precaution and job risk raise saving; "
-                "debt urgency raises repayment; larger windfalls lower immediate MPC"
+                f"{params.get('source', 'primitive_policy')}: liquidity stress raises spending; "
+                "precaution and job risk raise saving; debt urgency raises repayment; "
+                "larger windfalls lower immediate MPC through log shock size"
             ),
         }
     )
 
 
-def primitive_behavior_sign_audit(actions: pd.DataFrame, primitives: pd.DataFrame) -> pd.DataFrame:
+PRIMITIVE_CALIBRATION_PARAMETER_BOUNDS: dict[str, tuple[float, float]] = {
+    "base_spending_share": (0.02, 0.60),
+    "liquidity_stress_to_spending": (0.00, 0.90),
+    "durable_pull_to_spending": (0.00, 0.30),
+    "positive_income_growth_to_spending": (0.00, 0.20),
+    "precaution_to_spending": (-0.60, 0.00),
+    "job_risk_to_spending": (-0.60, -0.05),
+    "shock_log_to_spending": (-0.60, 0.00),
+    "base_debt_repayment_share": (0.00, 0.35),
+    "debt_urgency_to_debt_repayment": (0.02, 0.90),
+    "job_risk_to_debt_repayment": (0.00, 0.20),
+}
+
+
+def calibrate_primitive_policy_parameters(
+    scenarios: Iterable[BehaviorScenario],
+    type_cells: pd.DataFrame,
+    primitive_payloads: pd.DataFrame,
+    aggregate_targets: pd.DataFrame,
+    cell_targets: pd.DataFrame,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    fixed = primitive_policy_parameters()
+    params = dict(fixed)
+    params["source"] = "selection_calibrated_from_behavior_selection_v1"
+    if primitive_payloads.empty or aggregate_targets.empty:
+        report = {
+            "status": "skipped",
+            "reason": "missing primitive payloads or selection targets",
+            "calibration_split": BEHAVIOR_SELECTION_SPLIT,
+            "objective_surface": "aggregate_selection_targets_only",
+            "objective_before": float("nan"),
+            "objective_after": float("nan"),
+            "parameter_bounds": PRIMITIVE_CALIBRATION_PARAMETER_BOUNDS,
+        }
+        return params, report
+
+    before = _primitive_policy_objective(
+        scenarios,
+        type_cells,
+        primitive_payloads,
+        fixed,
+        aggregate_targets,
+        cell_targets,
+    )
+    best = _primitive_policy_objective(
+        scenarios,
+        type_cells,
+        primitive_payloads,
+        params,
+        aggregate_targets,
+        cell_targets,
+    )
+    trace: list[dict[str, Any]] = [{"iteration": 0, "parameter": "initial", "objective": best["objective"]}]
+    for iteration in range(1, 3):
+        improved = False
+        for name, bounds in PRIMITIVE_CALIBRATION_PARAMETER_BOUNDS.items():
+            low, high = bounds
+            center = float(params[name])
+            width = (high - low) / float(2 ** (iteration + 1))
+            candidates = np.linspace(max(low, center - width), min(high, center + width), 5)
+            candidates = np.unique(np.append(candidates, [center, low, high]))
+            local_best_value = center
+            local_best = best
+            for candidate in candidates:
+                candidate_params = dict(params)
+                candidate_params[name] = float(candidate)
+                result = _primitive_policy_objective(
+                    scenarios,
+                    type_cells,
+                    primitive_payloads,
+                    candidate_params,
+                    aggregate_targets,
+                    cell_targets,
+                )
+                if result["objective"] < local_best["objective"] - 1e-10:
+                    local_best = result
+                    local_best_value = float(candidate)
+            if local_best_value != center:
+                params[name] = local_best_value
+                best = local_best
+                improved = True
+                trace.append(
+                    {
+                        "iteration": iteration,
+                        "parameter": name,
+                        "value": local_best_value,
+                        "objective": best["objective"],
+                    }
+                )
+        if not improved:
+            break
+
+    report = {
+        "status": "ok",
+        "calibration_split": BEHAVIOR_SELECTION_SPLIT,
+        "objective_surface": "aggregate_selection_targets_only",
+        "objective_before": before["objective"],
+        "objective_after": best["objective"],
+        "aggregate_rmse_before": before["aggregate_rmse"],
+        "aggregate_rmse_after": best["aggregate_rmse"],
+        "cell_rmse_before": before["cell_rmse"],
+        "cell_rmse_after": best["cell_rmse"],
+        "selection_aggregate_target_rows": int(aggregate_targets.shape[0]),
+        "selection_cell_target_rows": int(cell_targets.shape[0]),
+        "parameter_bounds": PRIMITIVE_CALIBRATION_PARAMETER_BOUNDS,
+        "trace": trace[-20:],
+    }
+    return params, report
+
+
+def _primitive_policy_objective(
+    scenarios: Iterable[BehaviorScenario],
+    type_cells: pd.DataFrame,
+    primitive_payloads: pd.DataFrame,
+    policy_params: dict[str, Any],
+    aggregate_targets: pd.DataFrame,
+    cell_targets: pd.DataFrame,
+) -> dict[str, float]:
+    source = "primitive_calibration_candidate"
+    actions = build_primitive_actions_from_payloads(
+        scenarios,
+        type_cells,
+        primitive_payloads,
+        source=source,
+        policy_params=policy_params,
+    )
+    aggregates = aggregate_behavior_actions(actions)
+    scores = score_behavior_targets(aggregates, aggregate_targets)
+    cell_scores = score_cell_behavior_targets(actions, cell_targets)
+    aggregate_rmse = _score_lookup_rmse(scores, source=source, target_scope="aggregate", evaluation_split=BEHAVIOR_SELECTION_SPLIT)
+    cell_rmse = _score_lookup_rmse(cell_scores, source=source, target_scope="cell", evaluation_split=BEHAVIOR_SELECTION_SPLIT)
+    objective = aggregate_rmse if np.isfinite(aggregate_rmse) else float("inf")
+    return {
+        "objective": objective,
+        "aggregate_rmse": aggregate_rmse,
+        "cell_rmse": cell_rmse,
+    }
+
+
+def _score_lookup_rmse(scores: pd.DataFrame, *, source: str, target_scope: str, evaluation_split: str) -> float:
+    if scores.empty:
+        return float("nan")
+    rows = scores[
+        (scores["source"].astype(str) == source)
+        & (scores["target_scope"].astype(str) == target_scope)
+        & (scores["evaluation_split"].astype(str) == evaluation_split)
+        & (scores["target_family"].astype(str) == "ALL")
+    ]
+    if rows.empty:
+        return float("nan")
+    return float(rows.iloc[0]["rmse_range"])
+
+
+def primitive_behavior_sign_audit(
+    actions: pd.DataFrame,
+    primitives: pd.DataFrame,
+    *,
+    policy_params: dict[str, Any] | None = None,
+) -> pd.DataFrame:
     columns = ["audit_id", "expected_sign", "slope_or_delta", "n", "passed", "notes"]
     if actions.empty or primitives.empty:
         return pd.DataFrame(columns=columns)
-    params = primitive_policy_parameters()
+    params = policy_params if policy_params is not None else primitive_policy_parameters()
     job_risk_liquid_saving_derivative = (
         -float(params["job_risk_to_spending"]) - float(params["job_risk_to_debt_repayment"])
     )
     joined = actions.merge(
-        primitives,
-        on=["scenario_id", "source", "type_id"],
+        primitives.drop(columns=["source"], errors="ignore"),
+        on=["scenario_id", "type_id"],
         suffixes=("", "_primitive"),
-        validate="one_to_one",
+        validate="many_to_one",
     )
     rows: list[dict[str, Any]] = []
     rows.extend(
@@ -983,10 +1239,10 @@ def primitive_behavior_sign_audit(actions: pd.DataFrame, primitives: pd.DataFram
             ),
             _coefficient_audit(
                 "larger_windfall_lowers_mpc",
-                float(params["shock_size_to_spending"]),
+                float(params["shock_log_to_spending"]),
                 expected_positive=False,
                 n=joined.shape[0],
-                notes="Fixed policy derivative: shock_size_normalized -> total_spending_share",
+                notes="Policy derivative: shock_size_log_income_ratio -> total_spending_share",
             ),
         ]
     )
@@ -1002,6 +1258,19 @@ def primitive_behavior_sign_audit(actions: pd.DataFrame, primitives: pd.DataFram
             "n": int(eip.shape[0]),
             "passed": bool(np.isfinite(delta) and delta > 0.0),
             "notes": "Low-liquidity EIP cells should spend more than high-liquidity cells through primitive stress.",
+        }
+    )
+    small = joined[joined["scenario_id"].astype(str) == "small_lottery_windfall_style"]
+    large = joined[joined["scenario_id"].astype(str) == "large_lottery_windfall_style"]
+    shock_delta = _weighted_average(small, "total_spending_share") - _weighted_average(large, "total_spending_share") if not small.empty and not large.empty else float("nan")
+    rows.append(
+        {
+            "audit_id": "small_lottery_higher_mpc_than_large",
+            "expected_sign": "positive",
+            "slope_or_delta": shock_delta,
+            "n": int(small.shape[0] + large.shape[0]),
+            "passed": bool(np.isfinite(shock_delta) and shock_delta > 0.0),
+            "notes": "Small lottery windfalls should have higher MPC than large lottery windfalls.",
         }
     )
     return pd.DataFrame(rows, columns=columns)
@@ -1080,12 +1349,29 @@ def score_behavior_targets(aggregates: pd.DataFrame, targets: pd.DataFrame) -> p
     joined["range_error"] = joined.apply(_range_error, axis=1)
     joined["point_error"] = joined["prediction"] - joined["target_value"].astype(float)
     rows: list[dict[str, Any]] = []
-    for keys, group in joined.groupby(["source", "target_family"], dropna=False):
-        source, target_family = keys
-        rows.append(_score_group(group, source=source, target_family=target_family, target_scope="aggregate"))
-    for source, group in joined.groupby("source", dropna=False):
-        rows.append(_score_group(group, source=source, target_family="ALL", target_scope="aggregate"))
-    return pd.DataFrame(rows).sort_values(["target_family", "rmse_range", "source"]).reset_index(drop=True)
+    for keys, group in joined.groupby(["source", "evaluation_split", "target_family"], dropna=False):
+        source, evaluation_split, target_family = keys
+        rows.append(
+            _score_group(
+                group,
+                source=source,
+                evaluation_split=evaluation_split,
+                target_family=target_family,
+                target_scope="aggregate",
+            )
+        )
+    for keys, group in joined.groupby(["source", "evaluation_split"], dropna=False):
+        source, evaluation_split = keys
+        rows.append(
+            _score_group(
+                group,
+                source=source,
+                evaluation_split=evaluation_split,
+                target_family="ALL",
+                target_scope="aggregate",
+            )
+        )
+    return pd.DataFrame(rows).sort_values(["evaluation_split", "target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
 def join_cell_behavior_target_errors(actions: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
@@ -1111,28 +1397,31 @@ def score_cell_behavior_targets(actions: pd.DataFrame, targets: pd.DataFrame) ->
     if joined.empty:
         return pd.DataFrame()
     rows: list[dict[str, Any]] = []
-    for keys, group in joined.groupby(["source", "target_family"], dropna=False):
-        source, target_family = keys
+    for keys, group in joined.groupby(["source", "evaluation_split", "target_family"], dropna=False):
+        source, evaluation_split, target_family = keys
         rows.append(
             _score_group(
                 group,
                 source=source,
+                evaluation_split=evaluation_split,
                 target_family=target_family,
                 target_scope="cell",
                 weight_column="score_weight",
             )
         )
-    for source, group in joined.groupby("source", dropna=False):
+    for keys, group in joined.groupby(["source", "evaluation_split"], dropna=False):
+        source, evaluation_split = keys
         rows.append(
             _score_group(
                 group,
                 source=source,
+                evaluation_split=evaluation_split,
                 target_family="ALL",
                 target_scope="cell",
                 weight_column="score_weight",
             )
         )
-    return pd.DataFrame(rows).sort_values(["target_family", "rmse_range", "source"]).reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values(["evaluation_split", "target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
 def build_behavior_baseline_comparison(
@@ -1150,8 +1439,8 @@ def build_behavior_baseline_comparison(
     combined = pd.concat(valid_frames, ignore_index=True)
     baselines = set(str(source) for source in baseline_sources)
     rows: list[dict[str, Any]] = []
-    for keys, group in combined.groupby(["target_scope", "target_family"], dropna=False):
-        target_scope, target_family = keys
+    for keys, group in combined.groupby(["target_scope", "evaluation_split", "target_family"], dropna=False):
+        target_scope, evaluation_split, target_family = keys
         baseline_group = group[group["source"].astype(str).isin(baselines)].sort_values(["rmse_range", "mae_range", "source"])
         if baseline_group.empty:
             continue
@@ -1169,6 +1458,7 @@ def build_behavior_baseline_comparison(
                     "source": source,
                     "source_kind": _behavior_source_kind(source),
                     "target_scope": str(target_scope),
+                    "evaluation_split": str(evaluation_split),
                     "target_family": str(target_family),
                     "n": int(row["n"]),
                     "effective_weight": float(row.get("effective_weight", np.nan)),
@@ -1190,13 +1480,14 @@ def build_behavior_baseline_comparison(
             )
     if not rows:
         return pd.DataFrame(columns=BEHAVIOR_BASELINE_COMPARISON_COLUMNS)
-    return pd.DataFrame(rows, columns=BEHAVIOR_BASELINE_COMPARISON_COLUMNS).sort_values(["target_scope", "target_family", "rmse_range", "source"]).reset_index(drop=True)
+    return pd.DataFrame(rows, columns=BEHAVIOR_BASELINE_COMPARISON_COLUMNS).sort_values(["target_scope", "evaluation_split", "target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
 def behavior_baseline_verdict(
     comparison: pd.DataFrame,
     *,
     target_scope: str,
+    evaluation_split: str = BEHAVIOR_SELECTION_SPLIT,
     source_kinds: Iterable[str] = ("llm", "llm_ablation"),
 ) -> dict[str, Any]:
     source_kind_list = tuple(str(kind) for kind in source_kinds)
@@ -1205,10 +1496,12 @@ def behavior_baseline_verdict(
             "verdict": "behavior_baseline_unmeasured",
             "reason": "No behavior baseline comparison rows were produced.",
             "target_scope": target_scope,
+            "evaluation_split": evaluation_split,
             "source_kinds": list(source_kind_list),
         }
     overall = comparison[
         (comparison["target_scope"].astype(str) == target_scope)
+        & (comparison["evaluation_split"].astype(str) == evaluation_split)
         & (comparison["target_family"].astype(str) == "ALL")
         & (comparison["source_kind"].isin(source_kind_list))
     ].copy()
@@ -1217,6 +1510,7 @@ def behavior_baseline_verdict(
             "verdict": "behavior_baseline_unmeasured",
             "reason": f"No {target_scope} ALL rows were available for source kinds {', '.join(source_kind_list)}.",
             "target_scope": target_scope,
+            "evaluation_split": evaluation_split,
             "source_kinds": list(source_kind_list),
         }
     best = overall.sort_values(["rmse_range", "source"]).iloc[0]
@@ -1229,6 +1523,7 @@ def behavior_baseline_verdict(
     return {
         "verdict": verdict,
         "target_scope": target_scope,
+        "evaluation_split": evaluation_split,
         "source_kinds": list(source_kind_list),
         "best_source": str(best["source"]),
         "best_source_kind": str(best["source_kind"]),
@@ -1246,6 +1541,7 @@ def prespecified_behavior_holdout_verdict(
     *,
     candidate_source: str,
     target_scope: str,
+    evaluation_split: str = BEHAVIOR_HOLDOUT_SPLIT,
 ) -> dict[str, Any]:
     if comparison.empty:
         return {
@@ -1253,9 +1549,11 @@ def prespecified_behavior_holdout_verdict(
             "reason": "No holdout baseline comparison rows were produced.",
             "candidate_source": candidate_source,
             "target_scope": target_scope,
+            "evaluation_split": evaluation_split,
         }
     overall = comparison[
         (comparison["target_scope"].astype(str) == target_scope)
+        & (comparison["evaluation_split"].astype(str) == evaluation_split)
         & (comparison["target_family"].astype(str) == "ALL")
         & (comparison["source"].astype(str) == candidate_source)
     ].copy()
@@ -1265,6 +1563,7 @@ def prespecified_behavior_holdout_verdict(
             "reason": f"Candidate source {candidate_source} has no {target_scope} ALL holdout row.",
             "candidate_source": candidate_source,
             "target_scope": target_scope,
+            "evaluation_split": evaluation_split,
         }
     row = overall.iloc[0]
     if bool(row["beats_best_baseline"]):
@@ -1277,6 +1576,7 @@ def prespecified_behavior_holdout_verdict(
         "verdict": verdict,
         "candidate_source": candidate_source,
         "target_scope": target_scope,
+        "evaluation_split": evaluation_split,
         "best_baseline_source": str(row["best_baseline_source"]),
         "rmse_range": float(row["rmse_range"]),
         "best_baseline_rmse_range": float(row["best_baseline_rmse_range"]),
@@ -1389,8 +1689,10 @@ def build_behavior_gate_report(
         markdown_table(_baseline_comparison_table(holdout_baseline_comparison)),
         "",
         "## Primitive Mechanism Audit",
-        f"- Policy version: `{manifest.get('primitive_policy_version')}`",
-        f"- Parameter source: `{manifest.get('primitive_policy_parameter_source')}`",
+        f"- Fixed policy version: `{manifest.get('primitive_fixed_policy_version')}`",
+        f"- Calibrated policy version: `{manifest.get('primitive_calibrated_policy_version')}`",
+        f"- Calibration split: `{manifest.get('primitive_calibration_split')}`",
+        f"- Calibration objective: `{manifest.get('primitive_calibration_report', {}).get('objective_before')}` -> `{manifest.get('primitive_calibration_report', {}).get('objective_after')}`",
         f"- All sign audits passed: `{manifest.get('primitive_sign_audit_passed')}`",
         "",
         markdown_table(primitive_sign_audit if not primitive_sign_audit.empty else primitive_sign_audit),
@@ -1415,11 +1717,11 @@ def build_behavior_gate_report(
             else holdout_targets
         ),
         "",
-        "## Aggregate Scoreboard",
-        markdown_table(scores.sort_values(["target_family", "rmse_range", "source"])),
+        "## Aggregate Scoreboard By Split",
+        markdown_table(scores.sort_values(["evaluation_split", "target_family", "rmse_range", "source"])),
         "",
-        "## Cell-Level Scoreboard",
-        markdown_table(cell_scores.sort_values(["target_family", "rmse_range", "source"]) if not cell_scores.empty else cell_scores),
+        "## Cell-Level Scoreboard By Split",
+        markdown_table(cell_scores.sort_values(["evaluation_split", "target_family", "rmse_range", "source"]) if not cell_scores.empty else cell_scores),
         "",
         "## Cell-Level Joined Errors",
         markdown_table(
@@ -1430,6 +1732,7 @@ def build_behavior_gate_report(
                     "type_id",
                     "target_name",
                     "target_family",
+                    "evaluation_split",
                     "prediction",
                     "target_low",
                     "target_high",
@@ -1451,6 +1754,7 @@ def build_behavior_gate_report(
                     "scenario_id",
                     "target_name",
                     "target_family",
+                    "evaluation_split",
                     "household_bucket",
                     "window",
                     "target_low",
@@ -1470,6 +1774,7 @@ def build_behavior_gate_report(
                     "type_id",
                     "target_name",
                     "target_family",
+                    "evaluation_split",
                     "household_bucket",
                     "window",
                     "target_low",
@@ -1628,6 +1933,7 @@ def _score_group(
     group: pd.DataFrame,
     *,
     source: str,
+    evaluation_split: str,
     target_family: str,
     target_scope: str,
     weight_column: str | None = None,
@@ -1645,6 +1951,7 @@ def _score_group(
         "source": source,
         "target_family": target_family,
         "target_scope": target_scope,
+        "evaluation_split": str(evaluation_split),
         "n": int(group.shape[0]),
         "effective_weight": weight_sum,
         "rmse_range": float(np.sqrt((weights * np.square(range_error)).sum() / weight_sum)),
@@ -1659,6 +1966,8 @@ def _score_group(
 def _behavior_source_kind(source: str) -> str:
     if source in BEHAVIOR_BASELINE_SOURCES:
         return "baseline"
+    if source.startswith("primitive_fixed_"):
+        return "primitive_fixed"
     if source.startswith("primitive_"):
         return "primitive"
     if source.startswith("llm_") and "__" in source:
@@ -1690,34 +1999,87 @@ def _behavior_bottom_line(
 ) -> str:
     if scores.empty:
         return "Behavior target scoring produced no rows."
-    overall = scores[scores["target_family"] == "ALL"].sort_values("rmse_range")
-    if overall.empty:
-        return "Behavior target scoring produced no overall row."
-    best = overall.iloc[0]
+    selection_overall = scores[
+        (scores["evaluation_split"] == BEHAVIOR_SELECTION_SPLIT) & (scores["target_family"] == "ALL")
+    ].sort_values("rmse_range")
+    holdout_overall = scores[
+        (scores["evaluation_split"] == BEHAVIOR_HOLDOUT_SPLIT) & (scores["target_family"] == "ALL")
+    ].sort_values("rmse_range")
+    if selection_overall.empty and holdout_overall.empty:
+        return "Behavior target scoring produced no split-level overall row."
+    selection_line = "Selection-split aggregate scoring is unmeasured."
+    if not selection_overall.empty:
+        best = selection_overall.iloc[0]
+        selection_line = (
+            f"Selection-split aggregate best source is `{best['source']}` with range RMSE "
+            f"`{float(best['rmse_range']):.4f}` across `{int(best['n'])}` targets."
+        )
+    holdout_line = " Holdout aggregate scoring is unmeasured."
+    if not holdout_overall.empty:
+        holdout_best = holdout_overall.iloc[0]
+        holdout_line = (
+            f" Holdout aggregate best source is `{holdout_best['source']}` with range RMSE "
+            f"`{float(holdout_best['rmse_range']):.4f}` across `{int(holdout_best['n'])}` targets."
+        )
     cell_line = ""
     if cell_scores is not None and not cell_scores.empty:
-        cell_overall = cell_scores[cell_scores["target_family"] == "ALL"].sort_values("rmse_range")
+        cell_overall = cell_scores[
+            (cell_scores["evaluation_split"] == BEHAVIOR_SELECTION_SPLIT)
+            & (cell_scores["target_family"] == "ALL")
+        ].sort_values("rmse_range")
         if not cell_overall.empty:
             cell_best = cell_overall.iloc[0]
             cell_line = (
-                f" Cell-level best source is `{cell_best['source']}` with population-weighted range RMSE "
+                f" Selection-split cell-level best source is `{cell_best['source']}` with population-weighted range RMSE "
                 f"`{float(cell_best['rmse_range']):.4f}` across `{int(cell_best['n'])}` cell targets."
             )
     return (
-        f"Aggregate best source is `{best['source']}` with range RMSE `{float(best['rmse_range']):.4f}` "
-        f"across `{int(best['n'])}` behavior targets."
+        f"{selection_line}"
+        f"{holdout_line}"
         f"{cell_line}"
         f" {_baseline_verdict_sentence(baseline_comparison if baseline_comparison is not None else build_behavior_baseline_comparison(scores, cell_scores))}"
     )
 
 
 def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
-    aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate")
-    cell = behavior_baseline_verdict(comparison, target_scope="cell")
-    raw_aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate", source_kinds=("llm",))
-    raw_cell = behavior_baseline_verdict(comparison, target_scope="cell", source_kinds=("llm",))
-    primitive_aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate", source_kinds=("primitive",))
-    primitive_cell = behavior_baseline_verdict(comparison, target_scope="cell", source_kinds=("primitive",))
+    aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate", evaluation_split=BEHAVIOR_SELECTION_SPLIT)
+    cell = behavior_baseline_verdict(comparison, target_scope="cell", evaluation_split=BEHAVIOR_SELECTION_SPLIT)
+    raw_aggregate = behavior_baseline_verdict(
+        comparison,
+        target_scope="aggregate",
+        evaluation_split=BEHAVIOR_SELECTION_SPLIT,
+        source_kinds=("llm",),
+    )
+    raw_cell = behavior_baseline_verdict(
+        comparison,
+        target_scope="cell",
+        evaluation_split=BEHAVIOR_SELECTION_SPLIT,
+        source_kinds=("llm",),
+    )
+    primitive_aggregate = behavior_baseline_verdict(
+        comparison,
+        target_scope="aggregate",
+        evaluation_split=BEHAVIOR_SELECTION_SPLIT,
+        source_kinds=("primitive",),
+    )
+    primitive_cell = behavior_baseline_verdict(
+        comparison,
+        target_scope="cell",
+        evaluation_split=BEHAVIOR_SELECTION_SPLIT,
+        source_kinds=("primitive",),
+    )
+    raw_holdout = behavior_baseline_verdict(
+        comparison,
+        target_scope="aggregate",
+        evaluation_split=BEHAVIOR_HOLDOUT_SPLIT,
+        source_kinds=("llm",),
+    )
+    primitive_holdout = behavior_baseline_verdict(
+        comparison,
+        target_scope="aggregate",
+        evaluation_split=BEHAVIOR_HOLDOUT_SPLIT,
+        source_kinds=("primitive",),
+    )
 
     def clause(label: str, verdict: dict[str, Any], *, subject: str) -> str:
         verdict_name = str(verdict.get("verdict", "behavior_baseline_unmeasured"))
@@ -1731,6 +2093,7 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
         return (
             f"{label} {subject} source `{verdict.get('best_source')}` {verb} "
             f"best rule baseline `{verdict.get('best_baseline_source')}` "
+            f"on `{verdict.get('evaluation_split')}` "
             f"(delta `{float(verdict.get('rmse_range_delta_vs_baseline', np.nan)):.4f}`)."
         )
 
@@ -1739,6 +2102,8 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
             clause("Aggregate", raw_aggregate, subject="raw LLM"),
             clause("Aggregate", primitive_aggregate, subject="primitive-driven"),
             clause("Aggregate", aggregate, subject="best LLM/ablation"),
+            clause("Holdout aggregate", raw_holdout, subject="raw LLM"),
+            clause("Holdout aggregate", primitive_holdout, subject="primitive-driven"),
             clause("Cell-level", raw_cell, subject="raw LLM"),
             clause("Cell-level", primitive_cell, subject="primitive-driven"),
             clause("Cell-level", cell, subject="best LLM/ablation"),
@@ -1758,7 +2123,7 @@ def _prespecified_holdout_sentence(verdict: dict[str, Any]) -> str:
     return (
         f"Pre-specified source `{verdict.get('candidate_source')}` {verb} "
         f"best rule baseline `{verdict.get('best_baseline_source')}` on `{verdict.get('target_scope')}` "
-        f"holdout targets (delta `{float(verdict.get('rmse_range_delta_vs_baseline', np.nan)):.4f}`, "
+        f"`{verdict.get('evaluation_split')}` targets (delta `{float(verdict.get('rmse_range_delta_vs_baseline', np.nan)):.4f}`, "
         f"n `{int(verdict.get('n', 0))}`)."
     )
 
@@ -1767,7 +2132,7 @@ def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | No
     if scores.empty:
         return pd.DataFrame()
     aggregate = scores[scores["target_family"] == "ALL"][
-        ["source", "n", "rmse_range", "mae_range", "rmse_point", "mae_point"]
+        ["evaluation_split", "source", "n", "rmse_range", "mae_range", "rmse_point", "mae_point"]
     ].copy()
     aggregate = aggregate.rename(
         columns={
@@ -1779,7 +2144,9 @@ def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | No
         }
     )
     if cell_scores is not None and not cell_scores.empty:
-        cell = cell_scores[cell_scores["target_family"] == "ALL"][["source", "n", "rmse_range", "mae_range"]].copy()
+        cell = cell_scores[cell_scores["target_family"] == "ALL"][
+            ["evaluation_split", "source", "n", "rmse_range", "mae_range"]
+        ].copy()
         cell = cell.rename(
             columns={
                 "n": "cell_n",
@@ -1787,7 +2154,7 @@ def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | No
                 "mae_range": "cell_mae_range",
             }
         )
-        aggregate = aggregate.merge(cell, on="source", how="left")
+        aggregate = aggregate.merge(cell, on=["evaluation_split", "source"], how="left")
     interesting = aggregate[
         aggregate["source"].eq("liquidity_rule")
         | aggregate["source"].str.startswith("llm_")
@@ -1796,7 +2163,7 @@ def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | No
     ].copy()
     if interesting.empty:
         interesting = aggregate
-    return interesting.sort_values(["aggregate_rmse_range", "source"]).reset_index(drop=True)
+    return interesting.sort_values(["evaluation_split", "aggregate_rmse_range", "source"]).reset_index(drop=True)
 
 
 def _baseline_comparison_table(comparison: pd.DataFrame) -> pd.DataFrame:
@@ -1804,6 +2171,7 @@ def _baseline_comparison_table(comparison: pd.DataFrame) -> pd.DataFrame:
         return comparison
     columns = [
         "target_scope",
+        "evaluation_split",
         "target_family",
         "source",
         "source_kind",
@@ -1816,7 +2184,7 @@ def _baseline_comparison_table(comparison: pd.DataFrame) -> pd.DataFrame:
         "baseline_verdict",
     ]
     selected = comparison[columns].copy()
-    return selected.sort_values(["target_scope", "target_family", "rmse_range", "source"]).reset_index(drop=True)
+    return selected.sort_values(["target_scope", "evaluation_split", "target_family", "rmse_range", "source"]).reset_index(drop=True)
 
 
 if __name__ == "__main__":

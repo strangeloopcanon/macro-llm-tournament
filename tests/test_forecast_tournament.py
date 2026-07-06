@@ -26,12 +26,15 @@ from macro_llm_tournament.behavior_gate import (
     BEHAVIOR_SCENARIOS,
     BEHAVIOR_HOLDOUT_SPLIT,
     BEHAVIOR_PRESPECIFIED_SUFFIX,
+    BEHAVIOR_SELECTION_SPLIT,
     BehaviorLLMClient,
     aggregate_behavior_actions,
     behavior_baseline_verdict,
     behavior_target_catalog,
     behavior_targets_frame,
+    build_primitive_actions_from_payloads,
     build_behavior_baseline_comparison,
+    calibrate_primitive_policy_parameters,
     fixture_behavior_payload,
     fixture_behavior_primitive_payload,
     join_cell_behavior_target_errors,
@@ -912,19 +915,40 @@ class ForecastTournamentTests(unittest.TestCase):
         client = BehaviorLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0)
 
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=client)
-        primitive_actions, primitive_payloads = run_primitive_behavior_gate(
+        primitive_fixed_actions, primitive_payloads = run_primitive_behavior_gate(
             BEHAVIOR_SCENARIOS,
             type_cells,
             llm_client=client,
             primitive_mode="fixture",
         )
-        primitive_audit = primitive_behavior_sign_audit(primitive_actions, primitive_payloads)
+        selection_targets = behavior_targets_frame(evaluation_split=BEHAVIOR_SELECTION_SPLIT)
+        cell_targets = behavior_targets_frame(target_scope="cell")
+        selection_cell_targets = cell_targets[cell_targets["evaluation_split"] == BEHAVIOR_SELECTION_SPLIT].copy()
+        calibrated_params, calibration_report = calibrate_primitive_policy_parameters(
+            BEHAVIOR_SCENARIOS,
+            type_cells,
+            primitive_payloads,
+            selection_targets,
+            selection_cell_targets,
+        )
+        primitive_calibrated_actions = build_primitive_actions_from_payloads(
+            BEHAVIOR_SCENARIOS,
+            type_cells,
+            primitive_payloads,
+            source="primitive_codex_cli_gpt-5.5",
+            policy_params=calibrated_params,
+        )
+        primitive_actions = pd.concat([primitive_fixed_actions, primitive_calibrated_actions], ignore_index=True)
+        primitive_audit = primitive_behavior_sign_audit(
+            primitive_calibrated_actions,
+            primitive_payloads,
+            policy_params=calibrated_params,
+        )
         controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
         ablations = run_behavior_ablations(pd.concat([actions, controls], ignore_index=True))
         all_actions = pd.concat([actions, primitive_actions, controls, ablations], ignore_index=True)
         aggregates = aggregate_behavior_actions(all_actions)
         scores = score_behavior_targets(aggregates, behavior_targets_frame())
-        cell_targets = behavior_targets_frame(target_scope="cell")
         cell_joined = join_cell_behavior_target_errors(all_actions, cell_targets)
         cell_scores = score_cell_behavior_targets(all_actions, cell_targets)
         baseline_comparison = build_behavior_baseline_comparison(scores, cell_scores)
@@ -941,11 +965,17 @@ class ForecastTournamentTests(unittest.TestCase):
         raw_aggregate_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="aggregate", source_kinds=("llm",))
 
         self.assertEqual(actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
-        self.assertEqual(primitive_actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
+        self.assertEqual(primitive_fixed_actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
+        self.assertEqual(primitive_calibrated_actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
+        self.assertEqual(primitive_actions.shape[0], 2 * len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
         self.assertEqual(primitive_payloads.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
-        self.assertEqual(set(primitive_actions["source"]), {"primitive_codex_cli_gpt-5.5"})
+        self.assertEqual(set(primitive_fixed_actions["source"]), {"primitive_fixed_codex_cli_gpt-5.5"})
+        self.assertEqual(set(primitive_calibrated_actions["source"]), {"primitive_codex_cli_gpt-5.5"})
+        self.assertEqual(calibration_report["calibration_split"], BEHAVIOR_SELECTION_SPLIT)
+        self.assertTrue(np.isfinite(float(calibration_report["objective_after"])))
         self.assertFalse(primitive_audit.empty)
         self.assertTrue(primitive_audit["passed"].all())
+        self.assertIn("small_lottery_higher_mpc_than_large", set(primitive_audit["audit_id"]))
         self.assertEqual(len(client.raw_records), 2 * len(BEHAVIOR_SCENARIOS))
         self.assertEqual(all_actions.groupby(["scenario_id", "source"])["type_id"].nunique().min(), type_cells.shape[0])
         use_sum = all_actions["total_spending_share"] + all_actions["debt_repayment_share"] + all_actions["liquid_saving_share"]
@@ -955,6 +985,8 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn("llm_codex_cli_gpt-5.5__residual_over_liquidity", set(ablations["source"]))
         self.assertEqual(ablations.groupby(["scenario_id", "source"])["type_id"].nunique().min(), type_cells.shape[0])
         self.assertFalse(scores.empty)
+        self.assertIn("evaluation_split", scores.columns)
+        self.assertEqual(set(scores[scores["target_family"] == "ALL"]["evaluation_split"]), {BEHAVIOR_SELECTION_SPLIT, BEHAVIOR_HOLDOUT_SPLIT})
         self.assertIn("debt_saving", set(scores["target_family"]))
         self.assertIn("directional_debt_saving", set(scores["target_family"]))
         self.assertIn("liquidity_gradient", set(scores["target_family"]))
@@ -963,7 +995,9 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(set(holdout_targets["evaluation_split"]), {BEHAVIOR_HOLDOUT_SPLIT})
         self.assertEqual(set(holdout_targets["target_scope"]), {"aggregate"})
         self.assertFalse(holdout_comparison.empty)
+        self.assertEqual(set(holdout_comparison["evaluation_split"]), {BEHAVIOR_HOLDOUT_SPLIT})
         self.assertEqual(prespecified_verdict["candidate_source"], "llm_codex_cli_gpt-5.5__liquidity_prior_50")
+        self.assertEqual(prespecified_verdict["evaluation_split"], BEHAVIOR_HOLDOUT_SPLIT)
         self.assertIn(
             prespecified_verdict["verdict"],
             {"holdout_beats_best_baseline", "holdout_ties_best_baseline", "holdout_loses_to_best_baseline"},
@@ -978,15 +1012,18 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(set(cell_joined["target_scope"]), {"cell"})
         self.assertFalse(baseline_comparison.empty)
         self.assertIn("best_baseline_source", baseline_comparison.columns)
+        self.assertIn("evaluation_split", baseline_comparison.columns)
         self.assertIn("rmse_range_delta_vs_baseline", baseline_comparison.columns)
         primitive_all = baseline_comparison[
             (baseline_comparison["target_scope"] == "aggregate")
+            & (baseline_comparison["evaluation_split"] == BEHAVIOR_SELECTION_SPLIT)
             & (baseline_comparison["target_family"] == "ALL")
             & (baseline_comparison["source"] == "primitive_codex_cli_gpt-5.5")
         ].iloc[0]
         self.assertEqual(primitive_all["source_kind"], "primitive")
         aggregate_all = baseline_comparison[
             (baseline_comparison["target_scope"] == "aggregate")
+            & (baseline_comparison["evaluation_split"] == BEHAVIOR_SELECTION_SPLIT)
             & (baseline_comparison["target_family"] == "ALL")
             & (baseline_comparison["source"] == "llm_codex_cli_gpt-5.5")
         ].iloc[0]
