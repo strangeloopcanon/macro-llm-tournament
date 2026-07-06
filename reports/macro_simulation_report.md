@@ -78,13 +78,15 @@ The persona panel asks whether data-grounded personas reproduce the cross-sectio
 
 Structure passes cleanly: all 24 demographic contrasts score with the correct sign, the median within-variance ratio is `1.1025` (no stereotype flattening), and the maximum cross-model common-core correlation is `0.8912`, below the `0.95` collapse threshold. Distribution shape fails: maximum KS statistic `0.7407` against a `0.35` threshold, driven by unemployment expectations (target mean `4.43`, models predict `5.22-5.34`) and upward-shifted inflation.
 
-The scope note that governs this section: the targets are synthetic, anchored to public aggregates. The panel validates the wiring and scoring machinery end to end; empirical persona claims wait on real respondent-level microdata (SCE or Michigan), which the harness already accepts.
+The scope note that governs this section: the targets are synthetic, anchored to public aggregates. The panel validates the wiring and scoring machinery end to end; empirical persona claims wait on real respondent-level microdata (SCE or Michigan).
+
+That real-data path is now prepared but not yet exercised on the actual file. The persona runner accepts SCE-style public microdata columns via `--survey-schema sce`, normalizes respondent ids, survey months, weights, demographics, and the three belief targets, and keeps `actual_*` response fields out of prompt cards. The holdout-prep CLI also accepts `--sce-microdata`, aligns SCE waves to the vintage FRED/SPF environment, writes static and panel holdouts, normalizes weights by period, and records `real_sce_microdata_v1` provenance. A five-row SCE-shaped smoke test passes with zero live calls. Phase 3b still blocks until `work/persona_beliefs/sce_real_microdata.csv` exists.
 
 ## What Comes Next
 
-1. **Real microdata for the persona layer.** This is the gating input for everything unproven. The 500-respondent, two-model design run is specified and costs about 1,000 calls once the data exists.
-2. **Prepare real SCE/Michigan microdata ingestion.** The code path needs to accept public SCE-style columns, normalize weights and dates, and smoke-test without live calls so the real file can drop in cleanly.
-3. **End-to-end comparator setup.** Once real microdata exists, feed calibrated persona beliefs through primitive v3 inside the demand economy and compare against the fixed adaptive-expectations twin on the post-cutoff FRED behavior proxy gate.
+1. **Drop in real SCE microdata and run the persona canary.** Once `work/persona_beliefs/sce_real_microdata.csv` exists, run the 4-call canary, inspect prompt cards for leakage, and pause before the 500-respondent, two-model design run.
+2. **Score the empirical persona layer.** The design run costs about 1,000 calls plus retry headroom. If distribution shape fails against real data, that is a headline result rather than a bug; only validation-fit, locked calibration may address level shifts.
+3. **End-to-end comparator setup.** Once the real persona layer is committed, feed persona beliefs through primitive v3 inside the demand economy and compare against the fixed adaptive-expectations twin on the post-cutoff FRED behavior proxy gate.
 4. **Let the post-cutoff forecast gate accrue.** Frozen post-cutoff cards get rescored as public data arrives, converting the forecast claim from recall-audit-defended to genuinely post-cutoff over time.
 
 The forecast audit — baselines, bootstrap intervals, DM-style tests, both recall probes, belief-structure audit, cutoff status — stays fixed in this report as the evidence base.

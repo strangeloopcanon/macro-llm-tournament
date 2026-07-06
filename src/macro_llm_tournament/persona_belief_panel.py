@@ -22,6 +22,7 @@ from .llm_common import LLMUnavailable
 
 PERSONA_BELIEF_PANEL_VERSION = "persona_belief_panel_v1"
 PERSONA_BELIEF_PROMPT_VERSION = "persona_belief_panel_v1"
+SURVEY_SCHEMAS = ("normalized", "sce")
 DEFAULT_TARGET_FIELDS = (
     "expected_inflation_1y",
     "expected_unemployment_rate",
@@ -91,6 +92,52 @@ RESPONDENT_COLUMNS = [
     "homeownership",
     "liquid_wealth_group",
 ]
+SCE_ALIASES: dict[str, tuple[str, ...]] = {
+    "respondent_id": ("respondent_id", "caseid", "case_id", "userid", "user_id", "id", "hhid", "pid"),
+    "survey_date": ("survey_date", "date", "interview_date", "yyyymm", "survey_month", "wave"),
+    "weight": ("weight", "wt", "sample_weight", "final_weight", "pweight", "hhweight", "weight_final"),
+    "age": ("age", "respondent_age", "rage"),
+    "age_group": ("age_group", "agecat", "agegrp", "age_bucket"),
+    "income": ("income", "hhinc", "household_income", "income_numeric"),
+    "income_group": ("income_group", "income_quartile", "income_bucket", "income_cat", "hhinc_cat"),
+    "education": ("education", "educ", "education_level", "educ_cat"),
+    "education_group": ("education_group", "educ_group", "education_bucket"),
+    "gender": ("gender", "sex", "respondent_gender"),
+    "female": ("female", "is_female"),
+    "region": ("region", "census_region", "region4"),
+    "employment_status": ("employment_status", "employment", "labor_status", "work_status"),
+    "homeownership": ("homeownership", "housing_tenure", "tenure", "home_owner", "homeowner"),
+    "liquid_wealth": ("liquid_wealth", "liquid_assets", "checking_savings", "cash_on_hand"),
+    "liquid_wealth_group": ("liquid_wealth_group", "liquid_assets_group", "liquidity_group"),
+    "actual_expected_inflation_1y": (
+        "actual_expected_inflation_1y",
+        "expected_inflation_1y",
+        "inflation_expectation_1y",
+        "inflation_1y",
+        "q9_mean",
+        "q9mean",
+        "q8_mean",
+        "px1",
+        "px1_mean",
+    ),
+    "actual_expected_unemployment_rate": (
+        "actual_expected_unemployment_rate",
+        "expected_unemployment_rate",
+        "unemployment_expectation",
+        "unemp_expectation",
+        "unemployment_1y",
+        "jobloss_mean",
+        "unemp_mean",
+    ),
+    "actual_expected_real_income_growth": (
+        "actual_expected_real_income_growth",
+        "expected_real_income_growth",
+        "real_income_growth",
+        "income_growth_expectation",
+        "earnings_growth",
+        "earnings_mean",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -113,6 +160,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--respondent-source", choices=["fixture", "csv"], default="fixture")
     parser.add_argument("--respondent-csv", default=None)
+    parser.add_argument("--survey-schema", choices=SURVEY_SCHEMAS, default="normalized")
     parser.add_argument("--respondent-count", type=int, default=54)
     parser.add_argument("--respondent-limit", type=int, default=0)
     parser.add_argument("--survey-date", default="2026-01-01")
@@ -158,6 +206,7 @@ def main() -> int:
         respondent_count=args.respondent_count,
         survey_date=args.survey_date,
         target_fields=target_fields,
+        survey_schema=args.survey_schema,
     )
     respondents = _anonymize_csv_respondent_ids(respondents) if args.respondent_source == "csv" else respondents
     respondents = _limit_static_respondents(respondents, args.respondent_limit)
@@ -191,6 +240,7 @@ def main() -> int:
         "explicit_cache_dir": bool(args.cache_dir),
         "cache_dir": _safe_relative(cache_dir),
         "respondent_source": args.respondent_source,
+        "survey_schema": args.survey_schema,
         "respondent_input": respondent_input,
         "respondent_count": int(respondents.shape[0]),
         "respondent_limit": int(args.respondent_limit),
@@ -357,16 +407,177 @@ def load_persona_respondents(
     respondent_count: int,
     survey_date: str,
     target_fields: Iterable[str],
+    survey_schema: str = "normalized",
 ) -> pd.DataFrame:
     if source == "fixture":
         return build_fixture_respondent_panel(respondent_count=respondent_count, survey_date=survey_date, target_fields=target_fields)
     if respondent_csv is None:
         raise ValueError("--respondent-csv is required when --respondent-source csv")
     frame = pd.read_csv(respondent_csv)
+    if survey_schema == "sce":
+        return normalize_sce_respondent_panel(frame, target_fields=target_fields)
+    if survey_schema != "normalized":
+        raise ValueError(f"Unsupported survey schema: {survey_schema}")
     return normalize_respondent_panel(frame, target_fields=target_fields)
 
 
-def normalize_respondent_panel(frame: pd.DataFrame, *, target_fields: Iterable[str]) -> pd.DataFrame:
+def normalize_sce_respondent_panel(
+    frame: pd.DataFrame,
+    *,
+    target_fields: Iterable[str],
+    require_unique_respondents: bool = True,
+) -> pd.DataFrame:
+    out = _standardize_sce_aliases(frame)
+    if "respondent_id" not in out:
+        out["respondent_id"] = [f"sce_respondent_{idx + 1:05d}" for idx in range(out.shape[0])]
+    if "survey_date" not in out:
+        out["survey_date"] = "unknown"
+    out["survey_date"] = _normalize_survey_dates(out["survey_date"])
+    if "weight" not in out:
+        out["weight"] = 1.0
+    if "survey_source" not in out:
+        out["survey_source"] = "ny_fed_sce_microdata"
+
+    out["age_group"] = _coalesce_text(out, "age_group", _age_group_from_numeric(out.get("age")))
+    out["income_group"] = _coalesce_text(out, "income_group", _income_group_from_numeric(out.get("income")))
+    out["education_group"] = _coalesce_text(out, "education_group", _education_group_from_raw(out.get("education")))
+    out["gender"] = _coalesce_text(out, "gender", _gender_from_raw(out.get("female")))
+    out["region"] = _coalesce_text(out, "region", pd.Series("unknown", index=out.index))
+    out["employment_status"] = _coalesce_text(out, "employment_status", pd.Series("unknown", index=out.index))
+    out["homeownership"] = _coalesce_text(out, "homeownership", pd.Series("unknown", index=out.index))
+    out["liquid_wealth_group"] = _coalesce_text(out, "liquid_wealth_group", _income_group_from_numeric(out.get("liquid_wealth")))
+
+    return normalize_respondent_panel(out, target_fields=target_fields, require_unique_respondents=require_unique_respondents)
+
+
+def _standardize_sce_aliases(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    normalized = {_normalize_name(column): column for column in out.columns}
+    for canonical, aliases in SCE_ALIASES.items():
+        if canonical in out:
+            continue
+        source = next((normalized[_normalize_name(alias)] for alias in aliases if _normalize_name(alias) in normalized), None)
+        if source is not None:
+            out[canonical] = out[source]
+    return out
+
+
+def _normalize_name(value: str) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def _normalize_survey_dates(series: pd.Series) -> pd.Series:
+    text = series.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    yyyymm = text.str.fullmatch(r"\d{6}")
+    normalized = pd.Series(pd.NA, index=series.index, dtype="object")
+    if yyyymm.any():
+        normalized.loc[yyyymm] = text.loc[yyyymm].str.slice(0, 4) + "-" + text.loc[yyyymm].str.slice(4, 6) + "-01"
+    if (~yyyymm).any():
+        parsed = pd.to_datetime(text.loc[~yyyymm], errors="coerce")
+        normalized.loc[~yyyymm] = parsed.dt.date.astype(str).where(parsed.notna(), "unknown")
+    return normalized.fillna("unknown").astype(str)
+
+
+def _coalesce_text(frame: pd.DataFrame, column: str, fallback: pd.Series) -> pd.Series:
+    if fallback.empty:
+        fallback = pd.Series("unknown", index=frame.index)
+    if column not in frame:
+        return fallback.reindex(frame.index).fillna("unknown").astype(str).map(_normalize_label)
+    series = frame[column]
+    return series.where(series.notna(), fallback.reindex(frame.index)).fillna("unknown").astype(str).map(_normalize_label)
+
+
+def _normalize_label(value: Any) -> str:
+    text = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    if not text or text in {"nan", "none", "<na>"}:
+        return "unknown"
+    replacements = {
+        "college": "college_plus",
+        "ba_plus": "college_plus",
+        "bachelor": "college_plus",
+        "bachelor_or_more": "college_plus",
+        "graduate": "college_plus",
+        "postgraduate": "college_plus",
+        "high_school": "high_school_or_less",
+        "high_school_or_lower": "high_school_or_less",
+        "hs_or_less": "high_school_or_less",
+        "not_college": "high_school_or_less",
+        "less_than_high_school": "high_school_or_less",
+        "some_college_or_associate": "some_college",
+        "associate": "some_college",
+        "owner": "owner",
+        "own": "owner",
+        "homeowner": "owner",
+        "renter": "renter",
+        "rent": "renter",
+    }
+    return replacements.get(text, text)
+
+
+def _age_group_from_numeric(series: pd.Series | None) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype=str)
+    numeric = pd.to_numeric(series, errors="coerce")
+    return pd.Series(
+        np.select([numeric < 35, numeric < 55, numeric >= 55], ["18_34", "35_54", "55_plus"], default="unknown"),
+        index=series.index,
+    )
+
+
+def _income_group_from_numeric(series: pd.Series | None) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype=str)
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.notna().sum() < 3:
+        return pd.Series("unknown", index=series.index)
+    q33 = float(numeric.quantile(0.33))
+    q67 = float(numeric.quantile(0.67))
+    return pd.Series(
+        np.select([numeric <= q33, numeric >= q67], ["low", "high"], default="middle"),
+        index=series.index,
+    )
+
+
+def _education_group_from_raw(series: pd.Series | None) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype=str)
+    text = series.astype(str).str.lower()
+    numeric = pd.to_numeric(series, errors="coerce")
+    return pd.Series(
+        np.select(
+            [
+                text.str.contains("college|bachelor|ba|graduate|post", regex=True) | (numeric >= 16),
+                text.str.contains("some|associate", regex=True) | ((numeric > 12) & (numeric < 16)),
+                text.str.contains("high|hs|less", regex=True) | (numeric <= 12),
+            ],
+            ["college_plus", "some_college", "high_school_or_less"],
+            default="unknown",
+        ),
+        index=series.index,
+    )
+
+
+def _gender_from_raw(series: pd.Series | None) -> pd.Series:
+    if series is None:
+        return pd.Series(dtype=str)
+    text = series.astype(str).str.lower()
+    numeric = pd.to_numeric(series, errors="coerce")
+    return pd.Series(
+        np.select(
+            [text.str.startswith("f") | numeric.eq(1), text.str.startswith("m") | numeric.eq(0)],
+            ["female", "male"],
+            default="unknown",
+        ),
+        index=series.index,
+    )
+
+
+def normalize_respondent_panel(
+    frame: pd.DataFrame,
+    *,
+    target_fields: Iterable[str],
+    require_unique_respondents: bool = True,
+) -> pd.DataFrame:
     out = frame.copy()
     if "respondent_id" not in out:
         out["respondent_id"] = [f"respondent_{idx + 1:05d}" for idx in range(out.shape[0])]
@@ -402,7 +613,7 @@ def normalize_respondent_panel(frame: pd.DataFrame, *, target_fields: Iterable[s
     for column in RESPONDENT_COLUMNS:
         if column != "weight":
             out[column] = out[column].fillna("unknown").astype(str)
-    if out["respondent_id"].duplicated().any():
+    if require_unique_respondents and out["respondent_id"].duplicated().any():
         duplicates = sorted(out.loc[out["respondent_id"].duplicated(), "respondent_id"].astype(str).unique())[:5]
         raise ValueError(f"Respondent panel has duplicate respondent_id values: {', '.join(duplicates)}")
     return out.reset_index(drop=True)

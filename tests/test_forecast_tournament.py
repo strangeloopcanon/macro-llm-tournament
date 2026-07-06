@@ -111,6 +111,7 @@ from macro_llm_tournament.persona_belief_panel import (
     build_persona_cards,
     classify_persona_evidence,
     normalize_respondent_panel,
+    normalize_sce_respondent_panel,
     persona_belief_prompt,
     run_persona_beliefs,
     score_common_core,
@@ -2014,6 +2015,132 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(verdict["evidence_verdict"], "partial_flattening_and_common_core_failure")
         self.assertIn("distribution_clear", verdict)
 
+    def test_sce_normalizer_maps_public_columns_without_prompt_target_leakage(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "caseid": f"real_person_{idx}",
+                    "yyyymm": 202501,
+                    "weight_final": 1.0 + idx,
+                    "age": age,
+                    "hhinc": income,
+                    "educ": education,
+                    "female": female,
+                    "region": region,
+                    "employment": employment,
+                    "homeowner": tenure,
+                    "liquid_assets": liquid,
+                    "q9mean": inflation,
+                    "unemp_mean": unemployment,
+                    "earnings_mean": income_growth,
+                }
+                for idx, (age, income, education, female, region, employment, tenure, liquid, inflation, unemployment, income_growth) in enumerate(
+                    [
+                        (26, 25000, 12, 1, "northeast", "employed", "rent", 250, 3.25, 5.6, 1.1),
+                        (39, 52000, 14, 0, "midwest", "employed", "own", 2000, 3.75, 5.1, 1.6),
+                        (58, 105000, 16, 1, "south", "retired", "own", 12000, 4.10, 4.8, 0.7),
+                        (44, 76000, 18, 0, "west", "unemployed", "rent", 900, 4.40, 7.2, -0.8),
+                        (31, 38000, 13, 1, "south", "employed", "rent", 600, 3.55, 5.4, 1.3),
+                    ],
+                    start=1,
+                )
+            ]
+        )
+
+        normalized = normalize_sce_respondent_panel(raw, target_fields=["expected_inflation_1y", "expected_unemployment_rate", "expected_real_income_growth"])
+        card = build_persona_cards(normalized, target_fields=["expected_inflation_1y", "expected_unemployment_rate", "expected_real_income_growth"])[0]
+        prompt = persona_belief_prompt(
+            card,
+            target_fields=["expected_inflation_1y", "expected_unemployment_rate", "expected_real_income_growth"],
+        )
+
+        self.assertEqual(normalized.shape[0], 5)
+        self.assertAlmostEqual(float(normalized["weight"].sum()), 1.0)
+        self.assertEqual(set(normalized["survey_source"]), {"ny_fed_sce_microdata"})
+        self.assertEqual(set(normalized["survey_date"]), {"2025-01-01"})
+        self.assertIn("actual_expected_inflation_1y", normalized)
+        self.assertIn("low", set(normalized["income_group"]))
+        self.assertIn("high", set(normalized["income_group"]))
+        self.assertNotIn("actual_expected_inflation_1y", prompt)
+        self.assertNotIn("q9mean", prompt)
+        self.assertNotIn("3.25", prompt)
+
+    def test_persona_belief_panel_sce_csv_cli_smoke(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            csv_path = temp_path / "sce_sample.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "caseid": f"person_{idx}",
+                        "yyyymm": 202501,
+                        "weight_final": 1.0,
+                        "age": age,
+                        "hhinc": income,
+                        "educ": education,
+                        "female": female,
+                        "region": "midwest",
+                        "employment": "employed",
+                        "homeowner": "rent",
+                        "liquid_assets": liquid,
+                        "q9mean": inflation,
+                        "unemp_mean": unemployment,
+                        "earnings_mean": income_growth,
+                    }
+                    for idx, (age, income, education, female, liquid, inflation, unemployment, income_growth) in enumerate(
+                        [
+                            (25, 26000, 12, 1, 200, 3.1, 5.5, 1.0),
+                            (36, 52000, 14, 0, 1200, 3.4, 5.2, 1.4),
+                            (49, 78000, 16, 1, 6000, 3.8, 4.8, 1.8),
+                            (61, 110000, 18, 0, 16000, 4.2, 4.6, 0.9),
+                            (33, 43000, 13, 1, 900, 3.5, 5.1, 1.2),
+                        ],
+                        start=1,
+                    )
+                ]
+            ).to_csv(csv_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_belief_panel",
+                    "--belief-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5",
+                    "--respondent-source",
+                    "csv",
+                    "--survey-schema",
+                    "sce",
+                    "--respondent-csv",
+                    str(csv_path),
+                    "--respondent-limit",
+                    "5",
+                    "--target-fields",
+                    "expected_inflation_1y,expected_unemployment_rate,expected_real_income_growth",
+                    "--output-dir",
+                    str(temp_path / "out"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((temp_path / "out" / "manifest.json").read_text(encoding="utf-8"))
+            prompts = (temp_path / "out" / "persona_prompt_cards.jsonl").read_text(encoding="utf-8")
+            self.assertEqual(manifest["status"], "ok")
+            self.assertEqual(manifest["survey_schema"], "sce")
+            self.assertEqual(manifest["respondent_count"], 5)
+            self.assertTrue(manifest["respondent_input"]["respondent_ids_anonymized"])
+            self.assertNotIn("actual_expected_inflation_1y", prompts)
+            self.assertNotIn("q9mean", prompts)
+
     def test_persona_variance_score_detects_flattened_within_group_spread(self):
         respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="2026-01-01")
         rows = []
@@ -2773,6 +2900,175 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertTrue(panel["target_provenance"].str.contains("synthetic").all())
             self.assertIn("observed_inflation_1y", panel)
             self.assertEqual(panel["period_id"].nunique(), 2)
+
+    def test_prepare_persona_holdouts_builds_real_sce_panel_when_microdata_supplied(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            survey_path = temp_path / "survey.csv"
+            origins_path = temp_path / "origins.csv"
+            vintage_path = temp_path / "vintage.csv"
+            sce_path = temp_path / "sce_real_microdata.csv"
+            output_dir = temp_path / "out"
+            pd.DataFrame(
+                [
+                    {
+                        "survey_source": "ny_fed_sce",
+                        "target_name": "median_expected_inflation",
+                        "date": "2024-12-01",
+                        "horizon_months": 12,
+                        "value": 3.2,
+                        "units": "percent",
+                        "source_url": "local",
+                    },
+                    {
+                        "survey_source": "ny_fed_sce",
+                        "target_name": "p25_expected_inflation",
+                        "date": "2024-12-01",
+                        "horizon_months": 12,
+                        "value": 2.0,
+                        "units": "percent",
+                        "source_url": "local",
+                    },
+                    {
+                        "survey_source": "ny_fed_sce",
+                        "target_name": "p75_expected_inflation",
+                        "date": "2024-12-01",
+                        "horizon_months": 12,
+                        "value": 4.9,
+                        "units": "percent",
+                        "source_url": "local",
+                    },
+                ]
+            ).to_csv(survey_path, index=False)
+            pd.DataFrame(
+                [
+                    {"origin": "2025:M01", "as_of_date": "2025-01-15", "split": "test"},
+                    {"origin": "2025:M02", "as_of_date": "2025-02-15", "split": "test"},
+                ]
+            ).to_csv(origins_path, index=False)
+            rows = []
+            for origin, as_of, unemployment, policy in [
+                ("2025:M01", "2025-01-15", 4.1, 4.7),
+                ("2025:M02", "2025-02-15", 4.3, 4.6),
+            ]:
+                for date, cpi, gdp in [
+                    ("2024-01-01", 300.0, 22400.0),
+                    ("2025-01-01", 309.0, 23100.0),
+                ]:
+                    rows.append(
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "CPIAUCSL",
+                            "label": "CPI level",
+                            "observation_date": date,
+                            "value": cpi,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        }
+                    )
+                    rows.append(
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "GDPC1",
+                            "label": "Real GDP",
+                            "observation_date": date,
+                            "value": gdp,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        }
+                    )
+                rows.extend(
+                    [
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "UNRATE",
+                            "label": "Unemployment",
+                            "observation_date": "2025-01-01",
+                            "value": unemployment,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        },
+                        {
+                            "origin": origin,
+                            "as_of_date": as_of,
+                            "series_id": "FEDFUNDS",
+                            "label": "Fed funds",
+                            "observation_date": "2025-01-01",
+                            "value": policy,
+                            "realtime_start": as_of,
+                            "realtime_end": as_of,
+                        },
+                    ]
+                )
+            pd.DataFrame(rows).to_csv(vintage_path, index=False)
+            sce_rows = []
+            for wave in [202501, 202502]:
+                for idx, income in enumerate([25000, 62000, 115000], start=1):
+                    sce_rows.append(
+                        {
+                            "caseid": f"case_{idx}",
+                            "yyyymm": wave,
+                            "weight_final": float(idx),
+                            "age": [28, 44, 63][idx - 1],
+                            "hhinc": income,
+                            "educ": [12, 14, 18][idx - 1],
+                            "female": idx % 2,
+                            "region": "west",
+                            "employment": "employed",
+                            "homeowner": "own" if idx > 1 else "rent",
+                            "liquid_assets": [300, 1800, 18000][idx - 1],
+                            "q9mean": 3.0 + idx / 10.0,
+                            "unemp_mean": 5.0 + idx / 10.0,
+                            "earnings_mean": 1.0 + idx / 10.0,
+                        }
+                    )
+            pd.DataFrame(sce_rows).to_csv(sce_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.prepare_persona_holdouts",
+                    "--survey-beliefs",
+                    str(survey_path),
+                    "--forecast-origins",
+                    str(origins_path),
+                    "--fred-vintage-context",
+                    str(vintage_path),
+                    "--sce-microdata",
+                    str(sce_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--period-count",
+                    "2",
+                    "--start-as-of",
+                    "2025-01-01",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            static = pd.read_csv(output_dir / "sce_micro_holdout.csv")
+            panel = pd.read_csv(output_dir / "sce_panel_holdout.csv")
+            manifest = json.loads((output_dir / "persona_holdout_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["panel_kind"], "real_sce_microdata_v1")
+            self.assertEqual(manifest["target_provenance"], "public_ny_fed_sce_microdata_responses")
+            self.assertEqual(static.shape[0], 3)
+            self.assertEqual(panel.shape[0], 6)
+            self.assertEqual(panel["period_id"].tolist()[:3], ["sce_2025_01"] * 3)
+            self.assertEqual(panel["period_id"].tolist()[3:], ["sce_2025_02"] * 3)
+            self.assertTrue(panel["target_provenance"].eq("public_ny_fed_sce_microdata_responses").all())
+            self.assertTrue(panel["observed_unemployment_rate"].notna().all())
+            for _, group in panel.groupby("period_id"):
+                self.assertAlmostEqual(float(group["weight"].sum()), 1.0)
+            self.assertAlmostEqual(float(static["weight"].sum()), 1.0)
 
     def test_persona_holdout_default_covers_income_and_liquidity_contrasts(self):
         respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="synthetic_enriched")
