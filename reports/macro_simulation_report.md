@@ -6,7 +6,7 @@ The belief engine result survived the harder audit. On the 147-card date-free vi
 
 The stronger statement is now this: the models are not just remembering exact realized values. In the live recall audit, both models gave zero usable exact realized-value recalls across the 147 cards. They do show some memory of broad macro regimes, but the qualitative recall edge is small. That leaves the belief forecast result standing as a real signal, while keeping the contamination claim narrow.
 
-The agent-behavior claim is still not done. The behavior economy passes accounting and mechanism checks, and the live synthetic-SCE persona panel now clears demographic-gradient and spread checks. The live behavior gate now has an explicit holdout: lottery-windfall targets from Fagereng-Holm-Natvik that were not used to select the 50 percent liquidity-prior blend. That pre-specified blend fails the holdout. Raw GPT-5.5 does better on the new lottery shock-size and liquidity-gradient targets, but it still loses the cell-level EIP MPC surface.
+The agent-behavior claim is still not done, but the failure mode is sharper now. The behavior economy passes accounting and mechanism checks, and the live synthetic-SCE persona panel now clears demographic-gradient and spread checks. The live behavior gate now has an explicit holdout: lottery-windfall targets from Fagereng-Holm-Natvik that were not used to select the 50 percent liquidity-prior blend. That pre-specified blend fails the holdout. A new primitive-to-action path does better: GPT-5.5 emits bounded behavioral primitives, deterministic code maps those primitives to spending, saving, and debt repayment through a fixed policy kernel, and that primitive-driven source beats the best rule baseline on the lottery aggregate holdout. It still loses the cell-level EIP MPC surface, and raw GPT-5.5 remains better than the primitive path on the aggregate holdout.
 
 ## What Was Run
 
@@ -16,7 +16,7 @@ The agent-behavior claim is still not done. The behavior economy passes accounti
 - Recall audit: exact realized-value recall plus qualitative path recall on the same 147 cards.
 - Belief-structure audit: underreaction, extrapolation, direction, confidence, and error structure.
 - Persona/SCE panel: 54 synthetic-enriched SCE-style respondents, 2 models, 108 total model responses: 72 cache hits from the prior live panel plus 36 new Codex live calls.
-- Behavior economy: HANK-lite demand economy with deterministic accounting and bounded belief inputs, plus a live GPT-5.5 behavior gate scored against rule baselines. The current behavior run has six scenario prompts: three prior cache hits and three new live lottery-windfall holdout calls.
+- Behavior economy: HANK-lite demand economy with deterministic accounting and bounded belief inputs, plus a live GPT-5.5 behavior gate scored against rule baselines. The current behavior gate scores raw allocation prompts, fixed blend ablations, and a new primitive-to-action path on the same six scenarios. Raw allocation prompts were replayed from six cache hits; the primitive path used six fresh Codex live calls.
 
 The test targets run from `2020-01-01` to `2025-02-01`. Against the user-supplied GPT-5.4 cutoff of `2025-08-31`, `0/147` cards are post-cutoff. Against the Codex GPT-5 cutoff of `2024-09-30`, `14/147` cards are post-cutoff. So this is a hidden-target, date-free vintage test, not a clean post-cutoff test for the frontier models.
 
@@ -93,7 +93,13 @@ The first live GPT-5.5 behavior gate showed raw LLM behavior losing to the liqui
 
 The follow-up gate freezes the 50 percent liquidity-prior blend and scores it on new lottery-windfall holdout targets. It fails. The pre-specified blend has holdout range RMSE `0.3857` versus the best rule baseline, the flat 30 percent rule, at `0.2608`; the delta is `0.1250`.
 
-Raw GPT-5.5 does better on that new holdout: holdout range RMSE `0.0844`, beating the flat rule by `0.1763`. The useful behavioral signal is therefore not "add a fixed 50 percent liquidity prior." It is more specific: the raw model appears to recognize windfall shock size and lottery-liquidity heterogeneity, while the fixed blend over-regularizes it back toward a stimulus-style liquidity rule. Raw GPT-5.5 still loses the cell-level EIP MPC target surface: range RMSE `0.0387` versus the liquidity rule at `0.0272`.
+The primitive-to-action run was added to avoid hiding the problem inside blend weights. GPT-5.5 now emits bounded primitives: perceived job-loss risk, expected income growth, precautionary saving motive, liquidity stress, debt-repayment urgency, durable purchase pull-forward, shock size, and confidence. Deterministic code then maps those primitives into spending, debt repayment, and liquid saving. The mapping is recorded in the run manifest as `primitive_to_action_policy_fixed_theory_v1`, with source label `fixed_theory_coefficients_no_target_fit`; this run treats those coefficients as fixed inputs, not fitted outputs.
+
+That primitive path clears its mechanism audit. Liquidity stress raises MPC, precaution raises liquid saving, job risk raises liquid saving, debt urgency raises repayment, larger windfalls lower MPC, and low-liquidity EIP cells spend more than high-liquidity cells in the emitted actions.
+
+The score is mixed. Raw GPT-5.5 is still the best behavior source on the aggregate surface: range RMSE `0.0789` across `16` aggregate targets versus the best rule baseline at `0.5262`. The primitive path also beats that aggregate rule baseline, but by less: range RMSE `0.4160`, a `20.95%` improvement versus the flat 30 percent rule. On the pre-specified lottery aggregate holdout, raw GPT-5.5 has range RMSE `0.0844`, primitive-driven GPT-5.5 has `0.1329`, and the flat rule baseline has `0.2608`. So the primitive architecture is real enough to beat the rule baseline on the lottery holdout, but it is not yet better than raw GPT behavior.
+
+The granular behavior problem remains. Raw GPT-5.5 still loses the cell-level EIP MPC target surface: range RMSE `0.0387` versus the liquidity rule at `0.0272`. The primitive path is worse there, with range RMSE `0.1145`. The primitive kernel makes the action channel interpretable, but the current coefficients and/or primitive prompts do not yet reproduce the cell-level liquidity MPC shape.
 
 It does not yet mean the simulated economy predicts real macro behavior better than a strong empirical model. The missing bridge is still behavior validation: the next calibrated behavior mechanism has to be pre-specified, scored separately from raw LLM behavior, and tested on targets it did not select against.
 
@@ -101,7 +107,7 @@ It does not yet mean the simulated economy predicts real macro behavior better t
 
 The sendable claim is:
 
-> On a 147-card held-out, date-free vintage macro split, raw GPT-5.5 and GPT-5.4 belief forecasts beat no-change, rolling mean, rolling trend, AR(2), and recursive least-squares baselines in aggregate. The win survives origin-cluster bootstrapping. Live recall probes show zero exact realized-value recall and only modest qualitative path recall. The behavior economy is accounting-safe and mechanism-complete, but the behavior result is mixed: raw GPT-5.5 beats rule baselines on new lottery-windfall holdout targets, loses the cell-level EIP MPC surface, and the pre-specified 50 percent liquidity-prior blend fails its holdout. The persona/behavior layer still needs real microdata and a pre-specified calibrated mechanism before we can claim broad macro-agent predictive validity.
+> On a 147-card held-out, date-free vintage macro split, raw GPT-5.5 and GPT-5.4 belief forecasts beat no-change, rolling mean, rolling trend, AR(2), and recursive least-squares baselines in aggregate. The win survives origin-cluster bootstrapping. Live recall probes show zero exact realized-value recall and only modest qualitative path recall. The behavior economy is accounting-safe and mechanism-complete. The behavior result is now mixed in a more diagnostic way: raw GPT-5.5 beats rule baselines on new lottery-windfall holdout targets, the interpretable primitive-to-action path also beats the rule baseline on that aggregate holdout, the pre-specified 50 percent liquidity-prior blend fails, and both raw and primitive paths still lose the cell-level EIP MPC surface. The persona/behavior layer still needs real microdata and a calibrated primitive mechanism before we can claim broad macro-agent predictive validity.
 
 The next claim is not ready:
 
@@ -113,7 +119,8 @@ The next work should not add more agent theater. It should make the belief-to-be
 
 1. Replace the synthetic persona panel with real respondent-level microdata, or treat the current 54-row panel strictly as a wiring fixture. The synthetic coverage issue is fixed; the empirical data issue is not.
 2. Calibrate the persona belief layer on validation only, targeting obvious level shifts and distribution shape without chasing a synthetic KS threshold. The immediate misses are unemployment level/shape and inflation compression.
-3. Retire the fixed 50 percent liquidity-prior blend as the leading mechanism. The next behavior mechanism should preserve the raw model's shock-size/liquidity signal while imposing accounting and feasibility, then score raw and calibrated variants separately on new targets.
-4. Keep the current forecast audit fixed in the report: AR(2), RLS, bootstrap intervals, DM-style tests, exact recall, qualitative recall, belief-structure audit, and cutoff status.
+3. Retire the fixed 50 percent liquidity-prior blend as the leading mechanism. Keep it only as an ablation.
+4. Keep the primitive-to-action architecture, but treat `primitive_to_action_policy_fixed_theory_v1` as a first kernel, not the final one. The next kernel should preserve the raw model's shock-size/liquidity signal, fix the cell-level EIP MPC miss, and lock any coefficient changes on validation targets before touching the lottery holdout again.
+5. Keep the current forecast audit fixed in the report: AR(2), RLS, bootstrap intervals, DM-style tests, exact recall, qualitative recall, belief-structure audit, and cutoff status.
 
 That is the path from "the belief engine contains signal" to "the simulated economy produces useful macro behavior."

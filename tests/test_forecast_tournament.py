@@ -33,9 +33,13 @@ from macro_llm_tournament.behavior_gate import (
     behavior_targets_frame,
     build_behavior_baseline_comparison,
     fixture_behavior_payload,
+    fixture_behavior_primitive_payload,
     join_cell_behavior_target_errors,
     normalize_behavior_payload,
+    normalize_behavior_primitive_payload,
     prespecified_behavior_holdout_verdict,
+    primitive_behavior_sign_audit,
+    run_primitive_behavior_gate,
     run_behavior_ablations,
     run_behavior_controls,
     run_behavior_gate,
@@ -908,9 +912,16 @@ class ForecastTournamentTests(unittest.TestCase):
         client = BehaviorLLMClient("codex_cli", "gpt-5.5", Path("/tmp/unused"), mode="fixture", max_live_calls=0)
 
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=client)
+        primitive_actions, primitive_payloads = run_primitive_behavior_gate(
+            BEHAVIOR_SCENARIOS,
+            type_cells,
+            llm_client=client,
+            primitive_mode="fixture",
+        )
+        primitive_audit = primitive_behavior_sign_audit(primitive_actions, primitive_payloads)
         controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
         ablations = run_behavior_ablations(pd.concat([actions, controls], ignore_index=True))
-        all_actions = pd.concat([actions, controls, ablations], ignore_index=True)
+        all_actions = pd.concat([actions, primitive_actions, controls, ablations], ignore_index=True)
         aggregates = aggregate_behavior_actions(all_actions)
         scores = score_behavior_targets(aggregates, behavior_targets_frame())
         cell_targets = behavior_targets_frame(target_scope="cell")
@@ -930,7 +941,12 @@ class ForecastTournamentTests(unittest.TestCase):
         raw_aggregate_verdict = behavior_baseline_verdict(baseline_comparison, target_scope="aggregate", source_kinds=("llm",))
 
         self.assertEqual(actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
-        self.assertEqual(len(client.raw_records), len(BEHAVIOR_SCENARIOS))
+        self.assertEqual(primitive_actions.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
+        self.assertEqual(primitive_payloads.shape[0], len(BEHAVIOR_SCENARIOS) * type_cells.shape[0])
+        self.assertEqual(set(primitive_actions["source"]), {"primitive_codex_cli_gpt-5.5"})
+        self.assertFalse(primitive_audit.empty)
+        self.assertTrue(primitive_audit["passed"].all())
+        self.assertEqual(len(client.raw_records), 2 * len(BEHAVIOR_SCENARIOS))
         self.assertEqual(all_actions.groupby(["scenario_id", "source"])["type_id"].nunique().min(), type_cells.shape[0])
         use_sum = all_actions["total_spending_share"] + all_actions["debt_repayment_share"] + all_actions["liquid_saving_share"]
         self.assertLessEqual(float(use_sum.max()), 1.000001)
@@ -963,6 +979,12 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertFalse(baseline_comparison.empty)
         self.assertIn("best_baseline_source", baseline_comparison.columns)
         self.assertIn("rmse_range_delta_vs_baseline", baseline_comparison.columns)
+        primitive_all = baseline_comparison[
+            (baseline_comparison["target_scope"] == "aggregate")
+            & (baseline_comparison["target_family"] == "ALL")
+            & (baseline_comparison["source"] == "primitive_codex_cli_gpt-5.5")
+        ].iloc[0]
+        self.assertEqual(primitive_all["source_kind"], "primitive")
         aggregate_all = baseline_comparison[
             (baseline_comparison["target_scope"] == "aggregate")
             & (baseline_comparison["target_family"] == "ALL")
@@ -1082,6 +1104,21 @@ class ForecastTournamentTests(unittest.TestCase):
 
         with self.assertRaises(LLMUnavailable):
             normalize_behavior_payload(scenario, type_cells, {"payload": payload})
+
+    def test_primitive_behavior_payload_rejects_final_allocation_fields(self):
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        scenario = BEHAVIOR_SCENARIOS[0]
+        payload = fixture_behavior_primitive_payload(scenario, type_cells)
+        payload["household_primitives"][0]["total_spending_share"] = 0.25
+
+        with self.assertRaises(LLMUnavailable):
+            normalize_behavior_primitive_payload(scenario, type_cells, {"payload": payload})
+
+        payload = fixture_behavior_primitive_payload(scenario, type_cells)
+        payload["household_actions"] = fixture_behavior_payload(scenario, type_cells)["household_actions"]
+
+        with self.assertRaises(LLMUnavailable):
+            normalize_behavior_primitive_payload(scenario, type_cells, {"payload": payload})
 
     def test_demand_economy_fixture_clears_dynamic_behavior_validation(self):
         with TemporaryDirectory() as temp_dir:

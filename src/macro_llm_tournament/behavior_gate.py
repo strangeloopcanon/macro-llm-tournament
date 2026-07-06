@@ -17,8 +17,10 @@ from .agent_types import build_household_type_cells
 from .llm_common import LLMUnavailable
 
 
-BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v2"
+BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v3"
 BEHAVIOR_PROMPT_VERSION = "household_behavior_target_gate_v1"
+BEHAVIOR_PRIMITIVE_PROMPT_VERSION = "household_behavior_primitives_v1"
+BEHAVIOR_PRIMITIVE_POLICY_VERSION = "primitive_to_action_policy_fixed_theory_v1"
 TARGET_CATALOG_PACKAGE = "macro_llm_tournament"
 TARGET_CATALOG_RESOURCE = "data/public_behavior_targets.csv"
 BEHAVIOR_SHARE_COLUMNS = [
@@ -33,6 +35,16 @@ BEHAVIOR_BASELINE_TIE_TOLERANCE = 1e-9
 BEHAVIOR_SELECTION_SPLIT = "behavior_selection_v1"
 BEHAVIOR_HOLDOUT_SPLIT = "behavior_holdout_v1"
 BEHAVIOR_PRESPECIFIED_SUFFIX = "__liquidity_prior_50"
+BEHAVIOR_PRIMITIVE_FIELDS = [
+    "perceived_job_loss_risk_pp",
+    "expected_income_growth_pct",
+    "precautionary_saving_motive",
+    "liquidity_stress",
+    "debt_repayment_urgency",
+    "durable_purchase_pull_forward",
+    "shock_size_normalized",
+    "confidence",
+]
 BEHAVIOR_BASELINE_COMPARISON_COLUMNS = [
     "source",
     "source_kind",
@@ -150,6 +162,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="gpt-5.5")
     parser.add_argument("--behavior-mode", choices=["fixture", "replay", "live"], default="fixture")
     parser.add_argument("--max-live-calls", type=int, default=0)
+    parser.add_argument("--primitive-mode", choices=["auto", "fixture", "replay", "live", "off"], default="auto")
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--scf-wave", type=int, default=2022)
@@ -159,8 +172,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    primitive_mode = args.behavior_mode if args.primitive_mode == "auto" else args.primitive_mode
     if args.behavior_mode == "live" and args.max_live_calls <= 0:
         raise SystemExit("--max-live-calls must be positive when --behavior-mode live is used")
+    if primitive_mode == "live" and args.max_live_calls <= 0:
+        raise SystemExit("--max-live-calls must be positive when primitive behavior is live")
+    if primitive_mode in {"live", "replay"} and primitive_mode != args.behavior_mode:
+        raise SystemExit("--primitive-mode live/replay must match --behavior-mode so call accounting and cache semantics stay shared")
     if args.fresh_cache and args.cache_dir:
         raise SystemExit("--fresh-cache and --cache-dir cannot be combined; use one fresh run or one explicit resume cache")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -180,6 +198,10 @@ def main() -> int:
         "provider": args.provider,
         "model": args.model,
         "behavior_mode": args.behavior_mode,
+        "primitive_mode": primitive_mode,
+        "primitive_policy_version": BEHAVIOR_PRIMITIVE_POLICY_VERSION if primitive_mode != "off" else None,
+        "primitive_policy_parameter_source": "fixed_theory_coefficients_declared_before_scoring" if primitive_mode != "off" else None,
+        "primitive_policy_parameters": primitive_policy_parameters() if primitive_mode != "off" else {},
         "max_live_calls": int(args.max_live_calls),
         "fresh_cache": bool(args.fresh_cache),
         "explicit_cache_dir": bool(args.cache_dir),
@@ -195,9 +217,20 @@ def main() -> int:
         cell_targets = behavior_targets_frame(target_scope="cell")
         llm_client = BehaviorLLMClient(args.provider, args.model, cache_dir, mode=args.behavior_mode, max_live_calls=args.max_live_calls)
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=llm_client)
+        primitive_actions = pd.DataFrame(columns=actions.columns)
+        primitive_payloads = pd.DataFrame()
+        primitive_sign_audit = pd.DataFrame()
+        if primitive_mode != "off":
+            primitive_actions, primitive_payloads = run_primitive_behavior_gate(
+                BEHAVIOR_SCENARIOS,
+                type_cells,
+                llm_client=llm_client,
+                primitive_mode=primitive_mode,
+            )
+            primitive_sign_audit = primitive_behavior_sign_audit(primitive_actions, primitive_payloads)
         controls = run_behavior_controls(BEHAVIOR_SCENARIOS, type_cells)
         ablations = run_behavior_ablations(pd.concat([actions, controls], ignore_index=True))
-        all_actions = pd.concat([actions, controls, ablations], ignore_index=True)
+        all_actions = pd.concat([actions, primitive_actions, controls, ablations], ignore_index=True)
         aggregates = aggregate_behavior_actions(all_actions)
         scores = score_behavior_targets(aggregates, targets)
         cell_joined_errors = join_cell_behavior_target_errors(all_actions, cell_targets)
@@ -209,9 +242,15 @@ def main() -> int:
         holdout_cell_scores = score_cell_behavior_targets(all_actions, holdout_cell_targets)
         holdout_baseline_comparison = build_behavior_baseline_comparison(holdout_scores, holdout_cell_scores)
         prespecified_source = f"llm_{args.provider}_{args.model}{BEHAVIOR_PRESPECIFIED_SUFFIX}"
+        primitive_source = f"primitive_{args.provider}_{args.model}"
         holdout_verdict = prespecified_behavior_holdout_verdict(
             holdout_baseline_comparison,
             candidate_source=prespecified_source,
+            target_scope="aggregate",
+        )
+        primitive_holdout_verdict = prespecified_behavior_holdout_verdict(
+            holdout_baseline_comparison,
+            candidate_source=primitive_source,
             target_scope="aggregate",
         )
         scenarios.to_csv(output_dir / "behavior_scenarios.csv", index=False)
@@ -221,6 +260,9 @@ def main() -> int:
         holdout_cell_targets.to_csv(output_dir / "behavior_holdout_cell_targets.csv", index=False)
         target_catalog.to_csv(output_dir / "behavior_target_catalog.csv", index=False)
         type_cells.to_csv(output_dir / "household_type_cells.csv", index=False)
+        primitive_actions.to_csv(output_dir / "household_behavior_primitive_actions.csv", index=False)
+        primitive_payloads.to_csv(output_dir / "household_behavior_primitives.csv", index=False)
+        primitive_sign_audit.to_csv(output_dir / "behavior_primitive_sign_audit.csv", index=False)
         ablations.to_csv(output_dir / "household_behavior_ablations.csv", index=False)
         all_actions.to_csv(output_dir / "household_behavior_actions.csv", index=False)
         aggregates.to_csv(output_dir / "behavior_aggregates.csv", index=False)
@@ -243,6 +285,10 @@ def main() -> int:
                 "household_type_status": type_status,
                 "household_type_count": int(type_cells.shape[0]),
                 "action_rows": int(all_actions.shape[0]),
+                "primitive_action_rows": int(primitive_actions.shape[0]),
+                "primitive_payload_rows": int(primitive_payloads.shape[0]),
+                "primitive_sign_audit_rows": int(primitive_sign_audit.shape[0]),
+                "primitive_sign_audit_passed": bool(primitive_sign_audit["passed"].all()) if not primitive_sign_audit.empty else False,
                 "ablation_action_rows": int(ablations.shape[0]),
                 "ablation_sources": sorted(ablations["source"].unique().tolist()) if not ablations.empty else [],
                 "aggregate_rows": int(aggregates.shape[0]),
@@ -256,8 +302,20 @@ def main() -> int:
                 "holdout_baseline_comparison_rows": int(holdout_baseline_comparison.shape[0]),
                 "prespecified_behavior_source": prespecified_source,
                 "prespecified_holdout_verdict": holdout_verdict,
+                "primitive_behavior_source": primitive_source,
+                "primitive_holdout_verdict": primitive_holdout_verdict,
                 "aggregate_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="aggregate"),
                 "cell_baseline_verdict": behavior_baseline_verdict(baseline_comparison, target_scope="cell"),
+                "primitive_aggregate_baseline_verdict": behavior_baseline_verdict(
+                    baseline_comparison,
+                    target_scope="aggregate",
+                    source_kinds=("primitive",),
+                ),
+                "primitive_cell_baseline_verdict": behavior_baseline_verdict(
+                    baseline_comparison,
+                    target_scope="cell",
+                    source_kinds=("primitive",),
+                ),
                 "raw_llm_aggregate_baseline_verdict": behavior_baseline_verdict(
                     baseline_comparison,
                     target_scope="aggregate",
@@ -279,6 +337,9 @@ def main() -> int:
                     "behavior_holdout_cell_targets.csv",
                     "behavior_target_catalog.csv",
                     "household_type_cells.csv",
+                    "household_behavior_primitive_actions.csv",
+                    "household_behavior_primitives.csv",
+                    "behavior_primitive_sign_audit.csv",
                     "household_behavior_ablations.csv",
                     "household_behavior_actions.csv",
                     "behavior_aggregates.csv",
@@ -307,6 +368,7 @@ def main() -> int:
             baseline_comparison=baseline_comparison,
             holdout_baseline_comparison=holdout_baseline_comparison,
             holdout_targets=holdout_targets,
+            primitive_sign_audit=primitive_sign_audit,
         )
         (output_dir / "behavior_gate_report.md").write_text(report, encoding="utf-8")
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
@@ -350,6 +412,38 @@ class BehaviorLLMClient:
         self.raw_records.append(
             {
                 "scenario_id": scenario.scenario_id,
+                "record_type": "behavior_allocations",
+                "provider": data.get("provider"),
+                "model": data.get("model"),
+                "cache_hit": bool(data.get("cache_hit", False)),
+                "cache_path": data.get("cache_path"),
+                "payload": data.get("payload", data),
+            }
+        )
+        return normalized
+
+    def primitive_panel(self, scenario: BehaviorScenario, type_cells: pd.DataFrame, *, primitive_mode: str) -> dict[str, Any]:
+        if primitive_mode == "fixture":
+            data = {
+                "provider": self.provider,
+                "model": self.model,
+                "payload": fixture_behavior_primitive_payload(scenario, type_cells),
+                "cache_hit": True,
+                "cache_path": None,
+            }
+        elif primitive_mode in {"live", "replay"}:
+            prompt = behavior_primitive_prompt(scenario, type_cells)
+            data = self._client._codex_call(
+                prompt,
+                f"behavior_primitives_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt})}",
+            )
+        else:
+            raise LLMUnavailable(f"Unsupported primitive mode: {primitive_mode}")
+        normalized = normalize_behavior_primitive_payload(scenario, type_cells, data)
+        self.raw_records.append(
+            {
+                "scenario_id": scenario.scenario_id,
+                "record_type": "behavior_primitives",
                 "provider": data.get("provider"),
                 "model": data.get("model"),
                 "cache_hit": bool(data.get("cache_hit", False)),
@@ -368,6 +462,37 @@ def run_behavior_gate(scenarios: Iterable[BehaviorScenario], type_cells: pd.Data
             response = payload["household_by_type"][str(type_cell["type_id"])]
             rows.append(_behavior_action_row(scenario, type_cell, response, source=f"llm_{llm_client.provider}_{llm_client.model}"))
     return pd.DataFrame(rows)
+
+
+def run_primitive_behavior_gate(
+    scenarios: Iterable[BehaviorScenario],
+    type_cells: pd.DataFrame,
+    *,
+    llm_client: BehaviorLLMClient,
+    primitive_mode: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    action_rows: list[dict[str, Any]] = []
+    primitive_rows: list[dict[str, Any]] = []
+    source = f"primitive_{llm_client.provider}_{llm_client.model}"
+    for scenario in scenarios:
+        payload = llm_client.primitive_panel(scenario, type_cells, primitive_mode=primitive_mode)
+        for _, type_cell in type_cells.iterrows():
+            primitive = payload["primitives_by_type"][str(type_cell["type_id"])]
+            action = primitive_policy_action(scenario, type_cell, primitive)
+            action_rows.append(_behavior_action_row(scenario, type_cell, action, source=source))
+            primitive_rows.append(
+                {
+                    "schema_version": BEHAVIOR_PRIMITIVE_PROMPT_VERSION,
+                    "scenario_id": scenario.scenario_id,
+                    "source": source,
+                    "type_id": str(type_cell["type_id"]),
+                    "population_weight": float(type_cell["population_weight"]),
+                    "liquidity_group": _liquidity_group(type_cell),
+                    **{field: float(primitive[field]) for field in BEHAVIOR_PRIMITIVE_FIELDS},
+                    "reason": str(primitive.get("reason", ""))[:300],
+                }
+            )
+    return pd.DataFrame(action_rows), pd.DataFrame(primitive_rows)
 
 
 def run_behavior_controls(scenarios: Iterable[BehaviorScenario], type_cells: pd.DataFrame) -> pd.DataFrame:
@@ -567,6 +692,52 @@ def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def behavior_primitive_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
+    payload = {
+        "prompt_version": BEHAVIOR_PRIMITIVE_PROMPT_VERSION,
+        "task": "Infer household behavioral primitives for a one-time transfer. Do not output spending, saving, or debt allocation shares.",
+        "as_of_rule": "Use only the scenario and type-cell information below. Do not cite realized study estimates.",
+        "scenario": {
+            "scenario_id": scenario.scenario_id,
+            "label": scenario.label,
+            "as_of_date": scenario.as_of_date,
+            "transfer_amount": scenario.transfer_amount,
+            "horizon_months": scenario.horizon_months,
+            "context": scenario.prompt_context,
+        },
+        "household_type_cells": [
+            {
+                "type_id": row["type_id"],
+                "label": row["label"],
+                "population_weight": round_or_none(row["population_weight"]),
+                "annual_income": round_or_none(row["annual_income"]),
+                "liquid_assets": round_or_none(row["liquid_assets"]),
+                "illiquid_assets": round_or_none(row["illiquid_assets"]),
+                "debt": round_or_none(row["debt"]),
+                "liquid_buffer_months": round_or_none(row["liquid_buffer_months"]),
+            }
+            for _, row in type_cells.iterrows()
+        ],
+        "required_response": {
+            "household_primitives": [
+                {
+                    "type_id": "one supplied type_id",
+                    "perceived_job_loss_risk_pp": "0 to 100 subjective job-loss risk in percentage points",
+                    "expected_income_growth_pct": "-20 to 20 expected income growth over the scenario horizon",
+                    "precautionary_saving_motive": "0 to 1",
+                    "liquidity_stress": "0 to 1",
+                    "debt_repayment_urgency": "0 to 1",
+                    "durable_purchase_pull_forward": "0 to 1",
+                    "shock_size_normalized": "0 to 1, where 0 is a small routine payment and 1 is life-changing relative to income",
+                    "confidence": "0 to 1",
+                    "reason": "short reason",
+                }
+            ]
+        },
+    }
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
 def fixture_behavior_payload(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> dict[str, Any]:
     return {
         "prompt_version": BEHAVIOR_PROMPT_VERSION,
@@ -575,6 +746,20 @@ def fixture_behavior_payload(scenario: BehaviorScenario, type_cells: pd.DataFram
                 "type_id": str(row["type_id"]),
                 **_liquidity_rule_response(scenario, row),
                 "reason": "deterministic liquidity fixture",
+            }
+            for _, row in type_cells.iterrows()
+        ],
+    }
+
+
+def fixture_behavior_primitive_payload(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> dict[str, Any]:
+    return {
+        "prompt_version": BEHAVIOR_PRIMITIVE_PROMPT_VERSION,
+        "household_primitives": [
+            {
+                "type_id": str(row["type_id"]),
+                **fixture_behavior_primitives(scenario, row),
+                "reason": "deterministic primitive fixture",
             }
             for _, row in type_cells.iterrows()
         ],
@@ -620,6 +805,235 @@ def normalize_behavior_payload(scenario: BehaviorScenario, type_cells: pd.DataFr
     if missing:
         raise LLMUnavailable(f"Behavior payload for {scenario.scenario_id} is missing type ids: {', '.join(missing)}")
     return {"household_by_type": by_type}
+
+
+def normalize_behavior_primitive_payload(scenario: BehaviorScenario, type_cells: pd.DataFrame, data: dict[str, Any]) -> dict[str, Any]:
+    payload = data.get("payload", data)
+    if "household_actions" in payload:
+        raise LLMUnavailable(
+            f"Primitive behavior payload for {scenario.scenario_id} must not include household_actions"
+        )
+    primitives = payload.get("household_primitives")
+    if not isinstance(primitives, list):
+        raise LLMUnavailable(f"Primitive behavior payload for {scenario.scenario_id} is missing household_primitives list")
+    expected_ids = set(type_cells["type_id"].astype(str))
+    by_type: dict[str, dict[str, Any]] = {}
+    for primitive in primitives:
+        if not isinstance(primitive, dict):
+            continue
+        type_id = str(primitive.get("type_id", ""))
+        if type_id not in expected_ids:
+            continue
+        mutation_fields = sorted(set(BEHAVIOR_SHARE_COLUMNS) & set(primitive))
+        if mutation_fields:
+            raise LLMUnavailable(
+                f"Primitive behavior payload for {scenario.scenario_id} includes final allocation fields: "
+                f"{', '.join(mutation_fields)}"
+            )
+        by_type[type_id] = {
+            "perceived_job_loss_risk_pp": bounded_number(primitive, "perceived_job_loss_risk_pp", 0.0, 100.0),
+            "expected_income_growth_pct": bounded_number(primitive, "expected_income_growth_pct", -20.0, 20.0),
+            "precautionary_saving_motive": bounded_number(primitive, "precautionary_saving_motive", 0.0, 1.0),
+            "liquidity_stress": bounded_number(primitive, "liquidity_stress", 0.0, 1.0),
+            "debt_repayment_urgency": bounded_number(primitive, "debt_repayment_urgency", 0.0, 1.0),
+            "durable_purchase_pull_forward": bounded_number(primitive, "durable_purchase_pull_forward", 0.0, 1.0),
+            "shock_size_normalized": bounded_number(primitive, "shock_size_normalized", 0.0, 1.0),
+            "confidence": bounded_number(primitive, "confidence", 0.0, 1.0),
+            "reason": str(primitive.get("reason", ""))[:300],
+        }
+    missing = sorted(expected_ids - set(by_type))
+    if missing:
+        raise LLMUnavailable(f"Primitive behavior payload for {scenario.scenario_id} is missing type ids: {', '.join(missing)}")
+    return {"primitives_by_type": by_type}
+
+
+def fixture_behavior_primitives(scenario: BehaviorScenario, type_cell: pd.Series) -> dict[str, float]:
+    buffer_months = float(type_cell.get("liquid_buffer_months", 2.0))
+    debt_ratio = float(type_cell.get("debt_to_asset", 0.0))
+    transfer_income_ratio = float(scenario.transfer_amount) / max(float(type_cell.get("annual_income", 50000.0)), 1.0)
+    shutdown = 1.0 if scenario.scenario_id == "eip_2020_style" else 0.0
+    recession = 1.0 if scenario.scenario_id in {"stimulus_2008_style", "eip_2020_style"} else 0.0
+    return {
+        "perceived_job_loss_risk_pp": float(np.clip(4.0 + 10.0 * recession + 18.0 * shutdown - 0.35 * buffer_months, 0.0, 100.0)),
+        "expected_income_growth_pct": float(np.clip(1.5 - 2.5 * recession - 3.0 * shutdown, -20.0, 20.0)),
+        "precautionary_saving_motive": float(np.clip(0.20 + 0.12 * recession + 0.16 * shutdown + 0.04 * buffer_months, 0.0, 1.0)),
+        "liquidity_stress": float(np.clip(0.70 - 0.10 * buffer_months + 0.08 * debt_ratio, 0.0, 1.0)),
+        "debt_repayment_urgency": float(np.clip(0.12 + 0.45 * debt_ratio, 0.0, 1.0)),
+        "durable_purchase_pull_forward": float(np.clip(0.16 + 0.10 * (scenario.horizon_months >= 6) - 0.15 * shutdown, 0.0, 1.0)),
+        "shock_size_normalized": float(np.clip(transfer_income_ratio / 0.50, 0.0, 1.0)),
+        "confidence": 0.60,
+    }
+
+
+def primitive_policy_parameters() -> dict[str, float | str]:
+    return {
+        "source": "fixed_theory_coefficients_no_target_fit",
+        "base_spending_share": 0.24,
+        "liquidity_stress_to_spending": 0.34,
+        "durable_pull_to_spending": 0.10,
+        "positive_income_growth_to_spending": 0.05,
+        "precaution_to_spending": -0.16,
+        "job_risk_to_spending": -0.10,
+        "shock_size_to_spending": -0.18,
+        "base_debt_repayment_share": 0.06,
+        "debt_urgency_to_debt_repayment": 0.34,
+        "job_risk_to_debt_repayment": 0.04,
+        "base_durable_fraction": 0.18,
+        "durable_pull_to_durable_fraction": 0.28,
+        "shutdown_durable_fraction_penalty": -0.12,
+    }
+
+
+def primitive_policy_action(scenario: BehaviorScenario, type_cell: pd.Series, primitive: dict[str, Any]) -> dict[str, Any]:
+    params = primitive_policy_parameters()
+    job_risk = float(primitive["perceived_job_loss_risk_pp"]) / 100.0
+    income_growth = float(primitive["expected_income_growth_pct"]) / 10.0
+    liquidity_stress = float(primitive["liquidity_stress"])
+    precaution = float(primitive["precautionary_saving_motive"])
+    debt_urgency = float(primitive["debt_repayment_urgency"])
+    durable_pull = float(primitive["durable_purchase_pull_forward"])
+    shock_size = float(primitive["shock_size_normalized"])
+    shutdown = 1.0 if scenario.scenario_id == "eip_2020_style" else 0.0
+
+    total = (
+        float(params["base_spending_share"])
+        + float(params["liquidity_stress_to_spending"]) * liquidity_stress
+        + float(params["durable_pull_to_spending"]) * durable_pull
+        + float(params["positive_income_growth_to_spending"]) * max(income_growth, 0.0)
+        + float(params["precaution_to_spending"]) * precaution
+        + float(params["job_risk_to_spending"]) * job_risk
+        + float(params["shock_size_to_spending"]) * shock_size
+    )
+    debt = (
+        float(params["base_debt_repayment_share"])
+        + float(params["debt_urgency_to_debt_repayment"]) * debt_urgency
+        + float(params["job_risk_to_debt_repayment"]) * job_risk
+    )
+    durable_fraction = (
+        float(params["base_durable_fraction"])
+        + float(params["durable_pull_to_durable_fraction"]) * durable_pull
+        + float(params["shutdown_durable_fraction_penalty"]) * shutdown
+    )
+    total = float(np.clip(total, 0.02, 0.85))
+    debt = float(np.clip(debt, 0.0, 0.50))
+    durable_fraction = float(np.clip(durable_fraction, 0.02, 0.65))
+    durable = total * durable_fraction
+    nondurable = max(0.0, total - durable)
+    liquid = max(0.0, 1.0 - total - debt)
+    return _normalize_action_row(
+        {
+            "total_spending_share": total,
+            "nondurable_spending_share": nondurable,
+            "durable_spending_share": durable,
+            "debt_repayment_share": debt,
+            "liquid_saving_share": liquid,
+            "confidence": float(primitive["confidence"]),
+            "reason": (
+                "fixed primitive policy: liquidity stress raises spending; precaution and job risk raise saving; "
+                "debt urgency raises repayment; larger windfalls lower immediate MPC"
+            ),
+        }
+    )
+
+
+def primitive_behavior_sign_audit(actions: pd.DataFrame, primitives: pd.DataFrame) -> pd.DataFrame:
+    columns = ["audit_id", "expected_sign", "slope_or_delta", "n", "passed", "notes"]
+    if actions.empty or primitives.empty:
+        return pd.DataFrame(columns=columns)
+    params = primitive_policy_parameters()
+    job_risk_liquid_saving_derivative = (
+        -float(params["job_risk_to_spending"]) - float(params["job_risk_to_debt_repayment"])
+    )
+    joined = actions.merge(
+        primitives,
+        on=["scenario_id", "source", "type_id"],
+        suffixes=("", "_primitive"),
+        validate="one_to_one",
+    )
+    rows: list[dict[str, Any]] = []
+    rows.extend(
+        [
+            _coefficient_audit(
+                "liquidity_stress_raises_mpc",
+                float(params["liquidity_stress_to_spending"]),
+                expected_positive=True,
+                n=joined.shape[0],
+                notes="Fixed policy derivative: liquidity_stress -> total_spending_share",
+            ),
+            _coefficient_audit(
+                "precaution_raises_liquid_saving",
+                -float(params["precaution_to_spending"]),
+                expected_positive=True,
+                n=joined.shape[0],
+                notes="Fixed policy derivative: precaution lowers spending and therefore raises residual liquid saving.",
+            ),
+            _coefficient_audit(
+                "job_risk_raises_liquid_saving",
+                job_risk_liquid_saving_derivative,
+                expected_positive=True,
+                n=joined.shape[0],
+                notes="Fixed policy derivative: job risk lowers spending more than it raises debt repayment.",
+            ),
+            _coefficient_audit(
+                "debt_urgency_raises_repayment",
+                float(params["debt_urgency_to_debt_repayment"]),
+                expected_positive=True,
+                n=joined.shape[0],
+                notes="Fixed policy derivative: debt urgency -> debt_repayment_share",
+            ),
+            _coefficient_audit(
+                "larger_windfall_lowers_mpc",
+                float(params["shock_size_to_spending"]),
+                expected_positive=False,
+                n=joined.shape[0],
+                notes="Fixed policy derivative: shock_size_normalized -> total_spending_share",
+            ),
+        ]
+    )
+    eip = joined[joined["scenario_id"].astype(str) == "eip_2020_style"].copy()
+    low = eip[eip["liquidity_group"] == "low"]
+    high = eip[eip["liquidity_group"] == "high"]
+    delta = _weighted_average(low, "total_spending_share") - _weighted_average(high, "total_spending_share") if not low.empty and not high.empty else float("nan")
+    rows.append(
+        {
+            "audit_id": "low_liquidity_cells_higher_mpc",
+            "expected_sign": "positive",
+            "slope_or_delta": delta,
+            "n": int(eip.shape[0]),
+            "passed": bool(np.isfinite(delta) and delta > 0.0),
+            "notes": "Low-liquidity EIP cells should spend more than high-liquidity cells through primitive stress.",
+        }
+    )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _coefficient_audit(audit_id: str, value: float, *, expected_positive: bool, n: int, notes: str) -> dict[str, Any]:
+    passed = bool(np.isfinite(value) and (value > 0.0 if expected_positive else value < 0.0))
+    return {
+        "audit_id": audit_id,
+        "expected_sign": "positive" if expected_positive else "negative",
+        "slope_or_delta": float(value),
+        "n": int(n),
+        "passed": passed,
+        "notes": notes,
+    }
+
+
+def _slope_audit(frame: pd.DataFrame, x_column: str, y_column: str, *, expected_positive: bool, audit_id: str) -> dict[str, Any]:
+    finite = frame[[x_column, y_column]].replace([np.inf, -np.inf], np.nan).dropna()
+    if finite.shape[0] < 3 or float(finite[x_column].std(ddof=0)) <= 1e-12:
+        slope = float("nan")
+    else:
+        slope = float(np.polyfit(finite[x_column].astype(float), finite[y_column].astype(float), 1)[0])
+    passed = bool(np.isfinite(slope) and (slope > 0.0 if expected_positive else slope < 0.0))
+    return {
+        "audit_id": audit_id,
+        "expected_sign": "positive" if expected_positive else "negative",
+        "slope_or_delta": slope,
+        "n": int(finite.shape[0]),
+        "passed": passed,
+        "notes": f"{x_column} -> {y_column}",
+    }
 
 
 def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
@@ -932,6 +1346,7 @@ def build_behavior_gate_report(
     baseline_comparison: pd.DataFrame | None = None,
     holdout_baseline_comparison: pd.DataFrame | None = None,
     holdout_targets: pd.DataFrame | None = None,
+    primitive_sign_audit: pd.DataFrame | None = None,
 ) -> str:
     target_catalog = target_catalog if target_catalog is not None else behavior_target_catalog(include_unscored=True)
     cell_targets = cell_targets if cell_targets is not None else behavior_targets_frame(target_scope="cell")
@@ -940,6 +1355,7 @@ def build_behavior_gate_report(
     baseline_comparison = baseline_comparison if baseline_comparison is not None else build_behavior_baseline_comparison(scores, cell_scores)
     holdout_baseline_comparison = holdout_baseline_comparison if holdout_baseline_comparison is not None else pd.DataFrame()
     holdout_targets = holdout_targets if holdout_targets is not None else pd.DataFrame()
+    primitive_sign_audit = primitive_sign_audit if primitive_sign_audit is not None else pd.DataFrame()
     gaps = target_catalog[~target_catalog["scored"]].copy() if "scored" in target_catalog else pd.DataFrame()
     lines = [
         "# Household Behavior Target Gate",
@@ -950,6 +1366,7 @@ def build_behavior_gate_report(
         "## Run Setup",
         f"- Provider/model: `{manifest.get('provider')}` / `{manifest.get('model')}`",
         f"- Behavior mode: `{manifest.get('behavior_mode')}`",
+        f"- Primitive mode: `{manifest.get('primitive_mode')}`",
         f"- Live calls used: `{manifest.get('live_call_count')}` of cap `{manifest.get('max_live_calls')}`",
         f"- Cache hits: `{manifest.get('cache_hit_count')}`",
         f"- Scenario count: `{manifest.get('scenario_count')}`",
@@ -967,8 +1384,16 @@ def build_behavior_gate_report(
         "",
         "## Prespecified Holdout Gate",
         _prespecified_holdout_sentence(manifest.get("prespecified_holdout_verdict", {})),
+        _prespecified_holdout_sentence(manifest.get("primitive_holdout_verdict", {})),
         "",
         markdown_table(_baseline_comparison_table(holdout_baseline_comparison)),
+        "",
+        "## Primitive Mechanism Audit",
+        f"- Policy version: `{manifest.get('primitive_policy_version')}`",
+        f"- Parameter source: `{manifest.get('primitive_policy_parameter_source')}`",
+        f"- All sign audits passed: `{manifest.get('primitive_sign_audit_passed')}`",
+        "",
+        markdown_table(primitive_sign_audit if not primitive_sign_audit.empty else primitive_sign_audit),
         "",
         "## Holdout Targets",
         markdown_table(
@@ -1152,6 +1577,16 @@ def _bounded_share(mapping: dict[str, Any], key: str) -> float:
     return float(np.clip(value, 0.0, 1.0))
 
 
+def bounded_number(mapping: dict[str, Any], key: str, low: float, high: float) -> float:
+    try:
+        value = float(mapping.get(key))
+    except (TypeError, ValueError):
+        raise LLMUnavailable(f"Primitive behavior payload field {key} must be numeric") from None
+    if not np.isfinite(value):
+        raise LLMUnavailable(f"Primitive behavior payload field {key} must be finite")
+    return float(np.clip(value, low, high))
+
+
 def _liquidity_group(type_cell: pd.Series) -> str:
     type_id = str(type_cell["type_id"])
     if type_id in {"liquid_poor_renter", "wealthy_htm_homeowner", "unemployed_low_liquid"}:
@@ -1224,6 +1659,8 @@ def _score_group(
 def _behavior_source_kind(source: str) -> str:
     if source in BEHAVIOR_BASELINE_SOURCES:
         return "baseline"
+    if source.startswith("primitive_"):
+        return "primitive"
     if source.startswith("llm_") and "__" in source:
         return "llm_ablation"
     if source.startswith("llm_"):
@@ -1279,6 +1716,8 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
     cell = behavior_baseline_verdict(comparison, target_scope="cell")
     raw_aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate", source_kinds=("llm",))
     raw_cell = behavior_baseline_verdict(comparison, target_scope="cell", source_kinds=("llm",))
+    primitive_aggregate = behavior_baseline_verdict(comparison, target_scope="aggregate", source_kinds=("primitive",))
+    primitive_cell = behavior_baseline_verdict(comparison, target_scope="cell", source_kinds=("primitive",))
 
     def clause(label: str, verdict: dict[str, Any], *, subject: str) -> str:
         verdict_name = str(verdict.get("verdict", "behavior_baseline_unmeasured"))
@@ -1298,8 +1737,10 @@ def _baseline_verdict_sentence(comparison: pd.DataFrame) -> str:
     return " ".join(
         [
             clause("Aggregate", raw_aggregate, subject="raw LLM"),
+            clause("Aggregate", primitive_aggregate, subject="primitive-driven"),
             clause("Aggregate", aggregate, subject="best LLM/ablation"),
             clause("Cell-level", raw_cell, subject="raw LLM"),
+            clause("Cell-level", primitive_cell, subject="primitive-driven"),
             clause("Cell-level", cell, subject="best LLM/ablation"),
         ]
     )
@@ -1350,6 +1791,7 @@ def _ablation_summary_table(scores: pd.DataFrame, cell_scores: pd.DataFrame | No
     interesting = aggregate[
         aggregate["source"].eq("liquidity_rule")
         | aggregate["source"].str.startswith("llm_")
+        | aggregate["source"].str.startswith("primitive_")
         | aggregate["source"].str.contains("__liquidity_prior|__residual_over_liquidity", regex=True)
     ].copy()
     if interesting.empty:
