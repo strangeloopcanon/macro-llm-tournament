@@ -203,6 +203,7 @@ phase4-prior-update-codex-replay:
 		--asof-end 2025-12-15 \
 		--history-months 18 \
 		--period-count 2 \
+		--scoring-label retrospective \
 		--max-live-calls 0 \
 		--output-dir outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard
 

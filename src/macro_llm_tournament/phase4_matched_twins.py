@@ -27,7 +27,7 @@ from .postcutoff_behavior_gate import (
 )
 
 
-PHASE4_VERSION = "phase4_prior_update_matched_twins_v1"
+PHASE4_VERSION = "phase4_prior_update_matched_twins_v2"
 DEFAULT_SCENARIO = DemandScenario(
     "baseline",
     "No exogenous shock; households react only to endogenous feedback.",
@@ -71,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof-end", default="2026-04-15")
     parser.add_argument("--history-months", type=int, default=18)
     parser.add_argument("--scoreable-only", action="store_true")
+    parser.add_argument("--scoring-label", choices=("retrospective", "confirmatory"), default="retrospective")
     parser.add_argument("--belief-source", choices=("fixture", "persona_ecology_replay"), default="fixture")
     parser.add_argument("--persona-ecology-dir", default=None)
     parser.add_argument("--primary-ecology-source", default="")
@@ -153,8 +154,9 @@ def main() -> int:
         periods_frame = pd.concat(all_periods, ignore_index=True)
         accounting_frame = pd.concat(all_accounting, ignore_index=True)
         path_comparison = build_path_comparison(periods_frame)
+        scoring_targets = phase4_scoring_targets(targets, mapping)
         proxy_forecasts = economy_proxy_forecasts(periods_frame, cards, mapping)
-        proxy_scores, joined = score_proxy_forecasts(proxy_forecasts, targets)
+        proxy_scores, joined = score_proxy_forecasts(proxy_forecasts, scoring_targets)
         verdict = classify_phase4_run(
             periods_frame,
             accounting_frame,
@@ -168,7 +170,7 @@ def main() -> int:
             mapping_payload=mapping_payload,
             cards=cards_to_frame(cards),
             context=context,
-            targets=targets,
+            targets=scoring_targets,
             households=households,
             initial=initial_frame,
             beliefs=beliefs_frame,
@@ -189,13 +191,15 @@ def main() -> int:
                 "passed": bool(verdict["passed"]),
                 "belief_source": args.belief_source,
                 "ecology_period_policy": args.ecology_period_policy,
+                "scoring_label": args.scoring_label,
+                "v2_confirmatory_scoring_starts": "next_newly_scoreable_data_month",
                 "mapping_sha256": mapping_sha,
                 "mapping_spec_version": PHASE4_VERSION,
                 "data_status": data_status,
                 "persona_ecology_input": ecology_input_manifest(ecology_bundle, period_count=period_count),
                 "card_count": int(len(cards)),
-                "target_rows": int(targets.shape[0]),
-                "scoreable_target_rows": int(targets["target_available"].sum()) if not targets.empty else 0,
+                "target_rows": int(scoring_targets.shape[0]),
+                "scoreable_target_rows": int(scoring_targets["target_available"].sum()) if not scoring_targets.empty else 0,
                 "period_count_effective": int(period_count),
                 "household_count": int(households.shape[0]),
                 "sources": sorted(periods_frame["source"].astype(str).unique()),
@@ -618,14 +622,54 @@ def file_sha256(path: Path) -> str:
 def default_output_mapping() -> list[OutputMappingSpec]:
     by_name = {spec.target_name: spec for spec in TARGET_SPECS}
     rows = [
-        ("pce_mom_pct", "aggregate_consumption", "pct_change", "Nominal PCE proxy maps to aggregate consumption growth."),
-        ("real_pce_mom_pct", "output", "pct_change", "Real PCE proxy maps to real output growth in the one-good economy."),
-        ("retail_sales_mom_pct", "aggregate_consumption", "pct_change", "Retail proxy maps to aggregate consumption growth; this is deliberately locked before scoring."),
-        ("personal_saving_rate_pct", "aggregate_saving", "saving_rate", "Saving-rate proxy maps to aggregate saving divided by aggregate income."),
-        ("revolving_credit_mom_pct", "aggregate_debt", "pct_change", "Revolving-credit proxy maps to aggregate household debt growth."),
+        (
+            "pce_mom_pct",
+            "aggregate_consumption",
+            "pct_change",
+            None,
+            None,
+            None,
+            "Nominal PCE proxy maps to aggregate consumption growth.",
+        ),
+        (
+            "real_pce_mom_pct",
+            "output",
+            "pct_change",
+            None,
+            None,
+            None,
+            "Real PCE proxy maps to real output growth in the one-good economy.",
+        ),
+        (
+            "retail_sales_mom_pct",
+            "aggregate_consumption",
+            "pct_change",
+            None,
+            None,
+            None,
+            "Retail proxy maps to aggregate consumption growth; this is deliberately locked before scoring.",
+        ),
+        (
+            "personal_saving_rate_pct",
+            "saving_rate",
+            "diff",
+            "diff",
+            -25.0,
+            25.0,
+            "Saving-rate proxy maps to month-over-month change in aggregate saving divided by aggregate income.",
+        ),
+        (
+            "revolving_credit_mom_pct",
+            "aggregate_debt",
+            "pct_change",
+            None,
+            None,
+            None,
+            "Revolving-credit proxy maps to aggregate household debt growth.",
+        ),
     ]
     mapping: list[OutputMappingSpec] = []
-    for target_name, variable, transform, note in rows:
+    for target_name, variable, economy_transform, target_transform, lower, upper, note in rows:
         target = by_name[target_name]
         mapping.append(
             OutputMappingSpec(
@@ -633,12 +677,12 @@ def default_output_mapping() -> list[OutputMappingSpec]:
                 series_id=target.series_id,
                 target_label=target.label,
                 target_units=target.units,
-                target_transform=target.transform,
+                target_transform=target_transform or target.transform,
                 economy_variable=variable,
-                economy_transform=transform,
+                economy_transform=economy_transform,
                 period_alignment="card_i_scores_economy_period_i_plus_1_against_next_month_target",
-                lower=target.lower,
-                upper=target.upper,
+                lower=target.lower if lower is None else lower,
+                upper=target.upper if upper is None else upper,
                 note=note,
             )
         )
@@ -687,19 +731,57 @@ def economy_proxy_forecasts(
     return pd.DataFrame(rows)
 
 
+def phase4_scoring_targets(targets: pd.DataFrame, mapping: Iterable[OutputMappingSpec]) -> pd.DataFrame:
+    if targets.empty:
+        return targets.copy()
+    by_target = {spec.target_name: spec for spec in mapping}
+    out = targets.copy()
+    out["raw_target_value"] = out["target_value"]
+    out["raw_last_signal"] = out["last_signal"]
+    out["phase4_target_transform"] = out["target_name"].astype(str).map(
+        {target_name: spec.target_transform for target_name, spec in by_target.items()}
+    )
+    missing = sorted(set(out["target_name"].astype(str)) - set(by_target))
+    if missing:
+        raise ValueError(f"Targets have no Phase 4 mapping rows: {', '.join(missing)}")
+    for spec in by_target.values():
+        mask = out["target_name"].astype(str).eq(spec.target_name)
+        if spec.target_transform in {"level", "pct_change"}:
+            continue
+        if spec.target_transform == "diff":
+            available = mask & out["target_value"].map(np.isfinite) & out["last_signal"].map(np.isfinite)
+            out.loc[mask, "target_available"] = out.loc[mask, "target_available"].astype(bool) & available
+            out.loc[available, "target_value"] = (
+                out.loc[available, "raw_target_value"].astype(float) - out.loc[available, "raw_last_signal"].astype(float)
+            )
+            out.loc[mask, "last_signal"] = 0.0
+            out.loc[mask, "history_scale"] = out.loc[mask, "history_scale"].astype(float).clip(lower=0.25)
+            continue
+        raise ValueError(f"Unsupported Phase 4 target transform: {spec.target_transform}")
+    return out
+
+
+def period_measure(row: pd.Series, spec: OutputMappingSpec) -> float:
+    if spec.economy_variable == "saving_rate":
+        income = float(row["aggregate_income"])
+        if abs(income) <= 1e-9:
+            return 0.0
+        return 100.0 * float(row["aggregate_saving"]) / income
+    return float(row[spec.economy_variable])
+
+
 def mapped_period_value(path: pd.DataFrame, target_period: int, spec: OutputMappingSpec) -> float:
     current = path.iloc[target_period]
     previous = path.iloc[target_period - 1]
     if spec.economy_transform == "pct_change":
-        base = float(previous[spec.economy_variable])
+        base = period_measure(previous, spec)
         if abs(base) <= 1e-9:
             return 0.0
-        return 100.0 * (float(current[spec.economy_variable]) / base - 1.0)
-    if spec.economy_transform == "saving_rate":
-        income = float(current["aggregate_income"])
-        if abs(income) <= 1e-9:
-            return 0.0
-        return 100.0 * float(current["aggregate_saving"]) / income
+        return 100.0 * (period_measure(current, spec) / base - 1.0)
+    if spec.economy_transform == "diff":
+        return period_measure(current, spec) - period_measure(previous, spec)
+    if spec.economy_transform == "level":
+        return period_measure(current, spec)
     raise ValueError(f"Unsupported economy transform: {spec.economy_transform}")
 
 
@@ -849,8 +931,12 @@ def build_report(manifest: dict[str, Any], scores: pd.DataFrame, comparison: pd.
         "",
         "## Locked Output Mapping",
         f"- Mapping SHA-256: `{manifest.get('mapping_sha256')}`",
+        f"- Mapping schema: `{manifest.get('mapping_spec_version')}`.",
+        f"- Scoring label: `{manifest.get('scoring_label')}`.",
         "- Mapping is written to `phase4_output_mapping.json` before proxy forecasts are scored.",
         "- Forecasts join to targets only on `card_id`, `period_id`, and `target_name`.",
+        "- In v2, `personal_saving_rate_pct` is scored as month-over-month change in the saving-rate proxy, not the saving-rate level. The transform is applied identically to both twins and to the target series before scoring.",
+        "- Confirmatory v2 scoring starts with the next newly scoreable data month; existing v2 rescoring is labeled retrospective.",
         "",
         "## Proxy Scoreboard",
         markdown_table(overall),
@@ -937,6 +1023,8 @@ def base_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "asof_end": args.asof_end,
         "history_months": int(args.history_months),
         "scoreable_only": bool(args.scoreable_only),
+        "scoring_label": args.scoring_label,
+        "v2_confirmatory_scoring_starts": "next_newly_scoreable_data_month",
         "belief_source": args.belief_source,
         "persona_ecology_dir": args.persona_ecology_dir,
         "primary_ecology_source": args.primary_ecology_source,

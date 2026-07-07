@@ -8,9 +8,12 @@ from tempfile import TemporaryDirectory
 import pandas as pd
 
 from macro_llm_tournament.phase4_matched_twins import (
+    OutputMappingSpec,
     default_output_mapping,
     mapping_sha256,
+    mapped_period_value,
     normalized_mapping_payload,
+    phase4_scoring_targets,
 )
 
 
@@ -25,6 +28,64 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
         self.assertEqual(mapping_sha256(payload), mapping_sha256(round_tripped))
         self.assertEqual(len(payload["rows"]), 5)
         self.assertIn("leakage_rule", payload)
+        self.assertEqual(payload["schema_version"], "phase4_prior_update_matched_twins_v2")
+        saving_row = next(row for row in payload["rows"] if row["target_name"] == "personal_saving_rate_pct")
+        self.assertEqual(saving_row["economy_variable"], "saving_rate")
+        self.assertEqual(saving_row["economy_transform"], "diff")
+        self.assertEqual(saving_row["target_transform"], "diff")
+        self.assertLess(saving_row["lower"], 0.0)
+        self.assertGreater(saving_row["upper"], 0.0)
+
+    def test_phase4_saving_rate_diff_transform_applies_to_economy_and_target(self):
+        spec = OutputMappingSpec(
+            target_name="personal_saving_rate_pct",
+            series_id="PSAVERT",
+            target_label="Personal saving rate",
+            target_units="percent",
+            target_transform="diff",
+            economy_variable="saving_rate",
+            economy_transform="diff",
+            period_alignment="card_i_scores_economy_period_i_plus_1_against_next_month_target",
+            lower=-25.0,
+            upper=25.0,
+            note="test mapping",
+        )
+        path = pd.DataFrame(
+            [
+                {"aggregate_saving": 10.0, "aggregate_income": 100.0},
+                {"aggregate_saving": 15.0, "aggregate_income": 100.0},
+            ]
+        )
+        self.assertAlmostEqual(mapped_period_value(path, 1, spec), 5.0)
+
+        targets = pd.DataFrame(
+            [
+                {
+                    "card_id": "card_1",
+                    "period_id": "period_1",
+                    "target_month": "2026-01-01",
+                    "target_name": "personal_saving_rate_pct",
+                    "target_label": "Personal saving rate",
+                    "target_value": 4.4,
+                    "target_available": True,
+                    "last_signal": 3.6,
+                    "history_scale": 0.05,
+                    "series_id": "PSAVERT",
+                    "units": "percent",
+                    "contamination_label": "post_model_cutoff_clean",
+                    "source_url": "https://fred.stlouisfed.org/series/PSAVERT",
+                }
+            ]
+        )
+        adjusted = phase4_scoring_targets(targets, [spec])
+        row = adjusted.iloc[0]
+
+        self.assertAlmostEqual(row["target_value"], 0.8)
+        self.assertAlmostEqual(row["last_signal"], 0.0)
+        self.assertAlmostEqual(row["raw_target_value"], 4.4)
+        self.assertAlmostEqual(row["raw_last_signal"], 3.6)
+        self.assertEqual(row["phase4_target_transform"], "diff")
+        self.assertGreaterEqual(row["history_scale"], 0.25)
 
     def test_phase4_fixture_cli_writes_locked_mapping_and_scores(self):
         with TemporaryDirectory() as temp_dir:
