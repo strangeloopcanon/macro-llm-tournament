@@ -69,6 +69,20 @@ On the UI-exhaustion income-loss holdout, GPT-5.5 loses again. Raw GPT-5.5 score
 
 So the behavior result is not "LLM agents predict household behavior." It is more specific: **raw GPT-5.5 contains behavioral priors that transfer to windfall-size reasoning, but not yet to predictable income-loss dynamics.**
 
+### Cross-model and prompt-variant probe
+
+Two natural objections to that negative are that it is a GPT quirk or a prompt artifact. A four-arm diagnostic probe on the selection split tested both, using the same scenarios, cache semantics, and scoring. Claude Opus 4.8 (thinking) ran through the headless Cursor CLI in an empty ask-mode workspace so it could not read repo data; a "descriptive" prompt variant explicitly asked for measured rather than prudent household behavior and for liquidity-first reasoning.
+
+| Arm | Aggregate range RMSE | Cell range RMSE |
+| --- | --- | --- |
+| Liquidity rule (baseline to beat) | `0.0560` | `0.0272` |
+| GPT-5.5, baseline prompt | `0.0762` | `0.0387` |
+| GPT-5.5, descriptive prompt | `0.0652` | `0.0387` |
+| Opus 4.8, baseline prompt | `0.2868` | `0.0789` |
+| Opus 4.8, descriptive prompt | `0.0682` | `0.0415` |
+
+Three things follow. First, the negative is not GPT-specific: Opus 4.8 under the identical prompt is substantially worse than GPT-5.5, mostly by flattening the liquidity gradient (`0.5376` on that family versus GPT-5.5's `0.0000`), answering with prudent-advice allocations instead of measured behavior. Second, prompting matters but does not close the gap: the descriptive framing fixes most of Opus's prudence bias (liquidity-gradient family `0.5376` to `0.0374`) and improves GPT-5.5's aggregate score, yet every raw-LLM arm still loses to the liquidity rule, and cell-level scores barely move. Third, the arms converge near `0.065`-`0.068` from very different starting points, which suggests a shared ceiling on eliciting measured behavioral moments from current frontier models rather than a fixable idiosyncrasy. These arms scored the selection split for diagnosis only; no mechanism selection was keyed off holdout families.
+
 ## Finding 3: Interpretable Behavior Kernels Failed Productively
 
 The project then tried to make the behavior signal usable inside an economy. That required moving away from raw allocation shares and toward interpretable mechanisms.

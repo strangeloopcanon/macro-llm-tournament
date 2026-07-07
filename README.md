@@ -394,6 +394,8 @@ PYTHONPATH=src python3 -m macro_llm_tournament.behavior_gate \
 
 The behavior gate uses one packed LLM call per event scenario. The deterministic layer then aggregates household-type allocations and scores them against published spending, debt-repayment, saving, liquidity-gradient, and directional debt/saving-by-liquidity moments. It also writes a separate cell-level score surface that applies public low- and high-liquidity spending-response ranges to matching SCF household types, weighted by population share.
 
+The gate also supports `--provider cursor_cli`, which routes live calls through the headless `cursor-agent` CLI (for example `--model claude-opus-4-8-thinking-high`) so non-OpenAI models can be probed with the same prompts, cache semantics, and scoring. Cursor CLI calls run in ask mode inside an empty neutral workspace so the model cannot read repo data or targets. `--prompt-variant descriptive` swaps in a variant prompt that explicitly asks for measured (not prudent) household behavior and liquidity-first reasoning; it uses a separate prompt version so cached baseline responses are never replayed as descriptive ones.
+
 The scored behavior targets are loaded from `src/macro_llm_tournament/data/public_behavior_targets.csv`. Aggregate and cell-level rows are separated by `target_scope`, so the aggregate scoreboard is not inflated by repeated household-cell rows. Rows marked as unscored gaps document direct targets the project still needs, such as labor response and portfolio/liquidity shifts, without letting proxy data count as evidence for them.
 
 Run a fresh-cache persona belief-panel smoke pilot after the fixture passes and after preparing a respondent-level holdout CSV:

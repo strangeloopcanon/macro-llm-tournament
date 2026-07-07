@@ -133,6 +133,20 @@ class AgentLLMClient:
             raise LLMUnavailable("codex CLI binary not found; set CODEX_CLI_BIN or install codex")
         return binary
 
+    def _cursor_binary(self) -> str:
+        binary = os.getenv("CURSOR_CLI_BIN") or shutil.which("cursor-agent")
+        if not binary:
+            raise LLMUnavailable("cursor-agent CLI binary not found; set CURSOR_CLI_BIN or install cursor-agent")
+        return binary
+
+    def _cursor_neutral_workspace(self) -> Path:
+        # cursor-agent in ask mode can read its workspace, so point it at an
+        # empty directory: the model must answer from the prompt alone and can
+        # never inspect repo data, targets, or caches.
+        path = self.cache_dir / "cursor_neutral_workspace"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _codex_call(self, prompt: str, cache_name: str) -> dict[str, Any]:
         cache_path = self.cache_path(cache_name)
         if cache_path.exists():
@@ -142,6 +156,11 @@ class AgentLLMClient:
         if self.mode != "live":
             raise LLMUnavailable(f"Agent mode {self.mode} cannot make live calls")
         self._record_live_call(cache_name)
+        if self.provider == "cursor_cli":
+            return self._run_cursor_cli(prompt, cache_path)
+        return self._run_codex_cli(prompt, cache_path)
+
+    def _run_codex_cli(self, prompt: str, cache_path: Path) -> dict[str, Any]:
         last_message_path = cache_path.with_name(f"{cache_path.stem}.{os.getpid()}.last_message.txt")
         command = [
             self._codex_binary(),
@@ -181,6 +200,41 @@ class AgentLLMClient:
         finally:
             if last_message_path.exists():
                 last_message_path.unlink()
+
+    def _run_cursor_cli(self, prompt: str, cache_path: Path) -> dict[str, Any]:
+        command = cursor_cli_command(self._cursor_binary(), self.model, self._cursor_neutral_workspace())
+        try:
+            result = subprocess.run(
+                command,
+                input=_agent_system_prompt(prompt),
+                text=True,
+                capture_output=True,
+                cwd=str(self._cursor_neutral_workspace()),
+                timeout=float(os.getenv("CURSOR_CLI_TIMEOUT_SECONDS", "600")),
+                check=False,
+            )
+            if result.returncode != 0:
+                stderr = (result.stderr or result.stdout or "").strip()
+                raise LLMUnavailable(f"Cursor CLI failed with exit code {result.returncode}: {stderr[:700]}")
+            return self._write_cache(cache_path, extract_json(result.stdout or ""))
+        except subprocess.TimeoutExpired as exc:
+            raise LLMUnavailable(f"Cursor CLI timed out after {exc.timeout} seconds") from exc
+
+
+def cursor_cli_command(binary: str, model: str, workspace: Path) -> list[str]:
+    return [
+        binary,
+        "-p",
+        "--output-format",
+        "text",
+        "--model",
+        model,
+        "--mode",
+        "ask",
+        "--trust",
+        "--workspace",
+        str(workspace),
+    ]
 
 
 def agent_prompt(

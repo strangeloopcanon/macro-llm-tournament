@@ -19,6 +19,15 @@ from .llm_common import LLMUnavailable
 
 BEHAVIOR_GATE_VERSION = "household_behavior_target_gate_v4"
 BEHAVIOR_PROMPT_VERSION = "household_behavior_target_gate_v1"
+BEHAVIOR_PROMPT_DESCRIPTIVE_VERSION = "household_behavior_target_gate_descriptive_v1"
+BEHAVIOR_PROMPT_VARIANTS = ("baseline", "descriptive")
+BEHAVIOR_DESCRIPTIVE_FRAMING = (
+    "Predict the average behavior that real US households of each type were actually measured to do in this "
+    "situation, as found in spending diaries, bank transaction data, and household panel studies. Do not answer "
+    "with what a financially prudent household should do; measured behavior often departs from prudent advice. "
+    "Before answering, silently reason about each household type's monthly cash flow, liquid buffer in months, "
+    "and how binding its liquidity constraint is, then commit to shares consistent with that reasoning."
+)
 BEHAVIOR_PRIMITIVE_PROMPT_VERSION = "household_behavior_primitives_v2"
 BEHAVIOR_PRIMITIVE_POLICY_VERSION = "primitive_to_action_policy_log_shock_v1"
 BEHAVIOR_PRIMITIVE_CALIBRATED_POLICY_VERSION = "primitive_to_action_policy_selection_calibrated_v1"
@@ -213,8 +222,9 @@ BEHAVIOR_SCENARIOS: tuple[BehaviorScenario, ...] = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run direct household behavior target gate.")
-    parser.add_argument("--provider", choices=["codex_cli"], default="codex_cli")
+    parser.add_argument("--provider", choices=["codex_cli", "cursor_cli"], default="codex_cli")
     parser.add_argument("--model", default="gpt-5.5")
+    parser.add_argument("--prompt-variant", choices=list(BEHAVIOR_PROMPT_VARIANTS), default="baseline")
     parser.add_argument("--behavior-mode", choices=["fixture", "replay", "live"], default="fixture")
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--primitive-mode", choices=["auto", "fixture", "replay", "live", "off"], default="auto")
@@ -252,6 +262,10 @@ def main() -> int:
         "timestamp_utc": timestamp,
         "provider": args.provider,
         "model": args.model,
+        "prompt_variant": args.prompt_variant,
+        "behavior_prompt_version": (
+            BEHAVIOR_PROMPT_DESCRIPTIVE_VERSION if args.prompt_variant == "descriptive" else BEHAVIOR_PROMPT_VERSION
+        ),
         "behavior_mode": args.behavior_mode,
         "primitive_mode": primitive_mode,
         "primitive_fixed_policy_version": BEHAVIOR_PRIMITIVE_POLICY_VERSION if primitive_mode != "off" else None,
@@ -272,7 +286,14 @@ def main() -> int:
         target_catalog = behavior_target_catalog(include_unscored=True)
         targets = behavior_targets_frame(target_scope="aggregate")
         cell_targets = behavior_targets_frame(target_scope="cell")
-        llm_client = BehaviorLLMClient(args.provider, args.model, cache_dir, mode=args.behavior_mode, max_live_calls=args.max_live_calls)
+        llm_client = BehaviorLLMClient(
+            args.provider,
+            args.model,
+            cache_dir,
+            mode=args.behavior_mode,
+            max_live_calls=args.max_live_calls,
+            prompt_variant=args.prompt_variant,
+        )
         actions = run_behavior_gate(BEHAVIOR_SCENARIOS, type_cells, llm_client=llm_client)
         primitive_actions = pd.DataFrame(columns=actions.columns)
         primitive_fixed_actions = pd.DataFrame(columns=actions.columns)
@@ -540,10 +561,22 @@ def main() -> int:
 
 
 class BehaviorLLMClient:
-    def __init__(self, provider: str, model: str, cache_dir: Path, *, mode: str, max_live_calls: int):
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        cache_dir: Path,
+        *,
+        mode: str,
+        max_live_calls: int,
+        prompt_variant: str = "baseline",
+    ):
+        if prompt_variant not in BEHAVIOR_PROMPT_VARIANTS:
+            raise ValueError(f"Unsupported behavior prompt variant: {prompt_variant}")
         self.provider = provider
         self.model = model
         self.mode = mode
+        self.prompt_variant = prompt_variant
         self._client = AgentLLMClient(provider, model, cache_dir, mode=mode, max_live_calls=max_live_calls)
         self.raw_records: list[dict[str, Any]] = []
 
@@ -565,13 +598,14 @@ class BehaviorLLMClient:
                 "cache_path": None,
             }
         else:
-            prompt = behavior_prompt(scenario, type_cells)
+            prompt = behavior_prompt(scenario, type_cells, variant=self.prompt_variant)
             data = self._client._codex_call(prompt, f"behavior_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt})}")
         normalized = normalize_behavior_payload(scenario, type_cells, data)
         self.raw_records.append(
             {
                 "scenario_id": scenario.scenario_id,
                 "record_type": "behavior_allocations",
+                "prompt_variant": self.prompt_variant,
                 "provider": data.get("provider"),
                 "model": data.get("model"),
                 "cache_hit": bool(data.get("cache_hit", False)),
@@ -838,11 +872,13 @@ def _normalize_action_row(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
+def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame, *, variant: str = "baseline") -> str:
+    if variant not in BEHAVIOR_PROMPT_VARIANTS:
+        raise ValueError(f"Unsupported behavior prompt variant: {variant}")
     if scenario.scenario_type == "income_loss":
-        return behavior_income_loss_prompt(scenario, type_cells)
+        return behavior_income_loss_prompt(scenario, type_cells, variant=variant)
     payload = {
-        "prompt_version": BEHAVIOR_PROMPT_VERSION,
+        "prompt_version": BEHAVIOR_PROMPT_DESCRIPTIVE_VERSION if variant == "descriptive" else BEHAVIOR_PROMPT_VERSION,
         "task": "Allocate a one-time household transfer into spending, debt repayment, and liquid saving.",
         "as_of_rule": "Use only the scenario and type-cell information below. Do not cite realized study estimates.",
         "scenario": {
@@ -881,12 +917,14 @@ def behavior_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str
             ]
         },
     }
+    if variant == "descriptive":
+        payload["behavior_framing"] = BEHAVIOR_DESCRIPTIVE_FRAMING
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
-def behavior_income_loss_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame) -> str:
+def behavior_income_loss_prompt(scenario: BehaviorScenario, type_cells: pd.DataFrame, *, variant: str = "baseline") -> str:
     payload = {
-        "prompt_version": BEHAVIOR_PROMPT_VERSION,
+        "prompt_version": BEHAVIOR_PROMPT_DESCRIPTIVE_VERSION if variant == "descriptive" else BEHAVIOR_PROMPT_VERSION,
         "task": "Estimate bounded household spending and balance-sheet responses to an income-loss scenario.",
         "as_of_rule": "Use only the scenario and type-cell information below. Do not cite realized study estimates.",
         "scenario": {
@@ -927,6 +965,8 @@ def behavior_income_loss_prompt(scenario: BehaviorScenario, type_cells: pd.DataF
             ]
         },
     }
+    if variant == "descriptive":
+        payload["behavior_framing"] = BEHAVIOR_DESCRIPTIVE_FRAMING
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
@@ -1954,6 +1994,7 @@ def build_behavior_gate_report(
         "",
         "## Run Setup",
         f"- Provider/model: `{manifest.get('provider')}` / `{manifest.get('model')}`",
+        f"- Prompt variant: `{manifest.get('prompt_variant', 'baseline')}`",
         f"- Behavior mode: `{manifest.get('behavior_mode')}`",
         f"- Primitive mode: `{manifest.get('primitive_mode')}`",
         f"- Live calls used: `{manifest.get('live_call_count')}` of cap `{manifest.get('max_live_calls')}`",

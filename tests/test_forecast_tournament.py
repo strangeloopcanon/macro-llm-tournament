@@ -1096,6 +1096,40 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertAlmostEqual(float(exact_all["rmse_range"]), 0.0)
         self.assertGreater(float(bad_all["rmse_range"]), 0.0)
 
+    def test_behavior_prompt_descriptive_variant_changes_version_and_adds_framing(self):
+        from macro_llm_tournament.behavior_gate import (
+            BEHAVIOR_DESCRIPTIVE_FRAMING,
+            BEHAVIOR_PROMPT_DESCRIPTIVE_VERSION,
+            BEHAVIOR_PROMPT_VERSION,
+            behavior_prompt,
+        )
+
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        transfer_scenario = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_type != "income_loss")
+        income_loss_scenario = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_type == "income_loss")
+
+        for scenario in (transfer_scenario, income_loss_scenario):
+            baseline = json.loads(behavior_prompt(scenario, type_cells))
+            descriptive = json.loads(behavior_prompt(scenario, type_cells, variant="descriptive"))
+            self.assertEqual(baseline["prompt_version"], BEHAVIOR_PROMPT_VERSION)
+            self.assertNotIn("behavior_framing", baseline)
+            self.assertEqual(descriptive["prompt_version"], BEHAVIOR_PROMPT_DESCRIPTIVE_VERSION)
+            self.assertEqual(descriptive["behavior_framing"], BEHAVIOR_DESCRIPTIVE_FRAMING)
+        with self.assertRaises(ValueError):
+            behavior_prompt(transfer_scenario, type_cells, variant="not_a_variant")
+
+    def test_cursor_cli_command_is_headless_ask_mode_in_neutral_workspace(self):
+        from macro_llm_tournament.agent_llm import cursor_cli_command
+
+        command = cursor_cli_command("/usr/local/bin/cursor-agent", "claude-opus-4-8-thinking-high", Path("/tmp/neutral"))
+
+        self.assertEqual(command[0], "/usr/local/bin/cursor-agent")
+        self.assertIn("-p", command)
+        self.assertIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-4-8-thinking-high")
+        self.assertEqual(command[command.index("--mode") + 1], "ask")
+        self.assertEqual(command[command.index("--workspace") + 1], "/tmp/neutral")
+
     def test_behavior_gate_rejects_ambiguous_fresh_resume_cache(self):
         with TemporaryDirectory() as temp_dir:
             result = subprocess.run(
