@@ -115,6 +115,8 @@ from macro_llm_tournament.persona_belief_panel import (
     build_fixture_respondent_panel,
     build_persona_cards,
     classify_persona_evidence,
+    fixture_persona_belief_payload,
+    normalize_persona_belief_payload,
     normalize_respondent_panel,
     normalize_sce_respondent_panel,
     persona_belief_prompt,
@@ -1863,6 +1865,56 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertNotIn("actual_expected_unemployment_rate", prompt)
         self.assertNotIn("actual_expected_real_income_growth", prompt)
         self.assertNotIn(str(round(card.targets["expected_inflation_1y"], 4)), prompt)
+
+    def test_persona_backstory_prompt_requires_sketch_and_hides_heldout_responses(self):
+        respondents = build_fixture_respondent_panel(respondent_count=6, survey_date="2026-01-01")
+        card = build_persona_cards(respondents)[0]
+
+        point_prompt = persona_belief_prompt(card, target_fields=["expected_inflation_1y"])
+        backstory_prompt = persona_belief_prompt(
+            card, target_fields=["expected_inflation_1y"], elicitation="backstory"
+        )
+
+        self.assertIn("persona_belief_panel_backstory_v1", backstory_prompt)
+        self.assertIn("persona_sketch", backstory_prompt)
+        self.assertIn("persona_rule", backstory_prompt)
+        self.assertIn("different people", backstory_prompt)
+        self.assertNotIn("persona_sketch", point_prompt)
+        self.assertNotEqual(point_prompt, backstory_prompt)
+        for prompt in (point_prompt, backstory_prompt):
+            self.assertNotIn("actual_expected_inflation_1y", prompt)
+            self.assertNotIn(str(round(card.targets["expected_inflation_1y"], 4)), prompt)
+        with self.assertRaises(ValueError):
+            persona_belief_prompt(card, target_fields=["expected_inflation_1y"], elicitation="roleplay")
+
+    def test_persona_backstory_payload_normalizes_sketch(self):
+        respondents = build_fixture_respondent_panel(respondent_count=4, survey_date="2026-01-01")
+        card = build_persona_cards(respondents)[0]
+        payload = fixture_persona_belief_payload(
+            card, "gpt-5.5", target_fields=["expected_inflation_1y"], elicitation="backstory"
+        )
+
+        self.assertIn("persona_sketch", payload)
+
+        normalized = normalize_persona_belief_payload(
+            card,
+            {"payload": payload},
+            provider="codex_cli",
+            model="gpt-5.5",
+            target_fields=["expected_inflation_1y"],
+        )
+
+        self.assertTrue(normalized["persona_sketch"].startswith("deterministic fixture individual"))
+        point_payload = fixture_persona_belief_payload(card, "gpt-5.5", target_fields=["expected_inflation_1y"])
+        self.assertNotIn("persona_sketch", point_payload)
+        point_normalized = normalize_persona_belief_payload(
+            card,
+            {"payload": point_payload},
+            provider="codex_cli",
+            model="gpt-5.5",
+            target_fields=["expected_inflation_1y"],
+        )
+        self.assertEqual(point_normalized["persona_sketch"], "")
 
     def test_persona_respondent_panel_respects_requested_count_and_scoreable_weights(self):
         fixture = build_fixture_respondent_panel(respondent_count=60, survey_date="2026-01-01")

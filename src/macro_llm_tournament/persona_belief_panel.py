@@ -22,6 +22,8 @@ from .llm_common import LLMUnavailable
 
 PERSONA_BELIEF_PANEL_VERSION = "persona_belief_panel_v1"
 PERSONA_BELIEF_PROMPT_VERSION = "persona_belief_panel_v1"
+PERSONA_BELIEF_BACKSTORY_PROMPT_VERSION = "persona_belief_panel_backstory_v1"
+ELICITATION_MODES = ("point", "backstory")
 SURVEY_SCHEMAS = ("normalized", "sce")
 DEFAULT_SAMPLE_STRATA = ("income_group", "age_group", "education_group")
 DEFAULT_TARGET_FIELDS = (
@@ -182,6 +184,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--respondent-sample-seed", type=int, default=0)
     parser.add_argument("--respondent-sample-strata", default=",".join(DEFAULT_SAMPLE_STRATA))
     parser.add_argument("--survey-date", default="2026-01-01")
+    parser.add_argument("--elicitation-mode", choices=ELICITATION_MODES, default="point")
     parser.add_argument("--target-fields", default=",".join(DEFAULT_TARGET_FIELDS))
     parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
@@ -277,6 +280,7 @@ def main() -> int:
         "respondent_sample_size": int(args.respondent_sample_size),
         "respondent_sample_seed": int(args.respondent_sample_seed),
         "respondent_sample_strata": list(sample_strata),
+        "elicitation_mode": args.elicitation_mode,
         "target_fields": target_fields,
         "pre_registered_evidence_thresholds": EVIDENCE_THRESHOLDS,
         "split_roles": _split_roles_manifest(respondent_input),
@@ -291,7 +295,10 @@ def main() -> int:
         cards = build_persona_cards(respondents, target_fields=target_fields)
         all_predictions: list[pd.DataFrame] = []
         raw_records: list[dict[str, Any]] = []
-        prompt_rows = [persona_prompt_record(card, target_fields=target_fields) for card in cards]
+        prompt_rows = [
+            persona_prompt_record(card, target_fields=target_fields, elicitation=args.elicitation_mode)
+            for card in cards
+        ]
         live_calls = 0
         cache_hits = 0
         model_run_modes: dict[str, dict[str, Any]] = {}
@@ -305,6 +312,7 @@ def main() -> int:
                 mode=client_mode,
                 max_live_calls=client_cap,
                 execution_cwd=provider_execution_cwd,
+                elicitation=args.elicitation_mode,
             )
             predictions = run_persona_beliefs(cards, client, target_fields=target_fields)
             all_predictions.append(predictions)
@@ -382,10 +390,14 @@ class PersonaBeliefClient:
         mode: str,
         max_live_calls: int,
         execution_cwd: Path | None = None,
+        elicitation: str = "point",
     ):
+        if elicitation not in ELICITATION_MODES:
+            raise ValueError(f"Unknown elicitation mode: {elicitation}")
         self.provider = provider
         self.model = model
         self.mode = mode
+        self.elicitation = elicitation
         self._client = ForecastLLMClient(
             provider,
             model,
@@ -409,13 +421,15 @@ class PersonaBeliefClient:
             data = {
                 "provider": self.provider,
                 "model": self.model,
-                "payload": fixture_persona_belief_payload(card, self.model, target_fields=target_fields),
+                "payload": fixture_persona_belief_payload(
+                    card, self.model, target_fields=target_fields, elicitation=self.elicitation
+                ),
                 "cache_hit": False,
                 "cache_path": None,
                 "call_source": "fixture",
             }
         else:
-            prompt = persona_belief_prompt(card, target_fields=target_fields)
+            prompt = persona_belief_prompt(card, target_fields=target_fields, elicitation=self.elicitation)
             cache_name = f"persona_belief_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt})}"
             data = self._client.json_call(prompt, cache_name, instructions=_persona_belief_instructions())
         call_source = data.get("call_source") or ("cache" if data.get("cache_hit") else ("live" if self.mode == "live" else self.mode))
@@ -717,8 +731,8 @@ def build_persona_cards(respondents: pd.DataFrame, *, target_fields: Iterable[st
     return cards
 
 
-def persona_prompt_record(card: PersonaCard, *, target_fields: Iterable[str]) -> dict[str, Any]:
-    prompt_text = persona_belief_prompt(card, target_fields=target_fields)
+def persona_prompt_record(card: PersonaCard, *, target_fields: Iterable[str], elicitation: str = "point") -> dict[str, Any]:
+    prompt_text = persona_belief_prompt(card, target_fields=target_fields, elicitation=elicitation)
     return {
         "respondent_id": card.respondent_id,
         "survey_source": card.survey_source,
@@ -729,15 +743,17 @@ def persona_prompt_record(card: PersonaCard, *, target_fields: Iterable[str]) ->
     }
 
 
-def persona_prompt_payload(card: PersonaCard) -> dict[str, Any]:
+def persona_prompt_payload(card: PersonaCard, *, elicitation: str = "point") -> dict[str, Any]:
     source = card.survey_source.lower()
     record_kind = (
         "synthetic fixture respondent"
         if "fixture" in source
         else ("synthetic enriched respondent" if "synthetic" in source else "survey respondent")
     )
-    return {
-        "prompt_version": PERSONA_BELIEF_PROMPT_VERSION,
+    payload: dict[str, Any] = {
+        "prompt_version": (
+            PERSONA_BELIEF_BACKSTORY_PROMPT_VERSION if elicitation == "backstory" else PERSONA_BELIEF_PROMPT_VERSION
+        ),
         "task": f"Simulate this {record_kind}'s subjective macroeconomic beliefs.",
         "as_of_rule": (
             "Use only the respondent profile and survey date. Do not use realized future values, "
@@ -748,11 +764,26 @@ def persona_prompt_payload(card: PersonaCard) -> dict[str, Any]:
         "survey_date": card.survey_date,
         "respondent_profile": card.profile,
     }
+    if elicitation == "backstory":
+        payload["task"] = (
+            f"First imagine one specific plausible individual who matches this {record_kind} profile. "
+            "Then answer the belief questions as that individual."
+        )
+        payload["persona_rule"] = (
+            "Invent one concrete individual consistent with the profile: their household situation, work, "
+            "recent personal experiences with prices, income, and job security. Different respondents who "
+            "share the same profile are still different people, so imagine this particular one rather than "
+            "the typical member of the group. Then report the beliefs that this specific person would give, "
+            "from inside their life, even where those beliefs differ from a careful forecast."
+        )
+    return payload
 
 
-def persona_belief_prompt(card: PersonaCard, *, target_fields: Iterable[str]) -> str:
-    payload = persona_prompt_payload(card)
-    payload["required_response"] = {
+def persona_belief_prompt(card: PersonaCard, *, target_fields: Iterable[str], elicitation: str = "point") -> str:
+    if elicitation not in ELICITATION_MODES:
+        raise ValueError(f"Unknown elicitation mode: {elicitation}")
+    payload = persona_prompt_payload(card, elicitation=elicitation)
+    required: dict[str, Any] = {
         "respondent_id": card.respondent_id,
         "beliefs": {
             target: {
@@ -767,6 +798,10 @@ def persona_belief_prompt(card: PersonaCard, *, target_fields: Iterable[str]) ->
         "uncertainty": "0 to 1.5",
         "reason": "short explanation based only on supplied profile",
     }
+    if elicitation == "backstory":
+        required["persona_sketch"] = "2-3 sentence sketch of the specific imagined individual"
+        required["reason"] = "short explanation grounded in the imagined individual's life"
+    payload["required_response"] = required
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
@@ -794,6 +829,7 @@ def run_persona_beliefs(cards: Iterable[PersonaCard], client: PersonaBeliefClien
                     "confidence": payload["confidence"],
                     "uncertainty": payload["uncertainty"],
                     "reason": payload["reason"],
+                    "persona_sketch": payload.get("persona_sketch", ""),
                     "cache_hit": payload["cache_hit"],
                     "cache_path": payload["cache_path"],
                     "call_source": payload["call_source"],
@@ -825,6 +861,7 @@ def normalize_persona_belief_payload(
         "confidence": _bounded_float(payload, "confidence", 0.0, 1.0, default=0.5),
         "uncertainty": _bounded_float(payload, "uncertainty", 0.0, 1.5, default=0.5),
         "reason": str(payload.get("reason", ""))[:300],
+        "persona_sketch": str(payload.get("persona_sketch", ""))[:500],
         "cache_hit": bool(data.get("cache_hit", False)),
         "cache_path": data.get("cache_path"),
     }
@@ -845,7 +882,9 @@ def normalize_persona_belief_payload(
     return normalized
 
 
-def fixture_persona_belief_payload(card: PersonaCard, model: str, *, target_fields: Iterable[str]) -> dict[str, Any]:
+def fixture_persona_belief_payload(
+    card: PersonaCard, model: str, *, target_fields: Iterable[str], elicitation: str = "point"
+) -> dict[str, Any]:
     beliefs: dict[str, dict[str, float]] = {}
     for target in target_fields:
         point = _fixture_predicted_belief(card.profile, card.respondent_id, model, target)
@@ -858,14 +897,23 @@ def fixture_persona_belief_payload(card: PersonaCard, model: str, *, target_fiel
             "p50": value,
             "p90": float(np.clip(value + width, spec["lower"], spec["upper"])),
         }
-    return {
-        "prompt_version": PERSONA_BELIEF_PROMPT_VERSION,
+    payload = {
+        "prompt_version": (
+            PERSONA_BELIEF_BACKSTORY_PROMPT_VERSION if elicitation == "backstory" else PERSONA_BELIEF_PROMPT_VERSION
+        ),
         "respondent_id": card.respondent_id,
         "beliefs": beliefs,
         "confidence": 0.62,
         "uncertainty": 0.55,
         "reason": "deterministic fixture persona belief from respondent profile",
     }
+    if elicitation == "backstory":
+        payload["persona_sketch"] = (
+            f"deterministic fixture individual for {card.respondent_id}: "
+            f"{card.profile.get('employment_status', 'unknown')} {card.profile.get('age_group', 'unknown')} "
+            f"household in the {card.profile.get('region', 'unknown')}"
+        )
+    return payload
 
 
 def score_regression_gradient_match(
