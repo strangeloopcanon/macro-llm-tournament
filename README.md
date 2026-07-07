@@ -4,6 +4,68 @@ Research code for running as-of macro forecast tournaments against public Survey
 
 The repository contains the reusable harness, plus one current handoff report at [`reports/macro_simulation_report.md`](reports/macro_simulation_report.md). Generated run reports, model outputs, caches, and research notes are local artifacts and are not part of the public source tree.
 
+## How the simulated economy works
+
+The end state of the project is the Phase 4 matched-twin pipeline. Real survey respondents' beliefs, updated by an LLM, drive a deterministic toy economy, and that economy is scored against real macro data with a no-LLM twin as the control:
+
+```text
+ REAL WORLD                          SIMULATION
+ ..........                          ..........
+
+ NY Fed SCE panel ------.
+ (real respondents'     |
+  prior survey answers) v
+                    +------------------------------+
+ real macro news -->|  1. LLM BELIEF UPDATER       |  the only LLM step
+ (as-of vintage,    |  "This person believed X     |  (GPT-5.5 via Codex
+  leakage-audited)  |   last wave. Given this      |   CLI; calls banked,
+                    |   news, what do they         |   then replayed at
+                    |   believe now?"              |   zero cost)
+                    +---------------+--------------+
+                                    | updated beliefs per household
+                                    | (inflation, job-loss risk,
+                                    |  income growth, rates)
+                                    v
+                    +------------------------------+
+                    |  2. DETERMINISTIC BEHAVIOR   |  no LLM here: fixed
+                    |     KERNEL                   |  equations turn
+                    |  beliefs -> consumption,     |  beliefs into actions
+                    |  saving, borrowing under     |  (raw LLM actions lost
+                    |  hard budget constraints     |  to a liquidity rule)
+                    +---------------+--------------+
+                                    | household decisions
+                                    v
+                    +------------------------------+
+                    |  3. ONE-GOOD DEMAND ECONOMY  |  accounting identities
+                    |  sums decisions into         |  checked every period
+                    |  aggregate consumption,      |
+                    |  saving, debt, income        |
+                    +---------------+--------------+
+                                    | locked output mapping
+                                    | (schema v2, sha-pinned
+                                    |  before any scoring)
+                                    v
+                    +------------------------------+
+ real FRED data --->|  4. SCORE AGAINST REALITY    |
+ (post-cutoff       |  simulated aggregates vs     |
+  months only)      |  PCE growth, saving-rate     |
+                    |  change, retail sales,       |
+                    |  revolving credit            |
+                    +------------------------------+
+                          :
+                          : planned, not yet wired: feed simulated
+                          : state back into step 1 prompts to close
+                          : the loop
+                          :..............> back to step 1
+
+ CONTROL: the same households, economy, and mapping run twice --
+ once with the LLM updater in step 1, once with a mechanical
+ adaptive-expectations updater. The LLM layer only earns its keep
+ if its twin scores better. (Current one-month verdict: it does not.)
+```
+
+Design decisions baked into the diagram: the LLM never chooses actions (that was tested and lost to a simple liquidity rule); personas are conditioned on real respondents' prior answers, not invented from demographic profiles (profile-only and backstory-only personas both failed their gates); and the output mapping is locked and hashed before scoring so results cannot be tuned after the fact.
+
 ## What is in the repo
 
 - `src/macro_llm_tournament/forecast_tournament.py` builds and scores SPF-style forecast tournaments.

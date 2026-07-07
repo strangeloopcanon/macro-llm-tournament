@@ -171,6 +171,39 @@ The right economy architecture now looks different from the early "personas simu
 4. Treat behavior mechanisms as separately validated modules, not as free-form LLM allocation guesses.
 5. Compare the resulting economy to an adaptive-expectations twin: the same demand economy with LLM belief updates swapped out for a standard adaptive baseline.
 
+As a picture, the pipeline that now exists is:
+
+```text
+real SCE respondents' ---.
+prior survey answers     |
+                         v
+real macro news --> [1. LLM BELIEF UPDATER]        <- the only LLM step
+(as-of vintage)          |                            (banked calls,
+                         | updated household beliefs  replayed at zero cost)
+                         v
+                    [2. DETERMINISTIC BEHAVIOR KERNEL]
+                         |                            <- no LLM: fixed equations,
+                         | consumption / saving /        hard budget constraints
+                         | borrowing decisions
+                         v
+                    [3. ONE-GOOD DEMAND ECONOMY]      <- accounting identities
+                         |                               checked every period
+                         | aggregates via locked,
+                         | sha-pinned output mapping (v2)
+                         v
+real FRED data ---> [4. SCORE AGAINST REALITY]
+(post-cutoff)            :
+                         :  planned, not yet wired: simulated state
+                         :  feeding back into step 1 prompts
+                         :.................> back to step 1
+
+CONTROL: the identical economy runs twice -- LLM updater vs
+mechanical adaptive-expectations updater in step 1. The LLM
+layer only earns its keep if its twin scores better.
+```
+
+The LLM never chooses actions (raw LLM allocations lost to a liquidity rule), personas are conditioned on real respondents' prior answers rather than invented from profiles (both profile-only and backstory-only personas failed their gates), and the feedback loop from simulated state into prompts stays unwired until the open-loop economy beats the adaptive twin.
+
 That final comparison now has a fixture harness and an exploratory replay. `outputs/phase4_matched_twins_fixture/` locks the output-to-proxy mapping, runs the LLM-belief and adaptive-expectations twins from the same initial state, preserves accounting, and emits comparable post-cutoff proxy scores. Its verdict is `phase4_matched_twin_fixture_ready`, with max accounting residual `2.91e-11` and zero live calls.
 
 The first real-SCE prior-update replay uses the banked Codex ecology run in `outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100/`, filters to `llm_codex_cli_gpt-5.5`, and feeds those prior-conditioned belief updates into the deterministic demand economy. The Phase 4 output mapping is now schema v2: `personal_saving_rate_pct` is scored as month-over-month change in the saving-rate proxy, not the saving-rate level, and that transform is applied identically to both twins and to the FRED target before scoring.
