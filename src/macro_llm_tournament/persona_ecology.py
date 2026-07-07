@@ -35,7 +35,9 @@ from .persona_belief_panel import (
 
 PERSONA_ECOLOGY_VERSION = "persona_belief_ecology_v1"
 PERSONA_ECOLOGY_PROMPT_VERSION = "persona_belief_ecology_v1"
+PERSONA_ECOLOGY_BACKSTORY_PROMPT_VERSION = "persona_belief_ecology_backstory_v1"
 DEFAULT_ECOLOGY_SAMPLE_STRATA = ("income_group", "age_group", "education_group")
+ECOLOGY_ELICITATION_MODES = ("point", "backstory")
 PRIOR_UPDATE_THRESHOLDS = {
     "primary_source_mean_delta_correlation_min": 0.10,
     "primary_source_mean_direction_accuracy_min": 0.55,
@@ -180,6 +182,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prior-mode", choices=PRIOR_MODES, default="simulated")
     parser.add_argument("--feedback-mode", choices=FEEDBACK_MODES, default="closed_loop")
     parser.add_argument("--date-mode", choices=DATE_MODES, default="actual")
+    parser.add_argument("--elicitation-mode", choices=ECOLOGY_ELICITATION_MODES, default="point")
     parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
 
@@ -283,6 +286,7 @@ def main() -> int:
         "period_count": int(panel["period_index"].nunique()),
         "target_fields": target_fields,
         "prior_mode": args.prior_mode,
+        "elicitation_mode": args.elicitation_mode,
         "primary_update_source": primary_update_source,
         "pre_registered_prior_update_thresholds": PRIOR_UPDATE_THRESHOLDS,
         "split_roles": _split_roles_manifest(respondent_input, period_ids=period_ids, prior_mode=args.prior_mode),
@@ -315,6 +319,7 @@ def main() -> int:
                 mode=client_mode,
                 max_live_calls=client_cap,
                 execution_cwd=provider_execution_cwd,
+                elicitation=args.elicitation_mode,
             )
             predictions, actions, environments, prompts = run_persona_ecology(
                 cards,
@@ -323,6 +328,7 @@ def main() -> int:
                 prior_mode=args.prior_mode,
                 feedback_mode=args.feedback_mode,
                 date_mode=args.date_mode,
+                elicitation=args.elicitation_mode,
             )
             all_predictions.append(predictions)
             all_actions.append(actions)
@@ -454,10 +460,14 @@ class PersonaEcologyClient:
         mode: str,
         max_live_calls: int,
         execution_cwd: Path | None = None,
+        elicitation: str = "point",
     ):
+        if elicitation not in ECOLOGY_ELICITATION_MODES:
+            raise ValueError(f"Unsupported ecology elicitation mode: {elicitation}")
         self.provider = provider
         self.model = model
         self.mode = mode
+        self.elicitation = elicitation
         self._client = ForecastLLMClient(
             provider,
             model,
@@ -496,6 +506,7 @@ class PersonaEcologyClient:
                     prior_beliefs=prior_beliefs,
                     environment=environment,
                     date_mode=date_mode,
+                    elicitation=self.elicitation,
                 ),
                 "cache_hit": False,
                 "cache_path": None,
@@ -508,6 +519,7 @@ class PersonaEcologyClient:
                 prior_beliefs=prior_beliefs,
                 environment=environment,
                 date_mode=date_mode,
+                elicitation=self.elicitation,
             )
             cache_name = f"persona_ecology_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt})}"
             data = self._client.json_call(prompt, cache_name, instructions=_persona_ecology_instructions())
@@ -745,6 +757,7 @@ def persona_ecology_prompt(
     prior_beliefs: dict[str, float],
     environment: dict[str, float],
     date_mode: str = "actual",
+    elicitation: str = "point",
 ) -> str:
     payload = persona_ecology_prompt_payload(
         card,
@@ -752,6 +765,7 @@ def persona_ecology_prompt(
         prior_beliefs=prior_beliefs,
         environment=environment,
         date_mode=date_mode,
+        elicitation=elicitation,
     )
     return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -763,11 +777,14 @@ def persona_ecology_prompt_payload(
     prior_beliefs: dict[str, float],
     environment: dict[str, float],
     date_mode: str = "actual",
+    elicitation: str = "point",
 ) -> dict[str, Any]:
+    if elicitation not in ECOLOGY_ELICITATION_MODES:
+        raise ValueError(f"Unsupported ecology elicitation mode: {elicitation}")
     prompt_identity = _prompt_identity(card, date_mode=date_mode)
     record_kind = "synthetic fixture respondent" if "fixture" in card.survey_source else "survey respondent"
-    return {
-        "prompt_version": PERSONA_ECOLOGY_PROMPT_VERSION,
+    payload = {
+        "prompt_version": PERSONA_ECOLOGY_BACKSTORY_PROMPT_VERSION if elicitation == "backstory" else PERSONA_ECOLOGY_PROMPT_VERSION,
         "task": (
             f"Simulate this {record_kind} as a persistent household agent in a macroeconomic survey panel."
         ),
@@ -822,6 +839,20 @@ def persona_ecology_prompt_payload(
             "reason": "short explanation based only on supplied profile, priors, and environment",
         },
     }
+    if elicitation == "backstory":
+        payload["task"] = (
+            f"First imagine one specific plausible individual who matches this {record_kind} profile and already held "
+            "the supplied prior beliefs. Then update that individual's beliefs and behavior from the current environment."
+        )
+        payload["persona_rule"] = (
+            "Invent one concrete individual consistent with the profile and prior beliefs: household situation, work, "
+            "recent experiences with prices, income, job security, and liquidity. Different respondents with the same "
+            "profile can still be different people. Use the imagined life to preserve respondent-level heterogeneity, "
+            "but do not infer or copy hidden survey answers."
+        )
+        payload["required_response"]["persona_sketch"] = "2-3 sentence sketch of the specific imagined individual"
+        payload["required_response"]["reason"] = "short explanation grounded in the imagined individual, priors, and environment"
+    return payload
 
 
 def _prompt_identity(card: EcologyCard, *, date_mode: str) -> dict[str, str]:
@@ -861,6 +892,7 @@ def run_persona_ecology(
     prior_mode: str = "simulated",
     feedback_mode: str = "closed_loop",
     date_mode: str = "actual",
+    elicitation: str = "point",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     if prior_mode not in PRIOR_MODES:
         raise ValueError(f"Unsupported prior mode: {prior_mode}")
@@ -868,6 +900,8 @@ def run_persona_ecology(
         raise ValueError(f"Unsupported feedback mode: {feedback_mode}")
     if date_mode not in DATE_MODES:
         raise ValueError(f"Unsupported date_mode: {date_mode}")
+    if elicitation not in ECOLOGY_ELICITATION_MODES:
+        raise ValueError(f"Unsupported ecology elicitation mode: {elicitation}")
     ordered_cards = sorted(cards, key=lambda card: (card.period_index, card.respondent_id))
     source = f"llm_{client.provider}_{client.model}".replace("/", "_")
     simulated_priors: dict[str, dict[str, float]] = {}
@@ -900,6 +934,7 @@ def run_persona_ecology(
                         prior_beliefs=prior_beliefs,
                         environment=environment,
                         date_mode=date_mode,
+                        elicitation=elicitation,
                     ),
                     "prompt_text": persona_ecology_prompt(
                         card,
@@ -907,6 +942,7 @@ def run_persona_ecology(
                         prior_beliefs=prior_beliefs,
                         environment=environment,
                         date_mode=date_mode,
+                        elicitation=elicitation,
                     ),
                 }
             )
@@ -949,6 +985,7 @@ def run_persona_ecology(
                     "environment_weight": payload["module_weights"]["environment_weight"],
                     "aggregate_feedback_weight": payload["module_weights"]["aggregate_feedback_weight"],
                     "reason": payload["reason"],
+                    "persona_sketch": payload.get("persona_sketch", ""),
                     "cache_hit": payload["cache_hit"],
                     "cache_path": payload["cache_path"],
                     "call_source": payload["call_source"],
@@ -1026,6 +1063,7 @@ def normalize_persona_ecology_payload(
         "confidence": bounded_float(payload, "confidence", 0.0, 1.0),
         "uncertainty": bounded_float(payload, "uncertainty", 0.0, 1.5),
         "reason": str(payload.get("reason", ""))[:500],
+        "persona_sketch": str(payload.get("persona_sketch", ""))[:500],
         "cache_hit": bool(data.get("cache_hit", False)),
         "cache_path": data.get("cache_path"),
     }
@@ -1054,7 +1092,10 @@ def fixture_persona_ecology_payload(
     prior_beliefs: dict[str, float],
     environment: dict[str, float],
     date_mode: str = "actual",
+    elicitation: str = "point",
 ) -> dict[str, Any]:
+    if elicitation not in ECOLOGY_ELICITATION_MODES:
+        raise ValueError(f"Unsupported ecology elicitation mode: {elicitation}")
     beliefs: dict[str, dict[str, float]] = {}
     module_weights = _fixture_module_weights(card.profile, environment)
     for target in target_fields:
@@ -1080,8 +1121,8 @@ def fixture_persona_ecology_payload(
         }
     actions = _fixture_actions(card.profile, {target: beliefs[target]["value"] for target in target_fields}, environment)
     prompt_identity = _prompt_identity(card, date_mode=date_mode)
-    return {
-        "prompt_version": PERSONA_ECOLOGY_PROMPT_VERSION,
+    payload = {
+        "prompt_version": PERSONA_ECOLOGY_BACKSTORY_PROMPT_VERSION if elicitation == "backstory" else PERSONA_ECOLOGY_PROMPT_VERSION,
         "panel_row_id": prompt_identity["panel_row_id"],
         "respondent_id": prompt_identity["respondent_id"],
         "beliefs": beliefs,
@@ -1091,6 +1132,12 @@ def fixture_persona_ecology_payload(
         "uncertainty": float(np.clip(max(_fixture_ecology_uncertainty(card.profile, environment, target) for target in target_fields) / 4.0, 0.10, 1.25)),
         "reason": "deterministic fixture ecology update from profile, priors, environment, and aggregate feedback",
     }
+    if elicitation == "backstory":
+        payload["persona_sketch"] = (
+            f"deterministic fixture individual for {card.respondent_id}: "
+            f"{card.profile.get('employment_status', 'unknown')} household with prior beliefs carried into this period"
+        )
+    return payload
 
 
 def aggregate_period_feedback(

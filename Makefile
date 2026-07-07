@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -120,6 +120,21 @@ persona-ecology-relative-fixture:
 		--feedback-mode closed_loop \
 		--date-mode relative \
 		--output-dir outputs/persona_ecology_fixture_relative_gate
+
+persona-elicitation-prepare:
+	PYTHONPATH=src python3 -m macro_llm_tournament.persona_elicitation_campaign \
+		--mode prepare \
+		--provider codex_cli \
+		--output-dir outputs/persona_elicitation_campaign \
+		--work-dir work/persona_beliefs/persona_elicitation_campaign
+
+persona-elicitation-live:
+	PYTHONPATH=src python3 -m macro_llm_tournament.persona_elicitation_campaign \
+		--mode all \
+		--provider codex_cli \
+		--execute-live \
+		--output-dir outputs/persona_elicitation_campaign \
+		--work-dir work/persona_beliefs/persona_elicitation_campaign
 
 demand-economy-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \

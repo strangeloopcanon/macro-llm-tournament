@@ -361,11 +361,37 @@ PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
 
 Use `--date-mode relative` for a date-blind A/B run. This keeps the same respondents, priors, environment numbers, scoring targets, and feedback loop, but replaces prompt-facing calendar fields with `period_0`, `period_1`, and so on. The runner also rewrites the prompt-facing `panel_row_id` so date labels embedded in row ids cannot leak into the model prompt.
 
+Use `--elicitation-mode backstory` when the ecology should combine empirical priors with the same specific-person elicitation used by the static persona panel. This mode has a separate prompt version, asks for a `persona_sketch`, and still hides current-period targets.
+
 Use SCE first when possible because its rotating panel makes prior expectations and respondent-level dynamics easier to test. Use Michigan as a second distributional robustness surface. The ecology CSV can be normalized already, or passed with `--survey-schema sce` / `--survey-schema michigan` for flexible alias mapping. Required score columns are the same three held-out current beliefs as the static panel: `actual_expected_inflation_1y`, `actual_expected_unemployment_rate`, and `actual_expected_real_income_growth`. Stronger runs also include repeated respondents across at least two periods, optional `prior_*` belief columns from previous-wave answers, environment columns such as `observed_inflation_1y`, `observed_unemployment_rate`, `policy_rate`, `sentiment_index`, and optional behavior targets such as `actual_consumption_change_pct`, `actual_liquid_buffer_change_pct`, `actual_borrowing_desire_index`, `actual_portfolio_rebalance_to_liquid_pct`, and `actual_job_search_intensity_index`.
 
 `--prior-mode simulated` uses supplied priors for the first period and then feeds each model's own previous belief outputs into the next period. `--prior-mode empirical` uses the panel's `prior_*` columns at every period, which is cleaner for survey recapitulation but less emergent. `--feedback-mode closed_loop` lets aggregate simulated behavior perturb the next period's environment; `none` runs the same agents against only exogenous period information.
 
 The ecology cap must cover `panel rows * models`, plus any retry headroom. With `--respondent-limit 1`, a 12-call cap covers one respondent across up to twelve periods for a single model, or fewer periods with retry headroom. The runner emits period-level score files in addition to aggregate diagnostics: `persona_ecology_period_scores.csv` scores each source/model by period, `persona_ecology_update_scores.csv` scores period-to-period belief changes, and `persona_ecology_action_period_summary.csv` summarizes model-chosen behavior by period. Behavior scores become empirical behavior evidence only when the CSV includes external behavior target columns; fixture behavior targets are labeled as synthetic self-consistency checks in the report.
+
+Run the persona elicitation campaign setup without live calls:
+
+```bash
+make persona-elicitation-prepare
+```
+
+That prepares the November 2024 validation wave, builds the sealed May-June 2025 panel through the converter only, and writes `outputs/persona_elicitation_campaign/campaign_manifest.json`. The zero-call diagnostic Arm 0 can be run separately:
+
+```bash
+PYTHONPATH=src python3 -m macro_llm_tournament.persona_elicitation_campaign \
+  --mode arm0 \
+  --provider codex_cli \
+  --output-dir outputs/persona_elicitation_campaign \
+  --work-dir work/persona_beliefs/persona_elicitation_campaign
+```
+
+The overnight live campaign is intentionally Codex-only and requires an explicit live flag:
+
+```bash
+make persona-elicitation-live
+```
+
+The campaign runs Arm 1 point-vs-backstory on November 2024, Arm 2 no-hints distribution probes, and Arm 3 priors-plus-backstory on the sealed June 2025 wave only if Arm 1 passes for at least one model. Arm 3 is a prior-conditioned ecology run, not a direct promotion to macro behavior validity.
 
 Run the abstract, date-free behavior demand economy:
 
