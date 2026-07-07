@@ -4,11 +4,11 @@
 
 The project started with a broad question: can LLM agents simulate the macroeconomy well enough to produce useful forecasts and counterfactuals?
 
-The answer is now narrower, cleaner, and more useful. Frontier LLMs are good macro belief engines. They forecast hidden macro outcomes better than strong statistical baselines, survive direct recall audits, and update beliefs in the right direction when given a person's prior beliefs. They are not, at least in the current evidence, reliable generators of individual household heterogeneity from demographics or backstories. And the project has not yet shown a validated LLM-based simulated economy.
+The answer is now narrower, cleaner, and more useful. Frontier LLMs are good macro belief engines. They forecast hidden macro outcomes better than strong statistical baselines, survive direct recall audits, and update beliefs in the right direction when given a person's prior beliefs. They are not, at least in the current evidence, reliable generators of individual household heterogeneity from demographics or backstories. The best behavior interface so far is not first-person role-play or one-off allocation guesses; it is an LLM-authored policy schedule that deterministic code executes against household state. Even so, the project has not yet shown a validated LLM-based simulated economy.
 
 The short version:
 
-**LLMs are belief updaters, not belief generators. Individual heterogeneity has to come from data; once it is supplied, the model can partly move it in the right direction.**
+**LLMs are belief updaters and policy-function authors, not reliable household simulacra. Individual heterogeneity has to come from data; once it is supplied, the model can partly update beliefs and state conditional behavior rules.**
 
 That is not the original maximal claim, but it is a real result. It says where LLMs add signal, where they fail, and what an honest macro-agent architecture should look like next.
 
@@ -23,7 +23,8 @@ That is not the original maximal claim, but it is a real result. It says where L
 | Can profile-only LLM personas reproduce real SCE household belief heterogeneity? | No. | In a 500-respondent December 2024 SCE run, the evidence verdict is `null_gradient_failure`; median within-variance ratio is `0.0129`; max weighted KS is `0.5475`. |
 | Can richer backstory prompts fix that failure? | No. | In the November 2024 validation campaign, both GPT-5.5 and GPT-5.4 receive `backstory_caricature`; Arm 3 is skipped by design. |
 | Can prior-conditioned agents update beliefs? | Yes, modestly. | On repeated October-November 2024 SCE respondents, GPT-5.5 clears the locked prior-update gate: update correlation `0.3578`, direction accuracy `0.5769`, amplitude ratio `0.3234`, and RMSE improvement versus persistence `0.0437`. |
-| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and Phase 4 now runs an exploratory matched-twin replay, but the LLM-updater economy loses to the adaptive-expectations twin on the first FRED proxy pass. |
+| Does the policy-schedule behavior layer rescue the Phase 4 economy? | No, not yet. | The schedule executor is now wired into Phase 4 and uses the same GPT-5.5-authored policy functions for both twins. On the strict retrospective FRED month, adaptive still wins: scaled RMSE `0.8457` versus `6.5296` for the LLM-updater schedule economy. |
+| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and Phase 4 now runs exploratory matched-twin replays under both fixed-kernel and policy-schedule behavior executors, but the LLM-updater economy loses to the adaptive-expectations twin on both first FRED proxy passes. |
 
 ## Finding 1: The Aggregate Belief Engine Works
 
@@ -243,7 +244,11 @@ That final comparison now has a fixture harness and an exploratory replay. `outp
 
 The first real-SCE prior-update replay uses the banked Codex ecology run in `outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100/`, filters to `llm_codex_cli_gpt-5.5`, and feeds those prior-conditioned belief updates into the deterministic demand economy. The Phase 4 output mapping is now schema v2: `personal_saving_rate_pct` is scored as month-over-month change in the saving-rate proxy, not the saving-rate level, and that transform is applied identically to both twins and to the FRED target before scoring.
 
-The existing strict one-card FRED proxy replay has been rescored under v2 and labeled retrospective. Adaptive still wins: scaled RMSE `0.5860` versus `4.7165` for the LLM-updater path. The LLM-updater path has better direction accuracy (`1.0000` versus `0.6000`), but it remains too pessimistic on consumption growth. The five-card `hold_last` ablation, also rescored retrospectively under v2, says the same thing: adaptive scaled RMSE `1.0745`; LLM-updater scaled RMSE `2.9051`. Accounting passes in both runs. Confirmatory scoring under mapping v2 begins with the next newly scoreable data month. This is a useful negative: the validated belief updater is not yet enough to improve the macro proxy economy.
+The existing strict one-card FRED proxy replay has been rescored under v2 and labeled retrospective. With the original fixed demand kernel, adaptive still wins: scaled RMSE `0.5860` versus `4.7165` for the LLM-updater path. The LLM-updater path has better direction accuracy (`1.0000` versus `0.6000`), but it remains too pessimistic on consumption growth. The five-card `hold_last` ablation, also rescored retrospectively under v2, says the same thing: adaptive scaled RMSE `1.0745`; LLM-updater scaled RMSE `2.9051`.
+
+The policy-schedule executor is now wired into the same Phase 4 matched-twin runner. Both twins use the same GPT-5.5-authored schedules from `outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json`; deterministic code maps each SCE household to the nearest SCF schedule cell, interpolates the transfer and income-risk response functions, enforces budgets, and keeps accounting. This is the architecture implied by the behavior-ecology result: model-authored policy functions, code-executed actions.
+
+The first schedule-executor Phase 4 replay is also negative. On the strict retrospective one-card FRED proxy run, adaptive wins: scaled RMSE `0.8457` versus `6.5296` for the LLM-updater path. Both twins have direction accuracy `1.0000`, but the LLM-updater schedule economy over-contracts consumption growth and overshoots the saving-rate change. The five-card `hold_last` ablation gives the same ordering: adaptive scaled RMSE `1.2074`; LLM-updater scaled RMSE `3.8132`. Accounting passes in both schedule-mode runs. Confirmatory scoring under mapping v2 begins with the next newly scoreable data month. This is a useful negative: policy schedules are the right behavior interface, but the current belief-to-behavior bridge still does not beat adaptive expectations.
 
 ## What We Can Claim Now
 
@@ -252,6 +257,7 @@ The evidence supports three positive claims:
 1. **Frontier LLMs contain audited macro belief signal.** GPT-5.5 and GPT-5.4 beat strong empirical baselines on a hidden-target vintage macro tournament, and live recall probes do not find realized-value recall.
 2. **Raw GPT-5.5 contains behavior signal in one out-of-domain windfall family.** It generalizes where tuned rules break, but that result does not transfer to predictable income-loss dynamics.
 3. **Prior-conditioned agents can partly update real household beliefs.** The model is useful when it operates on supplied respondent state.
+4. **Policy-schedule elicitation is the best behavior interface found so far.** It is the first LLM-derived behavior source to beat the liquidity rule on the selection split, and it is now executable inside the demand economy.
 
 The evidence also supports three negative claims:
 
@@ -259,6 +265,7 @@ The evidence also supports three negative claims:
 2. **Backstory elicitation fails by caricature rather than rescuing heterogeneity.**
 3. **No behavior architecture currently clears both in-domain credibility and out-of-domain holdout tests.**
 4. **The first Phase 4 matched-twin replay does not beat adaptive expectations.**
+5. **The first Phase 4 policy-schedule replay also does not beat adaptive expectations.**
 
 The full claim remains open:
 
@@ -270,7 +277,7 @@ The next phase should not chase richer personas. It should build from the result
 
 1. Define one fresh behavior holdout family (untouched by any selection so far) and score the policy-schedule arm against it once, pre-registered. That is the promotion test for the first LLM source that beat the liquidity rule on the selection split.
 2. Build a longer, same-horizon prior-update panel before spending more Phase 4 score surface.
-3. Revisit the bridge from SCE beliefs to demand-economy primitives with the policy-schedule interface: elicit belief-to-behavior response schedules per household state rather than per-period point behaviors.
+3. Improve the belief-to-policy bridge in the schedule executor. The current mapping turns LLM-updated beliefs into too much consumption contraction; the next version should be validated on development dynamics before any new FRED month is scored.
 4. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
 5. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
 
@@ -304,8 +311,8 @@ The December 2024 profile-only wave is spent. The November 2024 backstory valida
 
 The Phase 4 fixture compares two versions of the same deterministic demand economy: an LLM-belief fixture and an adaptive-expectations twin. It writes the locked proxy mapping, cards, targets, household states, twin paths, accounting, forecasts, joined errors, scores, manifest, and `phase4_matched_twins_report.md`.
 
-The Phase 4 replay adapter consumes persona-ecology predictions rather than raw prompt payloads. It joins on the normalized CSV outputs, not prompt-facing relative IDs; derives household states from demographics, weights, and prior beliefs; and excludes `actual_*` labels from the demand-economy input. The strict Codex replay artifact is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard/`. The extrapolating ablation is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_holdlast_5cards/`. Both current replay artifacts use mapping schema v2 and `scoring_label: retrospective`; the first confirmatory v2 score is reserved for the next newly scoreable data month.
+The Phase 4 replay adapter consumes persona-ecology predictions rather than raw prompt payloads. It joins on the normalized CSV outputs, not prompt-facing relative IDs; derives household states from demographics, weights, and prior beliefs; and excludes `actual_*` labels from the demand-economy input. The strict fixed-kernel Codex replay artifact is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard/`. The fixed-kernel extrapolating ablation is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_holdlast_5cards/`. The strict policy-schedule replay artifact is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_onecard/`. The policy-schedule extrapolating ablation is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_holdlast_5cards/`. All current replay artifacts use mapping schema v2 and `scoring_label: retrospective`; the first confirmatory v2 score is reserved for the next newly scoreable data month.
 
 ### Reproducibility notes
 
-The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The latest full test run passed `141` tests.
+The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full test run passed `149` tests.

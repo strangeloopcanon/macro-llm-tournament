@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shlex
 import subprocess
@@ -14,6 +15,8 @@ import numpy as np
 import pandas as pd
 
 from .agent_common import ACCOUNTING_TOLERANCE, OUTPUT_ROOT, WORK_ROOT, bounded_float, cache_key, markdown_table, round_or_none
+from .agent_types import build_household_type_cells
+from .behavior_ecology import POLICY_PROMPT_VERSION, normalize_policy_payload
 from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
 from .llm_common import LLMUnavailable
 
@@ -21,13 +24,16 @@ from .llm_common import LLMUnavailable
 DEMAND_ECONOMY_VERSION = "hank_lite_belief_demand_economy_v2"
 DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v4"
 NAIVE_PERSONA_PROMPT_VERSION = "hank_lite_naive_persona_direct_consumption_v1"
+DEMAND_BEHAVIOR_POLICY_VERSION = "demand_behavior_policy_schedule_v1"
 BELIEF_MODES = ("fixture", "replay", "live", "raw_replay")
 FEEDBACK_MODES = ("closed_loop", "none")
+BEHAVIOR_POLICY_MODES = ("fixed_kernel", "schedule")
 MODEL_VARIANTS = ("representative", "adaptive", "llm_belief", "naive_persona")
 LLM_VARIANTS = {"llm_belief", "naive_persona"}
 NEUTRAL_POLICY_RATE = 3.0
 INFLATION_TARGET = 2.0
 STEADY_EMPLOYMENT_RATE = 0.955
+DEFAULT_BEHAVIOR_POLICY_RAW_RECORDS = OUTPUT_ROOT / "behavior_ecology_gpt55_xhigh" / "ecology_raw_records.json"
 FULL_LAB_LLM_METRICS = {
     "baseline_no_shock_output_gap_rms",
     "belief_feedback_amplification_ratio",
@@ -82,6 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--household-count", type=int, default=24)
     parser.add_argument("--period-count", type=int, default=100)
     parser.add_argument("--feedback-mode", choices=FEEDBACK_MODES, default="closed_loop")
+    parser.add_argument("--behavior-policy-mode", choices=BEHAVIOR_POLICY_MODES, default="fixed_kernel")
+    parser.add_argument(
+        "--behavior-policy-raw-records-json",
+        default=None,
+        help="Behavior-ecology raw records containing policy_transfer and policy_income_loss payloads.",
+    )
     parser.add_argument("--variants", default="representative,adaptive,llm_belief,naive_persona")
     parser.add_argument(
         "--fixture-variants",
@@ -140,6 +152,7 @@ def main() -> int:
             raise SystemExit("--raw-records-json is required when --belief-mode raw_replay")
         if not Path(args.raw_records_json).exists():
             raise SystemExit(f"--raw-records-json does not exist: {args.raw_records_json}")
+    behavior_policy_profile = _behavior_policy_profile_from_args(args)
     belief_calibration_profile = _load_belief_calibration_profile(Path(args.belief_calibration_profile)) if args.belief_calibration_profile else None
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -180,6 +193,7 @@ def main() -> int:
             client,
             period_count=args.period_count,
             feedback_mode=args.feedback_mode,
+            behavior_policy_profile=behavior_policy_profile,
         )
         all_initial.append(initial)
         all_beliefs.append(beliefs)
@@ -200,6 +214,23 @@ def main() -> int:
     belief_targets = score_demand_belief_targets(initial_frame, beliefs_frame)
     ablations = build_ablation_table(validation, periods_frame, decisions_frame, beliefs_frame)
     evidence = classify_demand_economy_evidence(validation, ablations, mode=args.belief_mode)
+    output_names = [
+        "demand_households.csv",
+        "demand_initial_state.csv",
+        "demand_beliefs.csv",
+        "demand_household_decisions.csv",
+        "demand_periods.csv",
+        "demand_accounting.csv",
+        "demand_validation_scores.csv",
+        "demand_belief_target_scores.csv",
+        "demand_ablation_table.csv",
+        "demand_prompt_cards.jsonl",
+        "demand_raw_records.json",
+        "demand_economy_report.md",
+        "manifest.json",
+    ]
+    if behavior_policy_profile is not None:
+        output_names.insert(9, "demand_behavior_policy_profile.json")
 
     manifest = {
         "schema_version": DEMAND_ECONOMY_VERSION,
@@ -226,6 +257,7 @@ def main() -> int:
         "household_count": int(households.shape[0]),
         "period_count": int(args.period_count),
         "feedback_mode": args.feedback_mode,
+        "behavior_policy": behavior_policy_manifest(behavior_policy_profile, mode=args.behavior_policy_mode),
         "scenario_count": len(scenarios),
         "scenarios": [scenario.__dict__ for scenario in scenarios],
         "verdict": evidence.get("evidence_verdict"),
@@ -233,21 +265,7 @@ def main() -> int:
         "full_lab_passed": evidence.get("full_lab_passed"),
         "canary_passed": evidence.get("canary_passed"),
         "evidence": evidence,
-        "outputs": [
-            "demand_households.csv",
-            "demand_initial_state.csv",
-            "demand_beliefs.csv",
-            "demand_household_decisions.csv",
-            "demand_periods.csv",
-            "demand_accounting.csv",
-            "demand_validation_scores.csv",
-            "demand_belief_target_scores.csv",
-            "demand_ablation_table.csv",
-            "demand_prompt_cards.jsonl",
-            "demand_raw_records.json",
-            "demand_economy_report.md",
-            "manifest.json",
-        ],
+        "outputs": output_names,
     }
 
     households.to_csv(output_dir / "demand_households.csv", index=False)
@@ -259,6 +277,8 @@ def main() -> int:
     validation.to_csv(output_dir / "demand_validation_scores.csv", index=False)
     belief_targets.to_csv(output_dir / "demand_belief_target_scores.csv", index=False)
     ablations.to_csv(output_dir / "demand_ablation_table.csv", index=False)
+    if behavior_policy_profile is not None:
+        _write_json(output_dir / "demand_behavior_policy_profile.json", behavior_policy_profile)
     pd.DataFrame(all_prompt_rows).to_json(output_dir / "demand_prompt_cards.jsonl", orient="records", lines=True)
     _write_json(output_dir / "demand_raw_records.json", raw_records)
     _write_json(output_dir / "manifest.json", manifest)
@@ -487,6 +507,92 @@ def _load_belief_calibration_profile(path: Path) -> dict[str, Any]:
     return data
 
 
+def _behavior_policy_profile_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.behavior_policy_mode == "fixed_kernel":
+        return None
+    path = Path(args.behavior_policy_raw_records_json) if args.behavior_policy_raw_records_json else DEFAULT_BEHAVIOR_POLICY_RAW_RECORDS
+    if not path.exists():
+        raise SystemExit(f"--behavior-policy-raw-records-json does not exist: {path}")
+    return load_behavior_policy_profile(path)
+
+
+def load_behavior_policy_profile(raw_records_path: Path) -> dict[str, Any]:
+    raw_records = json.loads(raw_records_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_records, list):
+        raise SystemExit("Behavior policy raw records must be a JSON list")
+    type_cells, type_status = build_household_type_cells(work_dir=WORK_ROOT / "scf", wave=2022)
+    policies: dict[str, dict[str, Any]] = {}
+    record_hashes: dict[str, str] = {}
+    for family in ("transfer", "income_loss"):
+        record_type = f"policy_{family}"
+        matches = [record for record in raw_records if isinstance(record, dict) and str(record.get("record_type")) == record_type]
+        if not matches:
+            raise SystemExit(f"Behavior policy raw records missing {record_type}")
+        payload = matches[-1].get("payload", matches[-1])
+        policies[family] = normalize_policy_payload(type_cells, {"payload": payload}, family=family)
+        record_hashes[family] = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    parent_manifest = _load_optional_json(raw_records_path.parent / "manifest.json")
+    source_label = "policy_schedule"
+    if parent_manifest:
+        source_label = f"policy_{parent_manifest.get('provider', 'unknown')}_{parent_manifest.get('model', 'unknown')}"
+    return {
+        "schema_version": DEMAND_BEHAVIOR_POLICY_VERSION,
+        "policy_prompt_version": POLICY_PROMPT_VERSION,
+        "source_label": source_label,
+        "raw_records_json": str(raw_records_path),
+        "raw_records_sha256": file_sha256(raw_records_path),
+        "policy_record_sha256": record_hashes,
+        "source_manifest": {
+            "path": str(raw_records_path.parent / "manifest.json") if parent_manifest else None,
+            "schema_version": parent_manifest.get("schema_version") if parent_manifest else None,
+            "mode": parent_manifest.get("mode") if parent_manifest else None,
+            "provider": parent_manifest.get("provider") if parent_manifest else None,
+            "model": parent_manifest.get("model") if parent_manifest else None,
+            "claim_scope": parent_manifest.get("claim_scope") if parent_manifest else None,
+        },
+        "type_cell_status": type_status,
+        "type_cells": type_cells.to_dict(orient="records"),
+        "transfer_policies": policies["transfer"],
+        "income_loss_policies": policies["income_loss"],
+        "assignment_method": "nearest_scf_type_cell_by_log_income_buffer_and_debt",
+        "execution_rule": (
+            "The LLM-authored schedule supplies transfer allocation and job-risk spending sensitivity; "
+            "deterministic code interpolates, enforces budgets, and performs accounting."
+        ),
+    }
+
+
+def behavior_policy_manifest(profile: dict[str, Any] | None, *, mode: str) -> dict[str, Any]:
+    if profile is None:
+        return {"mode": mode, "schema_version": None}
+    return {
+        "mode": mode,
+        "schema_version": profile.get("schema_version"),
+        "policy_prompt_version": profile.get("policy_prompt_version"),
+        "source_label": profile.get("source_label"),
+        "raw_records_json": profile.get("raw_records_json"),
+        "raw_records_sha256": profile.get("raw_records_sha256"),
+        "policy_record_sha256": profile.get("policy_record_sha256"),
+        "source_manifest": profile.get("source_manifest"),
+        "type_cell_count": len(profile.get("type_cells", [])),
+        "transfer_policy_count": len(profile.get("transfer_policies", {})),
+        "income_loss_policy_count": len(profile.get("income_loss_policies", {})),
+        "assignment_method": profile.get("assignment_method"),
+        "execution_rule": profile.get("execution_rule"),
+    }
+
+
+def _load_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else None
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str, int], dict[str, Any]]:
     mapped: dict[tuple[str, str, int], dict[str, Any]] = {}
     for record in records:
@@ -658,6 +764,7 @@ def run_demand_economy(
     *,
     period_count: int = 100,
     feedback_mode: str = "closed_loop",
+    behavior_policy_profile: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     if feedback_mode not in FEEDBACK_MODES:
         raise ValueError(f"Unsupported feedback mode: {feedback_mode}")
@@ -694,6 +801,7 @@ def run_demand_economy(
                 period_state,
                 source=source,
                 variant=client.variant,
+                behavior_policy_profile=behavior_policy_profile,
             )
             decision_rows.extend(realized)
             aggregate = _aggregate_period(realized, scenario, period_state, source=source, variant=client.variant)
@@ -1709,6 +1817,7 @@ def _realize_household_period(
     *,
     source: str,
     variant: str,
+    behavior_policy_profile: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     household_by_type = {str(row["type_id"]): row for _, row in households.iterrows()}
     beliefs = panel["beliefs_by_type"]
@@ -1737,6 +1846,9 @@ def _realize_household_period(
             transfer_debt_repayment_amount = 0.0
             transfer_liquid_saving_amount = 0.0
             debt_repayment = 0.0
+            behavior_policy_mode = "direct_action"
+            behavior_policy_type_id = ""
+            behavior_policy_consumption_drag = 0.0
         else:
             policy = _structural_consumption_policy(
                 static,
@@ -1744,6 +1856,7 @@ def _realize_household_period(
                 belief,
                 period_state,
                 representative_mpc=representative_mpc,
+                behavior_policy_profile=behavior_policy_profile,
             )
             desired_consumption = policy["desired_consumption"]
             mpc = policy["effective_mpc"]
@@ -1754,6 +1867,9 @@ def _realize_household_period(
             transfer_debt_repayment_amount = policy["transfer_debt_repayment_amount"]
             transfer_liquid_saving_amount = policy["transfer_liquid_saving_amount"]
             debt_repayment = policy["debt_repayment"]
+            behavior_policy_mode = str(policy["behavior_policy_mode"])
+            behavior_policy_type_id = str(policy["behavior_policy_type_id"])
+            behavior_policy_consumption_drag = float(policy["behavior_policy_consumption_drag"])
         debt_before = float(state["debt"])
         floor_consumption = min(cash_available, float(static["subsistence_floor_share"]) * baseline_consumption)
         max_debt_repayment = max(0.0, min(debt_before, cash_available - floor_consumption))
@@ -1823,6 +1939,9 @@ def _realize_household_period(
                 "precautionary_saving_score": float(belief["precautionary_saving_score"]),
                 "real_rate": real_rate,
                 "direct_consumption_baseline": direct is not None,
+                "behavior_policy_mode": behavior_policy_mode,
+                "behavior_policy_type_id": behavior_policy_type_id,
+                "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
                 "budget_residual": budget_residual,
                 "reason_codes_json": json.dumps(belief["reason_codes"], sort_keys=True),
             }
@@ -1837,7 +1956,8 @@ def _structural_consumption_policy(
     period_state: dict[str, Any],
     *,
     representative_mpc: float | None,
-) -> dict[str, float]:
+    behavior_policy_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     baseline_consumption = float(state["baseline_consumption"])
     liquid_before = float(state["liquid_assets"])
     transfer = float(period_state["transfer_per_household"])
@@ -1902,14 +2022,27 @@ def _structural_consumption_policy(
     expected_income_effect = income_expectation_gap * baseline_consumption * 0.012
     drawdown = 0.0
     buffer_relief_support = 0.030 * max(0.0, float(state.get("transfer_buffer_relief", 0.0)))
-    transfer_allocation = _transfer_windfall_allocation(
-        static,
-        state,
-        belief,
-        target_buffer_months=target_buffer,
-        desired_saving_rate=desired_saving_rate,
-        real_rate=real_rate,
-        representative_mpc=representative_mpc,
+    behavior_match = _match_behavior_policy(static, state, behavior_policy_profile) if behavior_policy_profile is not None else None
+    if behavior_match is not None and representative_mpc is None:
+        transfer_allocation = _schedule_transfer_allocation(static, state, behavior_match, transfer)
+        behavior_policy_mode = "schedule"
+        behavior_policy_type_id = str(behavior_match["type_id"])
+    else:
+        transfer_allocation = _transfer_windfall_allocation(
+            static,
+            state,
+            belief,
+            target_buffer_months=target_buffer,
+            desired_saving_rate=desired_saving_rate,
+            real_rate=real_rate,
+            representative_mpc=representative_mpc,
+        )
+        behavior_policy_mode = "fixed_kernel"
+        behavior_policy_type_id = ""
+    behavior_policy_consumption_drag = (
+        _schedule_consumption_drag(static, state, belief, period_state, behavior_match, baseline_consumption)
+        if behavior_match is not None and representative_mpc is None
+        else 0.0
     )
     transfer_consumption_amount = float(transfer_allocation["consumption_share"] * transfer)
     transfer_debt_repayment_amount = float(min(float(state["debt"]), transfer_allocation["debt_repayment_share"] * transfer))
@@ -1924,6 +2057,7 @@ def _structural_consumption_policy(
         - buffer_drag
         - precaution_drag
         - rate_drag
+        - behavior_policy_consumption_drag
     )
     return {
         "desired_consumption": float(desired_consumption),
@@ -1935,7 +2069,134 @@ def _structural_consumption_policy(
         "transfer_debt_repayment_amount": transfer_debt_repayment_amount,
         "transfer_liquid_saving_amount": transfer_liquid_saving_amount,
         "debt_repayment": transfer_debt_repayment_amount,
+        "behavior_policy_mode": behavior_policy_mode,
+        "behavior_policy_type_id": behavior_policy_type_id,
+        "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
     }
+
+
+def _match_behavior_policy(static: pd.Series, state: dict[str, Any], profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    type_cells = profile.get("type_cells")
+    if not isinstance(type_cells, list) or not type_cells:
+        return None
+    transfer_policies = profile.get("transfer_policies", {})
+    income_loss_policies = profile.get("income_loss_policies", {})
+    if not isinstance(transfer_policies, dict) or not isinstance(income_loss_policies, dict):
+        return None
+    household_features = _policy_matching_features(static, state)
+    best_cell: dict[str, Any] | None = None
+    best_distance = float("inf")
+    for cell in type_cells:
+        if not isinstance(cell, dict):
+            continue
+        type_id = str(cell.get("type_id", ""))
+        if type_id not in transfer_policies or type_id not in income_loss_policies:
+            continue
+        cell_features = _policy_matching_features_from_cell(cell)
+        distance = (
+            1.35 * (household_features["log_income"] - cell_features["log_income"]) ** 2
+            + 1.00 * (household_features["log_buffer"] - cell_features["log_buffer"]) ** 2
+            + 0.55 * (household_features["debt_to_income"] - cell_features["debt_to_income"]) ** 2
+            + 0.35 * (household_features["liquidity_low"] - cell_features["liquidity_low"]) ** 2
+        )
+        if distance < best_distance:
+            best_distance = distance
+            best_cell = cell
+    if best_cell is None:
+        return None
+    type_id = str(best_cell["type_id"])
+    return {
+        "type_id": type_id,
+        "distance": float(best_distance),
+        "type_cell": best_cell,
+        "transfer_policy": transfer_policies[type_id],
+        "income_loss_policy": income_loss_policies[type_id],
+    }
+
+
+def _policy_matching_features(static: pd.Series, state: dict[str, Any]) -> dict[str, float]:
+    annual_income = max(float(static["annual_income"]), 1.0)
+    baseline_consumption = max(float(state.get("baseline_consumption", float(static["baseline_consumption_annual"]) / 4.0)), 1.0)
+    liquid_assets = max(float(state.get("liquid_assets", static["liquid_assets"])), 0.0)
+    debt = max(float(state.get("debt", static["debt"])), 0.0)
+    buffer_months = _buffer_months(liquid_assets, baseline_consumption)
+    return {
+        "log_income": float(np.log1p(annual_income)),
+        "log_buffer": float(np.log1p(buffer_months)),
+        "debt_to_income": float(np.clip(debt / annual_income, 0.0, 6.0)),
+        "liquidity_low": 1.0 if str(state.get("liquidity_group", static.get("liquidity_group", ""))).lower() == "low" else 0.0,
+    }
+
+
+def _policy_matching_features_from_cell(cell: dict[str, Any]) -> dict[str, float]:
+    annual_income = max(float(cell.get("annual_income", 1.0)), 1.0)
+    consumption = max(float(cell.get("consumption_proxy_annual", annual_income * 0.75)) / 4.0, 1.0)
+    liquid_assets = max(float(cell.get("liquid_assets", 0.0)), 0.0)
+    debt = max(float(cell.get("debt", 0.0)), 0.0)
+    buffer_months = float(cell.get("liquid_buffer_months", _buffer_months(liquid_assets, consumption)))
+    return {
+        "log_income": float(np.log1p(annual_income)),
+        "log_buffer": float(np.log1p(max(0.0, buffer_months))),
+        "debt_to_income": float(np.clip(debt / annual_income, 0.0, 6.0)),
+        "liquidity_low": 1.0 if buffer_months < 1.5 else 0.0,
+    }
+
+
+def _schedule_transfer_allocation(static: pd.Series, state: dict[str, Any], match: dict[str, Any], transfer: float) -> dict[str, float]:
+    if transfer <= 0:
+        return {"consumption_share": 0.0, "debt_repayment_share": 0.0, "liquid_saving_share": 0.0}
+    policy = match["transfer_policy"]
+    schedule = policy["schedule"]
+    monthly_income = max(float(static["annual_income"]) / 12.0 * 0.78, 1.0)
+    ratio = float(transfer) / monthly_income
+    ratios = np.array([float(point["ratio"]) for point in schedule], dtype=float)
+    log_ratio = float(np.log(np.clip(ratio, float(ratios.min()), float(ratios.max()))))
+
+    def interp(field: str) -> float:
+        values = np.array([float(point[field]) for point in schedule], dtype=float)
+        return float(np.interp(log_ratio, np.log(ratios), values))
+
+    consumption_share = interp("total_spending_share")
+    debt_share = interp("debt_repayment_share")
+    liquid_share = interp("liquid_saving_share")
+    total = consumption_share + debt_share + liquid_share
+    if total > 1.0 and total > 0:
+        consumption_share, debt_share, liquid_share = consumption_share / total, debt_share / total, liquid_share / total
+    if total <= 0:
+        return {"consumption_share": 0.0, "debt_repayment_share": 0.0, "liquid_saving_share": 0.0}
+    return {
+        "consumption_share": float(np.clip(consumption_share, 0.0, 1.0)),
+        "debt_repayment_share": float(np.clip(debt_share, 0.0, 1.0)),
+        "liquid_saving_share": float(np.clip(max(0.0, 1.0 - consumption_share - debt_share), 0.0, 1.0)),
+    }
+
+
+def _schedule_consumption_drag(
+    static: pd.Series,
+    state: dict[str, Any],
+    belief: dict[str, Any],
+    period_state: dict[str, Any],
+    match: dict[str, Any],
+    baseline_consumption: float,
+) -> float:
+    policy = match["income_loss_policy"]
+    baseline_job_loss = float(static["baseline_job_loss_probability"])
+    job_loss_gap = max(0.0, float(belief["perceived_job_loss_probability"]) - baseline_job_loss)
+    job_shock = max(0.0, float(period_state.get("job_risk_shock_pp", 0.0)))
+    precaution_gap = max(0.0, float(belief["precautionary_saving_score"]) - 5.0) / 5.0
+    confidence_gap = max(0.0, float(static["confidence_index"]) - float(belief["confidence_index"])) / 50.0
+    onset = float(policy["onset_drop_share"])
+    receipt_drift = float(policy["receipt_monthly_drift_share"])
+    exhaustion = float(policy["exhaustion_drop_share"])
+    if job_shock > 0:
+        active_drop = onset + 0.25 * receipt_drift
+    else:
+        active_drop = 0.55 * onset + 0.20 * exhaustion
+    risk_intensity = min(1.0, (job_loss_gap + 0.65 * job_shock) / 18.0)
+    drag_share = active_drop * risk_intensity + 0.030 * precaution_gap + 0.020 * confidence_gap
+    return float(np.clip(drag_share, 0.0, 0.35) * baseline_consumption)
 
 
 def _transfer_windfall_allocation(

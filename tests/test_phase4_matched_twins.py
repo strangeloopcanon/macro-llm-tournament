@@ -7,6 +7,9 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
+from macro_llm_tournament.agent_common import WORK_ROOT
+from macro_llm_tournament.agent_types import build_household_type_cells
+from macro_llm_tournament.behavior_ecology import fixture_policy_payload
 from macro_llm_tournament.phase4_matched_twins import (
     OutputMappingSpec,
     default_output_mapping,
@@ -220,6 +223,61 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
             self.assertIn("adaptive", set(scores["source"].astype(str)))
             self.assertIn("sce_prior_update_replay", "\n".join(beliefs["reason_codes_json"].astype(str)))
 
+    def test_phase4_policy_schedule_mode_records_shared_behavior_executor(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ecology_dir = root / "ecology"
+            policy_records = root / "behavior_policy_records.json"
+            output_dir = root / "phase4"
+            _write_minimal_ecology_dir(ecology_dir)
+            _write_fixture_policy_records(policy_records)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.phase4_matched_twins",
+                    "--mode",
+                    "replay",
+                    "--belief-source",
+                    "persona_ecology_replay",
+                    "--persona-ecology-dir",
+                    str(ecology_dir),
+                    "--data-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--asof-start",
+                    "2025-12-15",
+                    "--asof-end",
+                    "2025-12-15",
+                    "--period-count",
+                    "2",
+                    "--behavior-policy-mode",
+                    "schedule",
+                    "--behavior-policy-raw-records-json",
+                    str(policy_records),
+                    "--output-dir",
+                    str(output_dir),
+                ],
+                cwd=REPO_ROOT,
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            decisions = pd.read_csv(output_dir / "phase4_household_decisions.csv")
+            report = (output_dir / "phase4_matched_twins_report.md").read_text(encoding="utf-8")
+
+            self.assertEqual(manifest["behavior_policy"]["mode"], "schedule")
+            self.assertEqual(manifest["behavior_policy"]["schema_version"], "demand_behavior_policy_schedule_v1")
+            self.assertIn("schedule", set(decisions["behavior_policy_mode"].astype(str)))
+            self.assertTrue(decisions["behavior_policy_type_id"].astype(str).str.len().gt(0).any())
+            self.assertIn("LLM-authored behavior-policy schedule", report)
+
 
 def _write_minimal_ecology_dir(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -306,6 +364,23 @@ def _write_minimal_ecology_dir(root: Path) -> None:
                 }
             )
     pd.DataFrame(prediction_rows).to_csv(root / "persona_ecology_predictions.csv", index=False)
+
+
+def _write_fixture_policy_records(path: Path) -> None:
+    type_cells, _ = build_household_type_cells(work_dir=WORK_ROOT / "scf", wave=2022)
+    records = [
+        {
+            "record_type": "policy_transfer",
+            "cache_hit": True,
+            "payload": fixture_policy_payload(type_cells, family="transfer"),
+        },
+        {
+            "record_type": "policy_income_loss",
+            "cache_hit": True,
+            "payload": fixture_policy_payload(type_cells, family="income_loss"),
+        },
+    ]
+    path.write_text(json.dumps(records, indent=2, sort_keys=True), encoding="utf-8")
 
 
 if __name__ == "__main__":

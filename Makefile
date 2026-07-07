@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -206,6 +206,22 @@ phase4-prior-update-codex-replay:
 		--scoring-label retrospective \
 		--max-live-calls 0 \
 		--output-dir outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard
+
+phase4-prior-update-policy-schedule-replay:
+	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
+		--mode replay \
+		--belief-source persona_ecology_replay \
+		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
+		--data-mode fred \
+		--asof-start 2025-12-15 \
+		--asof-end 2025-12-15 \
+		--history-months 18 \
+		--period-count 2 \
+		--behavior-policy-mode schedule \
+		--behavior-policy-raw-records-json outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json \
+		--scoring-label retrospective \
+		--max-live-calls 0 \
+		--output-dir outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_onecard
 
 macro-performance-fixture: demand-economy-fixture demand-vintage-oos-fixture
 	PYTHONPATH=src python3 -m macro_llm_tournament.macro_performance_gate \

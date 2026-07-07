@@ -13,9 +13,12 @@ import pandas as pd
 
 from .agent_common import ACCOUNTING_TOLERANCE, OUTPUT_ROOT, WORK_ROOT, markdown_table
 from .demand_economy import (
+    BEHAVIOR_POLICY_MODES,
     DemandEconomyClient,
     DemandScenario,
+    behavior_policy_manifest,
     build_fixture_demand_households,
+    load_behavior_policy_profile,
     normalize_demand_households,
     run_demand_economy,
 )
@@ -81,6 +84,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--household-count", type=int, default=24)
     parser.add_argument("--period-count", type=int, default=12)
     parser.add_argument("--feedback-mode", choices=("closed_loop", "none"), default="closed_loop")
+    parser.add_argument("--behavior-policy-mode", choices=BEHAVIOR_POLICY_MODES, default="fixed_kernel")
+    parser.add_argument("--behavior-policy-raw-records-json", default=None)
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--output-dir", default=None)
@@ -118,6 +123,7 @@ def main() -> int:
 
         ecology_bundle = load_persona_ecology_bundle(args) if args.belief_source == "persona_ecology_replay" else None
         households = load_phase4_households(args, ecology_bundle=ecology_bundle)
+        behavior_policy_profile = load_behavior_policy_profile(Path(args.behavior_policy_raw_records_json)) if args.behavior_policy_mode == "schedule" else None
         period_count = max(int(args.period_count), len(cards) + 1, 2)
         cache_dir = output_dir / "fresh_phase4_matched_twins_cache" if args.fresh_cache else WORK_ROOT / "phase4_matched_twins_cache"
         scenarios = [DEFAULT_SCENARIO]
@@ -138,6 +144,7 @@ def main() -> int:
                 client,
                 period_count=period_count,
                 feedback_mode=args.feedback_mode,
+                behavior_policy_profile=behavior_policy_profile,
             )
             all_initial.append(initial)
             all_beliefs.append(beliefs)
@@ -193,6 +200,7 @@ def main() -> int:
                 "ecology_period_policy": args.ecology_period_policy,
                 "scoring_label": args.scoring_label,
                 "v2_confirmatory_scoring_starts": "next_newly_scoreable_data_month",
+                "behavior_policy": behavior_policy_manifest(behavior_policy_profile, mode=args.behavior_policy_mode),
                 "mapping_sha256": mapping_sha,
                 "mapping_spec_version": PHASE4_VERSION,
                 "data_status": data_status,
@@ -228,6 +236,11 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Phase 4 persona ecology replay must use --mode replay.")
     if args.max_live_calls != 0:
         raise ValueError("Phase 4 matched-twin runs must use --max-live-calls 0; run persona ecology live upstream first.")
+    if args.behavior_policy_mode == "schedule":
+        if not args.behavior_policy_raw_records_json:
+            raise ValueError("--behavior-policy-raw-records-json is required when --behavior-policy-mode schedule")
+        if not Path(args.behavior_policy_raw_records_json).exists():
+            raise ValueError(f"--behavior-policy-raw-records-json does not exist: {args.behavior_policy_raw_records_json}")
     if args.belief_source == "persona_ecology_replay":
         if not args.persona_ecology_dir:
             raise ValueError("--persona-ecology-dir is required with --belief-source persona_ecology_replay")
@@ -929,6 +942,9 @@ def build_report(manifest: dict[str, Any], scores: pd.DataFrame, comparison: pd.
         "## What This Tests",
         phase4_test_description(manifest),
         "",
+        "## Behavior Execution",
+        phase4_behavior_policy_description(manifest),
+        "",
         "## Locked Output Mapping",
         f"- Mapping SHA-256: `{manifest.get('mapping_sha256')}`",
         f"- Mapping schema: `{manifest.get('mapping_spec_version')}`.",
@@ -966,6 +982,21 @@ def phase4_test_description(manifest: dict[str, Any]) -> str:
         "This runner compares the same accounting-constrained demand economy under two belief-updating rules: an LLM belief-updater "
         "fixture and an adaptive-expectations twin. Real household heterogeneity and live prior-update caches are not used in fixture "
         "mode, so this is a readiness gate, not an empirical macro-validity result."
+    )
+
+
+def phase4_behavior_policy_description(manifest: dict[str, Any]) -> str:
+    policy = manifest.get("behavior_policy") or {}
+    if policy.get("mode") == "schedule":
+        return (
+            "Both twins use the same LLM-authored behavior-policy schedule. The model supplied transfer and "
+            "income-risk response functions upstream; this runner only interpolates those functions against each "
+            "household state, enforces budgets, and aggregates. The matched-twin comparison therefore isolates the "
+            "belief-updater channel while holding the behavior executor fixed."
+        )
+    return (
+        "Both twins use the fixed deterministic demand kernel. This is the older behavior layer and remains available "
+        "as the baseline executor for direct comparison with schedule-mode runs."
     )
 
 
@@ -1033,6 +1064,8 @@ def base_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "household_count_requested": int(args.household_count),
         "period_count_requested": int(args.period_count),
         "feedback_mode": args.feedback_mode,
+        "behavior_policy_mode": args.behavior_policy_mode,
+        "behavior_policy_raw_records_json": args.behavior_policy_raw_records_json,
         "fresh_cache": bool(args.fresh_cache),
         "max_live_calls": int(args.max_live_calls),
         "status": "running",

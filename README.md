@@ -213,6 +213,14 @@ make phase4-prior-update-codex-replay
 
 This consumes `outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100/`, filters to `llm_codex_cli_gpt-5.5`, builds respondent-derived household states from the real SCE panel without copying `actual_*` targets into prompts, and compares that LLM-updater economy to the adaptive-expectations twin on the locked FRED proxy mapping. Mapping v2 scores `personal_saving_rate_pct` as month-over-month change in the saving-rate proxy, applied identically to both twins and the target series. The checked-in replay target is labeled retrospective; confirmatory v2 scoring begins with the next newly scoreable data month. The default target is the strict one-card run because the banked Codex prior-update ecology has two periods; `--ecology-period-policy hold_last` is available only as an explicitly labeled extrapolation ablation.
 
+Run the same Phase 4 replay with the GPT-5.5 policy-schedule behavior executor:
+
+```bash
+make phase4-prior-update-policy-schedule-replay
+```
+
+This uses the banked policy schedules in `outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json` as the shared behavior layer for both twins. The LLM-authored schedules supply conditional transfer and income-risk response functions; deterministic code matches each SCE household to the nearest SCF schedule cell, interpolates the schedule, enforces budgets, and keeps accounting. This is still retrospective because it reuses an already scored FRED month.
+
 Run the zero-cost forecast audit fixture:
 
 ```bash
