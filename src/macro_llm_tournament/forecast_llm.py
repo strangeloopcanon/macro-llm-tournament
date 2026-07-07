@@ -252,6 +252,12 @@ class ForecastLLMClient:
             raise LLMUnavailable("codex CLI binary not found; set CODEX_CLI_BIN or install codex")
         return binary
 
+    def _codex_config_args(self) -> list[str]:
+        reasoning_effort = os.getenv("CODEX_CLI_REASONING_EFFORT") or os.getenv("CODEX_REASONING_EFFORT")
+        if not reasoning_effort:
+            return []
+        return ["-c", f'model_reasoning_effort="{reasoning_effort.strip()}"']
+
     def _gemini_binary(self) -> str:
         binary = os.getenv("GEMINI_CLI_BIN") or shutil.which("gemini")
         if not binary:
@@ -329,6 +335,7 @@ class ForecastLLMClient:
                 "exec",
                 "--model",
                 self.model,
+                *self._codex_config_args(),
                 "--cd",
                 str(self.execution_cwd),
                 "--skip-git-repo-check",

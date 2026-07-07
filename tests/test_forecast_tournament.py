@@ -3895,6 +3895,48 @@ class ForecastTournamentTests(unittest.TestCase):
 
         self.assertEqual(client.live_call_count, 1)
 
+    def test_codex_forecast_provider_passes_reasoning_effort_config(self):
+        cards = build_forecast_cards(
+            spf_fixture(),
+            variables=["CPI"],
+            horizons=[1],
+            holdout_start_year=2018,
+            holdout_end_year=2020,
+            card_count=1,
+        )
+        commands = []
+        with TemporaryDirectory() as tmp, patch.dict(
+            "os.environ",
+            {"CODEX_CLI_BIN": "/tmp/codex", "CODEX_CLI_REASONING_EFFORT": "high"},
+        ):
+            client = ForecastLLMClient("codex_cli", "gpt-5.5", Path(tmp), mode="live", max_live_calls=1)
+
+            def fake_run(command, input, text, capture_output, cwd, timeout, check):
+                commands.append(command)
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "point_forecast": 2.0,
+                            "p10": 1.0,
+                            "p50": 2.0,
+                            "p90": 3.0,
+                            "confidence": 0.5,
+                            "forecaster_draws": [
+                                {"forecaster_id": f"x{idx}", "forecast": 2.0 + idx * 0.01}
+                                for idx in range(8)
+                            ],
+                        }
+                    )
+                )
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with patch("macro_llm_tournament.forecast_llm.subprocess.run", side_effect=fake_run):
+                client.forecast_card(cards[0])
+
+        self.assertIn("-c", commands[0])
+        self.assertIn('model_reasoning_effort="high"', commands[0])
+
     def test_openai_responses_forecast_provider_uses_cache_and_live_cap(self):
         cards = build_forecast_cards(
             spf_fixture(),
