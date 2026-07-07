@@ -328,6 +328,8 @@ def run_arm1_point_vs_backstory(
     for elicitation in ("point", "backstory"):
         mode_dir = output_dir / elicitation
         mode_dirs[elicitation] = mode_dir
+        if _panel_run_complete(mode_dir):
+            continue
         _run_persona_panel_subprocess(
             mode_dir,
             provider=provider,
@@ -339,6 +341,7 @@ def run_arm1_point_vs_backstory(
             live_cap=per_mode_cap,
             elicitation=elicitation,
             json_attempts=json_attempts,
+            resume_existing=True,
         )
 
     point = _load_panel_outputs(mode_dirs["point"])
@@ -472,6 +475,7 @@ def run_arm3_priors_backstory_confirmatory(
         sample_seed=sample_seed,
         live_cap=live_cap,
         json_attempts=json_attempts,
+        resume_existing=True,
     )
     eco = output_dir / "ecology"
     panel = pd.read_csv(eco / "persona_ecology_panel.csv")
@@ -712,6 +716,7 @@ def _run_persona_panel_subprocess(
     live_cap: int,
     elicitation: str,
     json_attempts: int,
+    resume_existing: bool = False,
 ) -> None:
     cmd = [
         sys.executable,
@@ -745,7 +750,7 @@ def _run_persona_panel_subprocess(
         "--output-dir",
         str(output_dir),
     ]
-    _run_subprocess(cmd, output_dir=output_dir, json_attempts=json_attempts)
+    _run_subprocess(cmd, output_dir=output_dir, json_attempts=json_attempts, resume_existing=resume_existing)
 
 
 def _run_persona_ecology_subprocess(
@@ -759,6 +764,7 @@ def _run_persona_ecology_subprocess(
     sample_seed: int,
     live_cap: int,
     json_attempts: int,
+    resume_existing: bool = False,
 ) -> None:
     cmd = [
         sys.executable,
@@ -801,11 +807,32 @@ def _run_persona_ecology_subprocess(
         "--output-dir",
         str(output_dir),
     ]
-    _run_subprocess(cmd, output_dir=output_dir, json_attempts=json_attempts)
+    _run_subprocess(cmd, output_dir=output_dir, json_attempts=json_attempts, resume_existing=resume_existing)
 
 
-def _run_subprocess(cmd: list[str], *, output_dir: Path, json_attempts: int) -> None:
-    if output_dir.exists() and any(output_dir.iterdir()):
+def _panel_run_complete(output_dir: Path) -> bool:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    if manifest.get("status") != "ok":
+        return False
+    required = [
+        "persona_respondents.csv",
+        "persona_belief_predictions.csv",
+        "persona_belief_regression_scores.csv",
+        "persona_belief_variance_scores.csv",
+        "persona_belief_distribution_scores.csv",
+        "persona_belief_group_means.csv",
+    ]
+    return all((output_dir / name).exists() for name in required)
+
+
+def _run_subprocess(cmd: list[str], *, output_dir: Path, json_attempts: int, resume_existing: bool = False) -> None:
+    if output_dir.exists() and any(output_dir.iterdir()) and not resume_existing:
         raise SystemExit(f"Refusing to reuse non-empty output dir: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()

@@ -376,7 +376,10 @@ class ForecastLLMClient:
                 data["provider_binary"] = command[0]
                 return data
             except subprocess.TimeoutExpired as exc:
-                raise LLMUnavailable(f"Codex CLI timed out after {exc.timeout} seconds") from exc
+                last_json_error = exc
+                if attempt < attempts:
+                    continue
+                raise LLMUnavailable(f"Codex CLI timed out after {exc.timeout} seconds after {attempts} attempt(s)") from exc
             finally:
                 if last_message_path.exists():
                     last_message_path.unlink()

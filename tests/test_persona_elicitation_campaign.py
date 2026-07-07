@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 import pandas as pd
 
@@ -18,6 +21,7 @@ from macro_llm_tournament.persona_elicitation_campaign import (
     draw_distributional_predictions,
     no_hints_prompt_payload,
     score_interval_calibration,
+    _panel_run_complete,
     _validate_args,
 )
 
@@ -130,6 +134,26 @@ class PersonaElicitationCampaignTests(unittest.TestCase):
         self.assertIn("multiple_of_5_share", payload["required_response"])
         self.assertNotIn("respondent_profile", text)
         self.assertNotIn("actual_", text)
+
+    def test_panel_run_complete_requires_ok_manifest_and_outputs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            (output_dir / "manifest.json").write_text(json.dumps({"status": "failed"}), encoding="utf-8")
+            self.assertFalse(_panel_run_complete(output_dir))
+
+            (output_dir / "manifest.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+            self.assertFalse(_panel_run_complete(output_dir))
+
+            for name in [
+                "persona_respondents.csv",
+                "persona_belief_predictions.csv",
+                "persona_belief_regression_scores.csv",
+                "persona_belief_variance_scores.csv",
+                "persona_belief_distribution_scores.csv",
+                "persona_belief_group_means.csv",
+            ]:
+                (output_dir / name).write_text("x\n", encoding="utf-8")
+            self.assertTrue(_panel_run_complete(output_dir))
 
 
 if __name__ == "__main__":
