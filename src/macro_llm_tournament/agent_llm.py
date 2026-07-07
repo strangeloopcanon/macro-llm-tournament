@@ -43,6 +43,7 @@ class AgentLLMClient:
         *,
         mode: str = "fixture",
         max_live_calls: int = 0,
+        system_preamble: str | None = None,
     ):
         if mode not in {"fixture", "replay", "live"}:
             raise ValueError(f"Unsupported agent LLM mode: {mode}")
@@ -50,6 +51,7 @@ class AgentLLMClient:
         self.model = model
         self.cache_dir = cache_dir
         self.mode = mode
+        self.system_preamble = system_preamble
         self.max_live_calls = max(0, int(max_live_calls or 0))
         self.live_call_count = 0
         self.cache_hit_count = 0
@@ -160,11 +162,23 @@ class AgentLLMClient:
             return self._run_cursor_cli(prompt, cache_path)
         return self._run_codex_cli(prompt, cache_path)
 
+    def _wrapped_prompt(self, prompt: str) -> str:
+        if self.system_preamble is not None:
+            return f"{self.system_preamble.strip()}\n\n{prompt.strip()}"
+        return _agent_system_prompt(prompt)
+
+    def _codex_config_args(self) -> list[str]:
+        reasoning_effort = os.getenv("CODEX_CLI_REASONING_EFFORT") or os.getenv("CODEX_REASONING_EFFORT")
+        if not reasoning_effort:
+            return []
+        return ["-c", f'model_reasoning_effort="{reasoning_effort.strip()}"']
+
     def _run_codex_cli(self, prompt: str, cache_path: Path) -> dict[str, Any]:
         last_message_path = cache_path.with_name(f"{cache_path.stem}.{os.getpid()}.last_message.txt")
         command = [
             self._codex_binary(),
             "exec",
+            *self._codex_config_args(),
             "--model",
             self.model,
             "--cd",
@@ -183,7 +197,7 @@ class AgentLLMClient:
         try:
             result = subprocess.run(
                 command,
-                input=_agent_system_prompt(prompt),
+                input=self._wrapped_prompt(prompt),
                 text=True,
                 capture_output=True,
                 cwd=str(PROJECT_ROOT),
@@ -206,7 +220,7 @@ class AgentLLMClient:
         try:
             result = subprocess.run(
                 command,
-                input=_agent_system_prompt(prompt),
+                input=self._wrapped_prompt(prompt),
                 text=True,
                 capture_output=True,
                 cwd=str(self._cursor_neutral_workspace()),

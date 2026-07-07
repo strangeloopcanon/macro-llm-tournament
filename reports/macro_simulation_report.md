@@ -83,6 +83,27 @@ Two natural objections to that negative are that it is a GPT quirk or a prompt a
 
 Three things follow. First, the negative is not GPT-specific: Opus 4.8 under the identical prompt is substantially worse than GPT-5.5, mostly by flattening the liquidity gradient (`0.5376` on that family versus GPT-5.5's `0.0000`), answering with prudent-advice allocations instead of measured behavior. Second, prompting matters but does not close the gap: the descriptive framing fixes most of Opus's prudence bias (liquidity-gradient family `0.5376` to `0.0374`) and improves GPT-5.5's aggregate score, yet every raw-LLM arm still loses to the liquidity rule, and cell-level scores barely move. Third, the arms converge near `0.065`-`0.068` from very different starting points, which suggests a shared ceiling on eliciting measured behavioral moments from current frontier models rather than a fixable idiosyncrasy. These arms scored the selection split for diagnosis only; no mechanism selection was keyed off holdout families.
 
+### The compression diagnosis
+
+The per-target errors behind those aggregates share one signature: compression of conditional differences. Real households spend `0.6`-`0.8` of a small lottery windfall and `0.12`-`0.30` of a large one; GPT-5.5 predicted `0.417` and `0.430`. Real UI spending drops `0.05`-`0.07` at job loss, drifts near zero during receipt, then falls `0.11`-`0.13` at exhaustion; GPT-5.5 predicted a flat `0.02` everywhere. The same under-differentiation appears in the persona layer (individual beliefs compressed toward group means) and Phase 4 (belief updates too uniform). Point elicitation returns the safe center of the model's predictive distribution, and that center flattens exactly the elasticities an intervention simulator needs.
+
+### The elicitation-interface experiment: compression moves, and schedules beat points
+
+A pre-registered follow-up (`outputs/behavior_ecology_gpt55_xhigh`, `outputs/behavior_ecology_opus48_lottery`) tested whether compression is a capability wall or an artifact of the elicitation interface. Two new arms, same scenarios and scoring: an **ecology** arm, where each of 16 concrete households (seeded draws around SCF type cells) answers one shock in the first person under an anti-prudence preamble, in dollars, one call per household, aggregates emerging by weighted summation; and a **policy** arm, where the model states a response *schedule* per type cell (spending share as a function of windfall size relative to monthly income; the UI onset/receipt/exhaustion path) in one call, and deterministic code evaluates the schedule at each scenario. Primary metrics were declared before scoring: the lottery size gradient (band `0.30`-`0.68`; point-elicitation reference `-0.013`) and the UI exhaustion cliff (band `0.10`-`0.13`; reference `0.017`).
+
+| Arm (GPT-5.5 xhigh) | Lottery size gradient | UI cliff | Selection RMSE | Lottery holdout RMSE | UI holdout RMSE |
+| --- | --- | --- | --- | --- | --- |
+| Point elicitation (reference) | `-0.013` | `0.017` | `0.0652` | `0.0844` | `0.0397` |
+| Ecology (first-person households) | `0.121` | `0.130` | `0.5669` | `0.3529` | `0.0194` |
+| Policy schedule | `0.254` | `0.127` (in band) | `0.0507` | `0.1392` | `0.0304` |
+| Best rule baseline | `0.000` | `0.056` | `0.0560` | `0.2608` | `0.0289` |
+
+Three results:
+
+1. **Compression is an interface artifact, but it moves rather than disappears.** First-person grounding restores scenario differentiation (the UI cliff lands on the band edge; the ecology arm posts the best UI-path score ever observed, `0.0194`) while destroying cross-household differentiation: role-played individuals nearly all behave like the same prudent median person, collapsing the EIP liquidity spending ratio to `1.14` against a target of `3`-`6`. Cell-level elicitation has exactly the opposite failure. Where the model aggregates in its head, it keeps stylized cross-sectional facts and flattens scenario response; where it role-plays, it keeps scenario response and flattens the cross-section.
+2. **Schedule elicitation is the first LLM-derived source to beat the strongest rule on the selection split** (`0.0507` versus `0.0560`) while also beating the best rule on the lottery family (`0.1392` versus `0.2608`). Asking the model for the *function* and letting code evaluate it preserves both differentiation axes at once. Opus 4.8 replicates the ordering, and its policy arm puts the lottery gradient inside the pre-registered band (`0.305`).
+3. **These families are spent.** The lottery and UI targets have now been used for mechanism selection repeatedly, so the policy-arm win is a selection-surface result. Promoting it to a claim requires a genuinely untouched behavior family scored once.
+
 ## Finding 3: Interpretable Behavior Kernels Failed Productively
 
 The project then tried to make the behavior signal usable inside an economy. That required moving away from raw allocation shares and toward interpretable mechanisms.
@@ -245,15 +266,15 @@ The full claim remains open:
 
 ## Recommended Next Work
 
-The next phase should not chase richer personas. It should build from the result that survived.
+The next phase should not chase richer personas. It should build from the results that survived: prior-conditioned belief updating, and schedule-based behavior elicitation.
 
-1. Build a longer, same-horizon prior-update panel before spending more Phase 4 score surface.
-2. Revisit the bridge from SCE beliefs to demand-economy primitives, especially the unemployment-higher-probability to personal job-risk mapping and the excessive consumption-growth contraction in the LLM-updater path.
-3. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement.
-4. Run the next matched-twin comparison only when the household panel horizon, belief replay horizon, and proxy scoring horizon are aligned.
+1. Define one fresh behavior holdout family (untouched by any selection so far) and score the policy-schedule arm against it once, pre-registered. That is the promotion test for the first LLM source that beat the liquidity rule on the selection split.
+2. Build a longer, same-horizon prior-update panel before spending more Phase 4 score surface.
+3. Revisit the bridge from SCE beliefs to demand-economy primitives with the policy-schedule interface: elicit belief-to-behavior response schedules per household state rather than per-period point behaviors.
+4. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
 5. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
 
-Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. The behavior route needs new mechanisms or new data before another holdout is spent.
+Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. Point-behavior elicitation is closed; the schedule interface is the live route.
 
 ## Methods Appendix
 

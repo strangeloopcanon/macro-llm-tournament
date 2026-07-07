@@ -1130,6 +1130,119 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(command[command.index("--mode") + 1], "ask")
         self.assertEqual(command[command.index("--workspace") + 1], "/tmp/neutral")
 
+    def test_behavior_ecology_sampler_is_deterministic_and_weighted(self):
+        from macro_llm_tournament.behavior_ecology import sample_households
+
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        first = sample_households(type_cells, households_per_cell=2, seed=42)
+        second = sample_households(type_cells, households_per_cell=2, seed=42)
+
+        pd.testing.assert_frame_equal(first, second)
+        self.assertEqual(first.shape[0], 2 * type_cells.shape[0])
+        self.assertAlmostEqual(float(first["population_weight"].sum()), float(type_cells["population_weight"].sum()), places=9)
+        self.assertGreater(first["checking_and_savings_usd"].nunique(), type_cells.shape[0])
+
+    def test_behavior_ecology_prompt_is_first_person_and_leak_free(self):
+        from macro_llm_tournament.behavior_ecology import ecology_household_prompt, sample_households
+
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        households = sample_households(type_cells, households_per_cell=1, seed=7)
+        transfer = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_type != "income_loss")
+        income_loss = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_type == "income_loss")
+
+        for scenario in (transfer, income_loss):
+            prompt = ecology_household_prompt(scenario, households.iloc[0])
+            payload = json.loads(prompt)
+            self.assertIn("first person", payload["you_are"])
+            self.assertNotIn("target", prompt.lower())
+            self.assertNotIn("share of transfer spent", prompt)
+
+    def test_behavior_ecology_normalizes_dollars_to_shares(self):
+        from macro_llm_tournament.behavior_ecology import normalize_ecology_payload, sample_households
+
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        household = sample_households(type_cells, households_per_cell=1, seed=7).iloc[0]
+        transfer = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_type != "income_loss")
+        amount = float(transfer.transfer_amount)
+        response = normalize_ecology_payload(
+            transfer,
+            household,
+            {
+                "payload": {
+                    "spend_on_nondurables_and_services_usd": amount * 0.4,
+                    "spend_on_durables_usd": amount * 0.2,
+                    "repay_debt_usd": amount * 0.3,
+                    "keep_as_liquid_savings_usd": amount * 0.1,
+                    "one_line_reason": "test",
+                }
+            },
+        )
+        self.assertAlmostEqual(response["total_spending_share"], 0.6, places=9)
+        self.assertAlmostEqual(response["debt_repayment_share"], 0.3, places=9)
+        self.assertAlmostEqual(
+            response["total_spending_share"] + response["debt_repayment_share"] + response["liquid_saving_share"],
+            1.0,
+            places=9,
+        )
+        income_loss = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_type == "income_loss")
+        drop = normalize_ecology_payload(
+            income_loss,
+            household,
+            {"payload": {"monthly_nondurable_spending_reference_usd": 2000.0, "monthly_nondurable_spending_now_usd": 1800.0}},
+        )
+        self.assertAlmostEqual(drop["nondurable_spending_share"], 0.1, places=9)
+
+    def test_behavior_ecology_policy_interpolates_by_windfall_ratio(self):
+        from macro_llm_tournament.behavior_ecology import evaluate_policy_at_scenario
+
+        type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0]
+        cell = type_cells.iloc[0]
+        policy = {
+            "schedule": [
+                {"ratio": 0.1, "total_spending_share": 0.8, "nondurable_share_of_spending": 0.8, "debt_repayment_share": 0.1, "liquid_saving_share": 0.1},
+                {"ratio": 10.0, "total_spending_share": 0.2, "nondurable_share_of_spending": 0.5, "debt_repayment_share": 0.2, "liquid_saving_share": 0.6},
+            ]
+        }
+        small = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_id == "small_lottery_windfall_style")
+        large = next(s for s in BEHAVIOR_SCENARIOS if s.scenario_id == "large_lottery_windfall_style")
+        small_action = evaluate_policy_at_scenario(small, cell, policy)
+        large_action = evaluate_policy_at_scenario(large, cell, policy)
+        self.assertGreater(small_action["total_spending_share"], large_action["total_spending_share"])
+
+    def test_behavior_ecology_fixture_run_writes_preregistered_metrics(self):
+        with TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.behavior_ecology",
+                    "--mode",
+                    "fixture",
+                    "--households-per-cell",
+                    "2",
+                    "--output-dir",
+                    str(Path(temp_dir) / "ecology"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+            manifest = json.loads((Path(temp_dir) / "ecology" / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "ok")
+            self.assertEqual(manifest["live_call_count"], 0)
+            self.assertIn("preregistered_metrics", manifest)
+            metric_rows = manifest["differentiation_metrics"]
+            sources = {row["source"] for row in metric_rows}
+            self.assertIn("ecology_codex_cli_gpt-5.5", sources)
+            self.assertIn("policy_codex_cli_gpt-5.5", sources)
+            self.assertIn("liquidity_rule", sources)
+            for row in metric_rows:
+                self.assertIn("lottery_size_gradient_verdict", row)
+                self.assertIn("ui_exhaustion_cliff_verdict", row)
+
     def test_behavior_gate_rejects_ambiguous_fresh_resume_cache(self):
         with TemporaryDirectory() as temp_dir:
             result = subprocess.run(
