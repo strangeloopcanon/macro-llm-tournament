@@ -38,6 +38,8 @@ PRIMITIVE_V3_POLICY_VERSION = "primitive_v3_policy_fixed_selection_only_v1"
 CHOICE_SOURCE_PREFIX = "choice"
 PRIMITIVE_V3_SOURCE_PREFIX = "primitive_v3"
 INTERPRETABILITY_RANK = {"constrained_raw": 0, "constrained_choice": 1, "primitive_v3": 2}
+CHOICE_MIN_TRANSFER_RESPONSE_SHARE = 0.05
+CHOICE_MAX_INCOME_LOSS_DROP_SHARE = 0.18
 
 
 CHOICE_FIELDS = [
@@ -127,6 +129,11 @@ def main() -> int:
         "selection_split": BEHAVIOR_SELECTION_SPLIT,
         "holdout_split": BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
         "fidelity_tolerance": float(args.fidelity_tolerance),
+        "selection_credibility_rule": (
+            "An architecture must be within tolerance of raw GPT-5.5 on the UI holdout and within tolerance "
+            "of the best observed source on the selection split. If no architecture clears both, there is no "
+            "recommended architecture."
+        ),
         "lottery_holdout_status": "spent_and_not_scored_for_new_architectures",
         "ui_holdout_leakage_note": (
             "Phase 1 raw/rule UI results were known before this run; constrained-choice and primitive-v3 "
@@ -621,9 +628,11 @@ def choice_policy_action(scenario: BehaviorScenario, type_cell: pd.Series, choic
         )
         if scenario.scenario_id == "ui_receipt_monthly_path_style":
             response *= 0.20
+        response = min(response, CHOICE_MAX_INCOME_LOSS_DROP_SHARE)
     else:
         shock_log = np.log10(max(scenario.transfer_amount / max(float(type_cell.get("annual_income", 50000.0)), 1.0), 1e-4))
         response = base - float(choice["shock_size_damping"]) * max(0.0, shock_log + 1.0)
+        response = max(response, CHOICE_MIN_TRANSFER_RESPONSE_SHARE)
     total = float(np.clip(response, 0.0, 0.90))
     durable = total * float(np.clip(choice["durable_fraction"], 0.0, 0.70))
     nondurable = max(0.0, total - durable)
@@ -765,20 +774,32 @@ def build_fidelity_table(
         (f"{PRIMITIVE_V3_SOURCE_PREFIX}_{provider}_{model}", "primitive_v3", "high"),
     ]
     raw_ui_rmse = lookup_rmse(scores, source=raw_source, split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT)
+    best_selection = lookup_best_rmse(scores, split=BEHAVIOR_SELECTION_SPLIT)
+    best_selection_rmse = float(best_selection.get("rmse_range", np.nan))
     rows: list[dict[str, Any]] = []
     for source, architecture, tier in sources:
         ui_rmse = lookup_rmse(scores, source=source, split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT)
+        selection_rmse = lookup_rmse(scores, source=source, split=BEHAVIOR_SELECTION_SPLIT)
         baseline = lookup_comparison(comparison, source=source, split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT)
+        within_raw_ui = bool(np.isfinite(ui_rmse) and np.isfinite(raw_ui_rmse) and ui_rmse <= raw_ui_rmse * (1.0 + tolerance))
+        within_best_selection = bool(
+            np.isfinite(selection_rmse)
+            and np.isfinite(best_selection_rmse)
+            and selection_rmse <= best_selection_rmse * (1.0 + tolerance)
+        )
         rows.append(
             {
                 "source": source,
                 "architecture": architecture,
                 "interpretability_tier": tier,
                 "interpretability_rank": INTERPRETABILITY_RANK[architecture],
-                "selection_rmse": lookup_rmse(scores, source=source, split=BEHAVIOR_SELECTION_SPLIT),
+                "selection_rmse": selection_rmse,
+                "best_selection_source": best_selection.get("source"),
+                "best_selection_rmse": best_selection_rmse,
+                "within_25pct_of_best_selection": within_best_selection,
                 "ui_holdout_rmse": ui_rmse,
                 "raw_ui_holdout_rmse": raw_ui_rmse,
-                "within_25pct_of_raw_ui": bool(np.isfinite(ui_rmse) and np.isfinite(raw_ui_rmse) and ui_rmse <= raw_ui_rmse * (1.0 + tolerance)),
+                "within_25pct_of_raw_ui": within_raw_ui,
                 "best_ui_baseline_source": baseline.get("best_baseline_source"),
                 "best_ui_baseline_rmse": baseline.get("best_baseline_rmse_range", np.nan),
                 "ui_delta_vs_best_baseline": baseline.get("rmse_range_delta_vs_baseline", np.nan),
@@ -786,11 +807,26 @@ def build_fidelity_table(
             }
         )
     out = pd.DataFrame(rows)
-    eligible = out[out["within_25pct_of_raw_ui"]].sort_values(["interpretability_rank", "ui_holdout_rmse"], ascending=[False, True])
+    eligible = out[out["within_25pct_of_raw_ui"] & out["within_25pct_of_best_selection"]].sort_values(
+        ["interpretability_rank", "ui_holdout_rmse"],
+        ascending=[False, True],
+    )
     out["recommended"] = False
     if not eligible.empty:
         out.loc[out["source"].eq(str(eligible.iloc[0]["source"])), "recommended"] = True
     return out.sort_values(["interpretability_rank", "ui_holdout_rmse"], ascending=[False, True]).reset_index(drop=True)
+
+
+def lookup_best_rmse(scores: pd.DataFrame, *, split: str) -> dict[str, Any]:
+    rows = scores[
+        (scores["evaluation_split"].astype(str) == split)
+        & (scores["target_scope"].astype(str) == "aggregate")
+        & (scores["target_family"].astype(str) == "ALL")
+    ].copy()
+    if rows.empty:
+        return {}
+    row = rows.sort_values(["rmse_range", "source"]).iloc[0]
+    return {"source": str(row["source"]), "rmse_range": float(row["rmse_range"])}
 
 
 def lookup_rmse(scores: pd.DataFrame, *, source: str, split: str) -> float:
@@ -848,7 +884,10 @@ def locked_architecture_manifest() -> dict[str, Any]:
 
 def _recommended_architecture(fidelity: pd.DataFrame) -> dict[str, Any]:
     if fidelity.empty or not bool(fidelity["recommended"].any()):
-        return {"status": "none", "reason": "No architecture was within tolerance of raw UI holdout fidelity."}
+        return {
+            "status": "none",
+            "reason": "No architecture was within tolerance on both raw UI holdout fidelity and selection-split credibility.",
+        }
     row = fidelity[fidelity["recommended"]].iloc[0]
     return {
         "status": "selected",
@@ -857,6 +896,8 @@ def _recommended_architecture(fidelity: pd.DataFrame) -> dict[str, Any]:
         "interpretability_tier": str(row["interpretability_tier"]),
         "ui_holdout_rmse": float(row["ui_holdout_rmse"]),
         "raw_ui_holdout_rmse": float(row["raw_ui_holdout_rmse"]),
+        "selection_rmse": float(row["selection_rmse"]),
+        "best_selection_rmse": float(row["best_selection_rmse"]),
     }
 
 
@@ -872,7 +913,7 @@ def build_report(
         f"Recommended architecture: `{recommendation['architecture']}` (`{recommendation['source']}`), "
         f"UI RMSE `{recommendation['ui_holdout_rmse']:.4f}` versus raw `{recommendation['raw_ui_holdout_rmse']:.4f}`."
         if recommendation.get("status") == "selected"
-        else "No interpretable architecture stayed within the locked fidelity tolerance."
+        else "No architecture cleared both the UI fidelity bar and the selection-split credibility bar."
     )
     lines = [
         "# Behavior Architecture Fidelity",
@@ -889,6 +930,7 @@ def build_report(
         f"- Selection split: `{manifest.get('selection_split')}`",
         f"- Holdout split: `{manifest.get('holdout_split')}`",
         f"- Fidelity tolerance: `{manifest.get('fidelity_tolerance')}`",
+        f"- Selection credibility rule: {manifest.get('selection_credibility_rule')}",
         f"- UI leakage note: {manifest.get('ui_holdout_leakage_note')}",
         "",
         "## Fidelity Table",

@@ -9,6 +9,7 @@ from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
+from openpyxl import Workbook
 
 from macro_llm_tournament.forecast_agent_panel import build_forecast_agent_panel
 from macro_llm_tournament.agent_economy import (
@@ -51,6 +52,10 @@ from macro_llm_tournament.behavior_gate import (
     score_behavior_targets,
 )
 from macro_llm_tournament.behavior_architecture_fidelity import (
+    CHOICE_MAX_INCOME_LOSS_DROP_SHARE,
+    CHOICE_MIN_TRANSFER_RESPONSE_SHARE,
+    build_fidelity_table,
+    choice_policy_action,
     normalize_primitive_v3_payload,
 )
 from macro_llm_tournament.demand_economy import (
@@ -121,6 +126,11 @@ from macro_llm_tournament.persona_belief_panel import (
     score_variance_flattening,
     _client_mode_and_cap,
     _sanitized_argv,
+)
+from macro_llm_tournament.prepare_sce_microdata import (
+    SCE_REAL_TARGET_FIELDS,
+    convert_sce_microdata,
+    normalize_sce_raw_frame,
 )
 import macro_llm_tournament.persona_belief_panel as persona_belief_panel_module
 from macro_llm_tournament.persona_ecology import (
@@ -1151,8 +1161,118 @@ class ForecastTournamentTests(unittest.TestCase):
             )
             self.assertNotIn(BEHAVIOR_HOLDOUT_SPLIT, set(scores["evaluation_split"]))
             self.assertTrue(fidelity["within_25pct_of_raw_ui"].isin([True, False]).all())
+            self.assertTrue(fidelity["within_25pct_of_best_selection"].isin([True, False]).all())
+            self.assertIn("selection_credibility_rule", manifest)
             self.assertIn("Behavior Architecture Fidelity", report)
             self.assertIn("UI holdout", report)
+
+    def test_architecture_recommendation_requires_selection_credibility(self):
+        raw_source = "llm_codex_cli_gpt-5.5"
+        choice_source = "choice_codex_cli_gpt-5.5"
+        primitive_source = "primitive_v3_codex_cli_gpt-5.5"
+        rows = []
+        for source, selection_rmse, ui_rmse in [
+            ("liquidity_rule", 0.05, 0.03),
+            ("flat_30pct_rule", 0.20, 0.04),
+            (raw_source, 0.08, 0.04),
+            (choice_source, 0.30, 0.02),
+            (primitive_source, 0.34, 0.02),
+        ]:
+            rows.extend(
+                [
+                    {
+                        "source": source,
+                        "target_family": "ALL",
+                        "target_scope": "aggregate",
+                        "evaluation_split": BEHAVIOR_SELECTION_SPLIT,
+                        "n": 1,
+                        "effective_weight": 1.0,
+                        "rmse_range": selection_rmse,
+                        "mae_range": selection_rmse,
+                        "rmse_point": selection_rmse,
+                        "mae_point": selection_rmse,
+                        "mean_prediction": 0.0,
+                        "mean_target": 0.0,
+                    },
+                    {
+                        "source": source,
+                        "target_family": "ALL",
+                        "target_scope": "aggregate",
+                        "evaluation_split": BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+                        "n": 1,
+                        "effective_weight": 1.0,
+                        "rmse_range": ui_rmse,
+                        "mae_range": ui_rmse,
+                        "rmse_point": ui_rmse,
+                        "mae_point": ui_rmse,
+                        "mean_prediction": 0.0,
+                        "mean_target": 0.0,
+                    },
+                ]
+            )
+        scores = pd.DataFrame(rows)
+        comparison = build_behavior_baseline_comparison(scores)
+
+        fidelity = build_fidelity_table(scores, comparison, provider="codex_cli", model="gpt-5.5", tolerance=0.25)
+
+        primitive = fidelity[fidelity["source"] == primitive_source].iloc[0]
+        self.assertTrue(bool(primitive["within_25pct_of_raw_ui"]))
+        self.assertFalse(bool(primitive["within_25pct_of_best_selection"]))
+        self.assertFalse(fidelity["recommended"].any())
+
+    def test_constrained_choice_transfer_response_keeps_high_liquidity_denominator_positive(self):
+        scenario = next(item for item in BEHAVIOR_SCENARIOS if item.scenario_id == "eip_2020_style")
+        high_liquidity = pd.Series(
+            {
+                "type_id": "high_income_illiquid_rich",
+                "annual_income": 180000.0,
+                "population_weight": 1.0,
+            }
+        )
+        choice = {
+            "policy_family": "liquidity_buffer_rule",
+            "base_response_share": 0.14,
+            "liquidity_adjustment": 0.28,
+            "shock_size_damping": 0.0,
+            "debt_repayment_share": 0.15,
+            "durable_fraction": 0.20,
+            "income_loss_sensitivity": 0.0,
+            "exhaustion_boost": 0.0,
+            "confidence": 0.6,
+            "reason": "regression case",
+        }
+
+        action = choice_policy_action(scenario, high_liquidity, choice)
+
+        self.assertGreaterEqual(float(action["total_spending_share"]), CHOICE_MIN_TRANSFER_RESPONSE_SHARE)
+        self.assertTrue(np.isfinite(float(action["total_spending_share"])))
+
+    def test_constrained_choice_income_loss_response_stays_on_drop_scale(self):
+        scenario = next(item for item in BEHAVIOR_SCENARIOS if item.scenario_id == "ui_exhaustion_income_loss_style")
+        low_liquidity = pd.Series(
+            {
+                "type_id": "liquid_poor_renter",
+                "annual_income": 32000.0,
+                "population_weight": 1.0,
+            }
+        )
+        choice = {
+            "policy_family": "income_loss_smoothing_rule",
+            "base_response_share": 0.85,
+            "liquidity_adjustment": 0.35,
+            "shock_size_damping": 0.0,
+            "debt_repayment_share": 0.10,
+            "durable_fraction": 0.30,
+            "income_loss_sensitivity": 0.60,
+            "exhaustion_boost": 0.30,
+            "confidence": 0.6,
+            "reason": "regression case",
+        }
+
+        action = choice_policy_action(scenario, low_liquidity, choice)
+
+        self.assertLessEqual(float(action["total_spending_share"]), CHOICE_MAX_INCOME_LOSS_DROP_SHARE)
+        self.assertLessEqual(float(action["nondurable_spending_share"]), CHOICE_MAX_INCOME_LOSS_DROP_SHARE)
 
     def test_primitive_v3_payload_rejects_final_allocation_fields(self):
         type_cells = build_household_type_cells(work_dir=Path("/tmp/missing_scf"), wave=2022)[0].head(1)
@@ -2141,6 +2261,152 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertNotIn("actual_expected_inflation_1y", prompts)
             self.assertNotIn("q9mean", prompts)
 
+    def test_sce_microdata_converter_derives_real_targets_and_fills_demographics(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "date": 202501,
+                    "userid": 111,
+                    "weight": 2.0,
+                    "Q4new": 40.0,
+                    "Q9_cent50": 3.5,
+                    "Q25v2part2": 5.0,
+                    "Q32": 45,
+                    "_AGE_CAT": None,
+                    "Q33": 1,
+                    "Q36": 5,
+                    "D6": 11,
+                    "_REGION_CAT": "West",
+                    "Q10_1": 1,
+                    "Q10_2": 0,
+                    "Q43": 1,
+                    "_EDU_CAT": "College",
+                    "_HH_INC_CAT": "Over 100k",
+                },
+                {
+                    "date": 202502,
+                    "userid": 111,
+                    "weight": 3.0,
+                    "Q4new": 55.0,
+                    "Q9_cent50": 4.0,
+                    "Q25v2part2": 2.0,
+                    "Q32": None,
+                    "_AGE_CAT": None,
+                    "Q33": None,
+                    "Q36": None,
+                    "D6": None,
+                    "_REGION_CAT": None,
+                    "Q10_1": 0,
+                    "Q10_2": 1,
+                    "Q43": None,
+                    "_EDU_CAT": None,
+                    "_HH_INC_CAT": None,
+                },
+                {
+                    "date": 202502,
+                    "userid": 222,
+                    "weight": 1.0,
+                    "Q4new": 20.0,
+                    "Q9_cent50": 2.0,
+                    "Q25v2part2": 3.0,
+                    "Q32": None,
+                    "_AGE_CAT": "Under 40",
+                    "Q33": 1,
+                    "Q36": 3,
+                    "D6": 5,
+                    "_REGION_CAT": "South",
+                    "Q10_1": 1,
+                    "Q10_2": 0,
+                    "Q43": 2,
+                    "_EDU_CAT": "High School",
+                    "_HH_INC_CAT": "Under 50k",
+                },
+            ]
+        )
+
+        converted = normalize_sce_raw_frame(raw)
+        second = converted[(converted["respondent_id"] == "sce_user_111") & (converted["survey_date"] == "2025-02-01")].iloc[0]
+
+        self.assertEqual(tuple(SCE_REAL_TARGET_FIELDS), ("expected_inflation_1y", "expected_unemployment_higher_prob", "expected_real_income_growth"))
+        self.assertEqual(str(second["gender"]), "female")
+        self.assertEqual(str(second["income_group"]), "high")
+        self.assertEqual(str(second["education_group"]), "college_plus")
+        self.assertAlmostEqual(float(second["actual_expected_real_income_growth"]), -2.0)
+        self.assertAlmostEqual(float(second["actual_expected_unemployment_higher_prob"]), 55.0)
+        for _, group in converted.groupby("survey_date"):
+            self.assertAlmostEqual(float(group["weight"].sum()), 1.0)
+
+        minimal = normalize_sce_raw_frame(
+            pd.DataFrame(
+                [
+                    {
+                        "date": 202503,
+                        "userid": 333,
+                        "weight": 1.0,
+                        "Q4new": 33.0,
+                        "Q9_cent50": 2.5,
+                        "Q25v2part2": 4.0,
+                    }
+                ]
+            )
+        )
+        self.assertEqual(str(minimal.iloc[0]["gender"]), "unknown")
+        self.assertEqual(str(minimal.iloc[0]["income_group"]), "unknown")
+        self.assertAlmostEqual(float(minimal.iloc[0]["actual_expected_real_income_growth"]), 1.5)
+
+    def test_sce_microdata_converter_reads_nyfed_two_row_header_workbook(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            workbook_path = temp_path / "sce_sample.xlsx"
+            output_csv = temp_path / "sce_real_microdata.csv"
+            manifest_path = temp_path / "manifest.json"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Data"
+            sheet.append(["Source: Survey of Consumer Expectations"] + [None] * 17)
+            header = [
+                "date",
+                "userid",
+                "tenure",
+                "weight",
+                "Q1",
+                "Q2",
+                "Q3",
+                "Q4new",
+                "Q9_cent50",
+                "Q10_1",
+                "Q10_2",
+                "Q25v2part2",
+                "Q32",
+                "Q33",
+                "Q36",
+                "D6",
+                "_REGION_CAT",
+                "Q43",
+                "_AGE_CAT",
+                "_EDU_CAT",
+                "_HH_INC_CAT",
+            ]
+            sheet.append(header)
+            sheet.append([202501, 111, 12, 1.0, None, None, None, 40, 3.0, 1, 0, 5.0, 42, 1, 5, 11, "West", 1, "40 to 60", "College", "Over 100k"])
+            sheet.append([202502, 111, 11, 2.0, None, None, None, 45, 4.0, 0, 1, 2.0, None, None, None, None, None, None, None, None, None])
+            workbook.save(workbook_path)
+
+            result = convert_sce_microdata(
+                input_xlsx=workbook_path,
+                raw_dir=temp_path,
+                output_csv=output_csv,
+                manifest_path=manifest_path,
+            )
+
+            converted = pd.read_csv(output_csv)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["converted_rows"], 2)
+            self.assertEqual(converted.shape[0], 2)
+            self.assertEqual(manifest["target_fields"], list(SCE_REAL_TARGET_FIELDS))
+            self.assertEqual(str(converted.iloc[1]["gender"]), "female")
+            self.assertAlmostEqual(float(converted.iloc[1]["actual_expected_real_income_growth"]), -2.0)
+
     def test_persona_variance_score_detects_flattened_within_group_spread(self):
         respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="2026-01-01")
         rows = []
@@ -3021,6 +3287,7 @@ class ForecastTournamentTests(unittest.TestCase):
                             "homeowner": "own" if idx > 1 else "rent",
                             "liquid_assets": [300, 1800, 18000][idx - 1],
                             "q9mean": 3.0 + idx / 10.0,
+                            "q4new": 35.0 + idx,
                             "unemp_mean": 5.0 + idx / 10.0,
                             "earnings_mean": 1.0 + idx / 10.0,
                         }
@@ -3065,6 +3332,8 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertEqual(panel["period_id"].tolist()[:3], ["sce_2025_01"] * 3)
             self.assertEqual(panel["period_id"].tolist()[3:], ["sce_2025_02"] * 3)
             self.assertTrue(panel["target_provenance"].eq("public_ny_fed_sce_microdata_responses").all())
+            self.assertIn("actual_expected_unemployment_higher_prob", panel)
+            self.assertIn("prior_expected_unemployment_higher_prob", panel)
             self.assertTrue(panel["observed_unemployment_rate"].notna().all())
             for _, group in panel.groupby("period_id"):
                 self.assertAlmostEqual(float(group["weight"].sum()), 1.0)

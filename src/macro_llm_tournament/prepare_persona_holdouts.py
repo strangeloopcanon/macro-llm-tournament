@@ -12,6 +12,7 @@ import pandas as pd
 
 from .agent_common import round_or_none
 from .persona_belief_panel import DEFAULT_TARGET_FIELDS, build_fixture_respondent_panel, normalize_sce_respondent_panel
+from .prepare_sce_microdata import SCE_REAL_TARGET_FIELDS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -172,7 +173,7 @@ def prepare_real_sce_holdouts(
     raw = pd.read_csv(sce_microdata_path)
     normalized = normalize_sce_respondent_panel(
         raw,
-        target_fields=DEFAULT_TARGET_FIELDS,
+        target_fields=SCE_REAL_TARGET_FIELDS,
         require_unique_respondents=False,
     )
     normalized["_survey_timestamp"] = pd.to_datetime(normalized["survey_date"], errors="coerce")
@@ -237,14 +238,14 @@ def prepare_real_sce_holdouts(
             ]:
                 out[column] = env[column]
             prior = prior_by_respondent.get(respondent_id)
-            for target in DEFAULT_TARGET_FIELDS:
+            for target in SCE_REAL_TARGET_FIELDS:
                 if prior is not None:
                     out[f"prior_{target}"] = prior[target]
                 else:
                     out[f"prior_{target}"] = _initial_prior(target, out, pd.Series(env))
             prior_by_respondent[respondent_id] = {
                 target: float(out[f"actual_{target}"])
-                for target in DEFAULT_TARGET_FIELDS
+                for target in SCE_REAL_TARGET_FIELDS
             }
             period_rows.append(out)
         period_frame = pd.DataFrame(period_rows)
@@ -457,6 +458,12 @@ def _profile_effect(profile: dict[str, Any], target: str) -> float:
             + {"unemployed": 1.45, "not_in_labor_force": 0.35, "retired": 0.15}.get(employment, 0.0)
             + (0.20 if liquid == "low" else 0.0)
         )
+    if target == "expected_unemployment_higher_prob":
+        return (
+            {"low": 5.0, "middle": 0.8, "high": -2.5}.get(income, 0.0)
+            + {"unemployed": 12.0, "not_in_labor_force": 3.0, "retired": 1.5}.get(employment, 0.0)
+            + (2.0 if liquid == "low" else 0.0)
+        )
     if target == "expected_real_income_growth":
         return (
             {"low": -0.42, "middle": 0.02, "high": 0.38}.get(income, 0.0)
@@ -471,9 +478,17 @@ def _initial_prior(target: str, profile: dict[str, Any], env: pd.Series) -> floa
     aggregate = {
         "expected_inflation_1y": "aggregate_expected_inflation_1y",
         "expected_unemployment_rate": "aggregate_expected_unemployment_rate",
+        "expected_unemployment_higher_prob": "aggregate_expected_unemployment_higher_prob",
         "expected_real_income_growth": "aggregate_expected_real_income_growth",
-    }[target]
-    return round(float(env[aggregate]) + 0.5 * _profile_effect(profile, target), 4)
+    }.get(target)
+    if aggregate == "aggregate_expected_unemployment_higher_prob" and aggregate not in env:
+        unemployment = float(env.get("aggregate_expected_unemployment_rate", 4.8))
+        anchor = float(np.clip(35.0 + 3.5 * (unemployment - 4.5), 0.0, 100.0))
+    elif aggregate is not None:
+        anchor = float(env[aggregate])
+    else:
+        anchor = 0.0
+    return round(anchor + 0.5 * _profile_effect(profile, target), 4)
 
 
 def _load_survey_targets(path: Path) -> pd.DataFrame:

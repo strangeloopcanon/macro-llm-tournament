@@ -41,6 +41,12 @@ TARGET_SPECS: dict[str, dict[str, Any]] = {
         "lower": 0.0,
         "upper": 35.0,
     },
+    "expected_unemployment_higher_prob": {
+        "label": "Subjective probability U.S. unemployment will be higher in 12 months",
+        "units": "percent probability",
+        "lower": 0.0,
+        "upper": 100.0,
+    },
     "expected_real_income_growth": {
         "label": "Expected own household real income growth over the next 12 months",
         "units": "percent",
@@ -128,6 +134,14 @@ SCE_ALIASES: dict[str, tuple[str, ...]] = {
         "unemployment_1y",
         "jobloss_mean",
         "unemp_mean",
+    ),
+    "actual_expected_unemployment_higher_prob": (
+        "actual_expected_unemployment_higher_prob",
+        "expected_unemployment_higher_prob",
+        "unemployment_higher_probability",
+        "unemployment_higher_prob",
+        "q4new",
+        "q4_new",
     ),
     "actual_expected_real_income_growth": (
         "actual_expected_real_income_growth",
@@ -1431,10 +1445,12 @@ def _fixture_actual_beliefs(row: dict[str, Any], idx: int) -> dict[str, float]:
     wave = 0.55 * np.sin(idx * 1.7)
     inflation = 3.0 + income_effect + education_effect + age_effect + gender_effect + 0.45 * employment_effect + wave
     unemployment = 4.8 + 0.75 * income_effect + 0.35 * education_effect + employment_effect + 0.35 * np.cos(idx * 1.3)
+    unemployment_higher_prob = 36.0 + 8.0 * income_effect + 4.0 * education_effect + 11.0 * employment_effect + 2.5 * np.cos(idx * 1.3)
     income_growth = 1.4 - 0.35 * income_effect - 0.15 * education_effect - 0.85 * employment_effect + 0.45 * np.sin(idx * 0.9)
     return {
         "actual_expected_inflation_1y": float(np.clip(inflation, -5.0, 20.0)),
         "actual_expected_unemployment_rate": float(np.clip(unemployment, 0.0, 35.0)),
+        "actual_expected_unemployment_higher_prob": float(np.clip(unemployment_higher_prob, 0.0, 100.0)),
         "actual_expected_real_income_growth": float(np.clip(income_growth, -20.0, 20.0)),
     }
 
@@ -1457,6 +1473,8 @@ def _fixture_predicted_belief(profile: dict[str, Any], respondent_id: str, model
         return 3.05 + income_effect + education_effect + age_effect + gender_effect + 0.35 * employment_effect + jitter
     if target == "expected_unemployment_rate":
         return 4.7 + 0.58 * income_effect + 0.25 * education_effect + 0.85 * employment_effect + 0.18 * np.cos(idx + model_shift)
+    if target == "expected_unemployment_higher_prob":
+        return 36.0 + 8.0 * income_effect + 4.0 * education_effect + 12.0 * employment_effect + 2.5 * np.cos(idx + model_shift)
     if target == "expected_real_income_growth":
         return 1.45 - 0.28 * income_effect - 0.10 * education_effect - 0.70 * employment_effect + 0.22 * np.sin(idx * 0.8 + model_shift)
     raise ValueError(f"Unknown target: {target}")

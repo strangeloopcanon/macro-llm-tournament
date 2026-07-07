@@ -1,6 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
+POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -25,6 +26,20 @@ postcutoff-fixture:
 		--belief-targets best_effort \
 		--typed-agent-panel \
 		--output-dir outputs/spf_postcutoff_fixture
+
+postcutoff-replay-refresh:
+	@if [ -e "$(POSTCUTOFF_REPLAY_OUTPUT)" ] && [ "$(ALLOW_REPLAY_OVERWRITE)" != "1" ]; then \
+		echo "Refusing to overwrite $(POSTCUTOFF_REPLAY_OUTPUT). Set POSTCUTOFF_REPLAY_OUTPUT=outputs/spf_postcutoff_replay_$$(date -u +%Y%m%dT%H%M%SZ) or ALLOW_REPLAY_OVERWRITE=1."; \
+		exit 2; \
+	fi
+	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
+		--llm-mode replay \
+		--max-live-calls 0 \
+		--replay-cache-miss-policy freeze \
+		--vintage-context best_effort \
+		--belief-targets best_effort \
+		--typed-agent-panel \
+		--output-dir "$(POSTCUTOFF_REPLAY_OUTPUT)"
 
 agent-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
