@@ -35,6 +35,14 @@ from .persona_belief_panel import (
 
 PERSONA_ECOLOGY_VERSION = "persona_belief_ecology_v1"
 PERSONA_ECOLOGY_PROMPT_VERSION = "persona_belief_ecology_v1"
+DEFAULT_ECOLOGY_SAMPLE_STRATA = ("income_group", "age_group", "education_group")
+PRIOR_UPDATE_THRESHOLDS = {
+    "primary_source_mean_delta_correlation_min": 0.10,
+    "primary_source_mean_direction_accuracy_min": 0.55,
+    "primary_source_median_update_amplitude_ratio_min": 0.25,
+    "primary_source_median_update_amplitude_ratio_max": 2.00,
+    "primary_source_mean_rmse_improvement_vs_persistence_min": 0.02,
+}
 ACTION_COLUMNS = (
     "consumption_change_pct",
     "liquid_buffer_change_pct",
@@ -59,6 +67,7 @@ ENVIRONMENT_COLUMNS = (
 INITIAL_PRIORS = {
     "expected_inflation_1y": 3.0,
     "expected_unemployment_rate": 4.5,
+    "expected_unemployment_higher_prob": 35.0,
     "expected_real_income_growth": 1.0,
 }
 SURVEY_SCHEMAS = ("normalized", "sce", "michigan")
@@ -106,6 +115,14 @@ ALIASES: dict[str, tuple[str, ...]] = {
         "jobloss_mean",
         "unemp_mean",
     ),
+    "actual_expected_unemployment_higher_prob": (
+        "actual_expected_unemployment_higher_prob",
+        "expected_unemployment_higher_prob",
+        "unemployment_higher_probability",
+        "unemployment_higher_prob",
+        "q4new",
+        "q4_new",
+    ),
     "actual_expected_real_income_growth": (
         "actual_expected_real_income_growth",
         "expected_real_income_growth",
@@ -152,7 +169,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--survey-schema", choices=SURVEY_SCHEMAS, default="normalized")
     parser.add_argument("--respondent-count", type=int, default=60)
     parser.add_argument("--respondent-limit", type=int, default=0)
+    parser.add_argument("--respondent-sample-size", type=int, default=0)
+    parser.add_argument("--respondent-sample-seed", type=int, default=0)
+    parser.add_argument("--respondent-sample-strata", default=",".join(DEFAULT_ECOLOGY_SAMPLE_STRATA))
     parser.add_argument("--period-count", type=int, default=4)
+    parser.add_argument("--period-ids", default="")
+    parser.add_argument("--require-complete-periods", action="store_true")
     parser.add_argument("--survey-start", default="2026-01")
     parser.add_argument("--target-fields", default=",".join(DEFAULT_TARGET_FIELDS))
     parser.add_argument("--prior-mode", choices=PRIOR_MODES, default="simulated")
@@ -171,6 +193,8 @@ def main() -> int:
         raise SystemExit(f"Unknown target fields: {', '.join(unknown_targets)}")
     if not models:
         raise SystemExit("--models must contain at least one model")
+    if args.respondent_limit > 0 and args.respondent_sample_size > 0:
+        raise SystemExit("--respondent-limit and --respondent-sample-size cannot be combined")
     if args.ecology_mode == "live" and args.max_live_calls <= 0:
         raise SystemExit("--max-live-calls must be positive when --ecology-mode live is used")
     if args.ecology_mode == "live" and not args.fresh_cache:
@@ -195,7 +219,18 @@ def main() -> int:
         target_fields=target_fields,
     )
     panel = _anonymize_csv_panel_ids(panel) if args.respondent_source == "csv" else panel
-    panel = _limit_ecology_respondents(panel, args.respondent_limit)
+    pre_selection_panel = panel.copy()
+    period_ids = _parse_period_ids(args.period_ids)
+    sample_strata = _parse_sample_strata(args.respondent_sample_strata)
+    panel, selection_manifest = _select_ecology_panel(
+        panel,
+        respondent_limit=args.respondent_limit,
+        respondent_sample_size=args.respondent_sample_size,
+        respondent_sample_seed=args.respondent_sample_seed,
+        sample_strata=sample_strata,
+        period_ids=period_ids,
+        require_complete_periods=args.require_complete_periods,
+    )
     behavior_target_source = _behavior_target_source(panel, respondent_source=args.respondent_source)
     cards = build_ecology_cards(panel, target_fields=target_fields)
     required_calls = int(len(cards) * len(models))
@@ -216,9 +251,12 @@ def main() -> int:
         source=args.respondent_source,
         respondent_csv=respondent_csv,
         normalized=panel,
+        pre_selection_normalized=pre_selection_panel,
         respondent_limit=args.respondent_limit,
+        selection_manifest=selection_manifest,
         anonymized=args.respondent_source == "csv",
     )
+    primary_update_source = f"llm_{args.provider}_{models[0]}".replace("/", "_")
     manifest: dict[str, Any] = {
         "schema_version": PERSONA_ECOLOGY_VERSION,
         "prompt_version": PERSONA_ECOLOGY_PROMPT_VERSION,
@@ -236,10 +274,18 @@ def main() -> int:
         "survey_schema": args.survey_schema,
         "respondent_count": int(panel["respondent_id"].nunique()),
         "respondent_limit": int(args.respondent_limit),
+        "respondent_sample_size": int(args.respondent_sample_size),
+        "respondent_sample_seed": int(args.respondent_sample_seed),
+        "respondent_sample_strata": list(sample_strata),
+        "period_ids_filter": list(period_ids),
+        "require_complete_periods": bool(args.require_complete_periods),
         "panel_row_count": int(panel.shape[0]),
         "period_count": int(panel["period_index"].nunique()),
         "target_fields": target_fields,
         "prior_mode": args.prior_mode,
+        "primary_update_source": primary_update_source,
+        "pre_registered_prior_update_thresholds": PRIOR_UPDATE_THRESHOLDS,
+        "split_roles": _split_roles_manifest(respondent_input, period_ids=period_ids, prior_mode=args.prior_mode),
         "feedback_mode": args.feedback_mode,
         "date_mode": args.date_mode,
         "behavior_target_source": behavior_target_source,
@@ -298,6 +344,7 @@ def main() -> int:
         temporal_scores = score_temporal_dynamics(panel, predictions, target_fields=target_fields)
         period_scores = score_period_levels(panel, predictions, target_fields=target_fields)
         update_scores = score_period_updates(panel, predictions, target_fields=target_fields)
+        prior_update_scores = score_prior_update_dynamics(panel, predictions, target_fields=target_fields)
         behavior_scores = score_behavior_actions(panel, actions)
         action_period_summary = summarize_period_actions(actions)
         ablation_predictions = build_module_ablations(panel, target_fields=target_fields)
@@ -310,6 +357,7 @@ def main() -> int:
             environments,
             manifest,
         )
+        prior_update_evidence = classify_prior_update_evidence(prior_update_scores, manifest)
 
         panel.to_csv(output_dir / "persona_ecology_panel.csv", index=False)
         pd.DataFrame(prompt_rows).to_json(output_dir / "persona_ecology_prompt_cards.jsonl", orient="records", lines=True)
@@ -324,6 +372,7 @@ def main() -> int:
         temporal_scores.to_csv(output_dir / "persona_ecology_temporal_scores.csv", index=False)
         period_scores.to_csv(output_dir / "persona_ecology_period_scores.csv", index=False)
         update_scores.to_csv(output_dir / "persona_ecology_update_scores.csv", index=False)
+        prior_update_scores.to_csv(output_dir / "persona_ecology_prior_update_scores.csv", index=False)
         behavior_scores.to_csv(output_dir / "persona_ecology_behavior_scores.csv", index=False)
         action_period_summary.to_csv(output_dir / "persona_ecology_action_period_summary.csv", index=False)
         ablation_predictions.to_csv(output_dir / "persona_ecology_module_ablations.csv", index=False)
@@ -342,6 +391,7 @@ def main() -> int:
                 "fixture_generated_count": int((predictions["call_source"] == "fixture").sum()) if "call_source" in predictions else 0,
                 "static_evidence": static_evidence,
                 "ecology_evidence": ecology_evidence,
+                "prior_update_evidence": prior_update_evidence,
                 "behavior_targets_available": bool(_available_behavior_targets(panel)),
                 "behavior_target_source": behavior_target_source,
                 "cache_dir": _safe_relative(cache_dir),
@@ -359,6 +409,7 @@ def main() -> int:
                     "persona_ecology_temporal_scores.csv",
                     "persona_ecology_period_scores.csv",
                     "persona_ecology_update_scores.csv",
+                    "persona_ecology_prior_update_scores.csv",
                     "persona_ecology_behavior_scores.csv",
                     "persona_ecology_action_period_summary.csv",
                     "persona_ecology_module_ablations.csv",
@@ -380,6 +431,7 @@ def main() -> int:
             environments,
             period_scores=period_scores,
             update_scores=update_scores,
+            prior_update_scores=prior_update_scores,
             action_period_summary=action_period_summary,
         )
         (output_dir / "persona_ecology_report.md").write_text(report, encoding="utf-8")
@@ -1304,6 +1356,76 @@ def score_period_updates(
     return pd.DataFrame(rows).sort_values(["target_name", "period_index", "delta_rmse", "source"]).reset_index(drop=True)
 
 
+def score_prior_update_dynamics(
+    panel: pd.DataFrame,
+    predictions: pd.DataFrame,
+    *,
+    target_fields: Iterable[str] = DEFAULT_TARGET_FIELDS,
+) -> pd.DataFrame:
+    if predictions.empty:
+        return pd.DataFrame()
+    columns = [
+        "panel_row_id",
+        "respondent_id",
+        "period_id",
+        "period_index",
+        "weight",
+        *[f"prior_{target}" for target in target_fields],
+        *[f"actual_{target}" for target in target_fields],
+    ]
+    joined = predictions.merge(
+        panel[columns],
+        on=["panel_row_id", "respondent_id", "period_id", "period_index"],
+        how="inner",
+        validate="many_to_one",
+    )
+    rows: list[dict[str, Any]] = []
+    for keys, group in joined.groupby(["source", "target_name"], dropna=False):
+        source, target = keys
+        prior_column = f"prior_{target}"
+        actual_column = f"actual_{target}"
+        clean = group.dropna(subset=["prediction", "prior_prediction", prior_column, actual_column]).copy()
+        if clean.empty:
+            continue
+        clean["prior"] = pd.to_numeric(clean["prior_prediction"], errors="coerce")
+        clean["actual_update"] = pd.to_numeric(clean[actual_column], errors="coerce") - clean["prior"]
+        clean["predicted_update"] = pd.to_numeric(clean["prediction"], errors="coerce") - clean["prior"]
+        clean = clean.dropna(subset=["actual_update", "predicted_update", "weight"])
+        if clean.empty:
+            continue
+        errors = clean["predicted_update"] - clean["actual_update"]
+        persistence_errors = -clean["actual_update"]
+        actual_abs = _weighted_mean(clean["actual_update"].abs(), clean["weight"])
+        predicted_abs = _weighted_mean(clean["predicted_update"].abs(), clean["weight"])
+        rmse = float(np.sqrt(_weighted_mean(errors**2, clean["weight"])))
+        persistence_rmse = float(np.sqrt(_weighted_mean(persistence_errors**2, clean["weight"])))
+        nonzero = clean["actual_update"].abs().gt(1e-9)
+        direction_accuracy = _weighted_mean(
+            np.sign(clean.loc[nonzero, "predicted_update"]).eq(np.sign(clean.loc[nonzero, "actual_update"])).astype(float),
+            clean.loc[nonzero, "weight"],
+        ) if nonzero.any() else np.nan
+        rows.append(
+            {
+                "source": source,
+                "target_name": target,
+                "n_updates": int(clean.shape[0]),
+                "actual_update_mean": _weighted_mean(clean["actual_update"], clean["weight"]),
+                "predicted_update_mean": _weighted_mean(clean["predicted_update"], clean["weight"]),
+                "update_bias": _weighted_mean(errors, clean["weight"]),
+                "update_mae": _weighted_mean(errors.abs(), clean["weight"]),
+                "update_rmse": rmse,
+                "persistence_rmse": persistence_rmse,
+                "rmse_improvement_vs_persistence": (persistence_rmse - rmse) / max(persistence_rmse, 1e-9),
+                "update_correlation": _safe_corr(clean["predicted_update"], clean["actual_update"]),
+                "direction_accuracy": direction_accuracy,
+                "mean_abs_actual_update": actual_abs,
+                "mean_abs_predicted_update": predicted_abs,
+                "update_amplitude_ratio": predicted_abs / max(actual_abs, 1e-9),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["target_name", "update_rmse", "source"]).reset_index(drop=True)
+
+
 def score_behavior_actions(panel: pd.DataFrame, actions: pd.DataFrame) -> pd.DataFrame:
     available = _available_behavior_targets(panel)
     if actions.empty or not available:
@@ -1428,6 +1550,87 @@ def classify_ecology_evidence(
     }
 
 
+def classify_prior_update_evidence(prior_update_scores: pd.DataFrame, manifest: dict[str, Any]) -> dict[str, Any]:
+    primary_source = str(manifest.get("primary_update_source") or "")
+    thresholds = dict(PRIOR_UPDATE_THRESHOLDS)
+    if str(manifest.get("ecology_mode")) == "fixture":
+        return {
+            "evidence_verdict": "prior_update_fixture_ready",
+            "decision_tree_branch": "fixture_scores_exercise_prior_update_harness_only",
+            "primary_update_source": primary_source,
+            "thresholds": thresholds,
+        }
+    if str(manifest.get("prior_mode")) != "empirical":
+        return {
+            "evidence_verdict": "prior_update_unscored",
+            "decision_tree_branch": "prior_mode_not_empirical",
+            "primary_update_source": primary_source,
+            "thresholds": thresholds,
+        }
+    if prior_update_scores.empty:
+        return {
+            "evidence_verdict": "prior_update_incomplete",
+            "decision_tree_branch": "no_prior_update_scores",
+            "primary_update_source": primary_source,
+            "thresholds": thresholds,
+        }
+    primary = prior_update_scores[prior_update_scores["source"].astype(str) == primary_source].copy()
+    if primary.empty:
+        return {
+            "evidence_verdict": "prior_update_incomplete",
+            "decision_tree_branch": "primary_source_missing",
+            "primary_update_source": primary_source,
+            "thresholds": thresholds,
+        }
+    mean_corr = float(primary["update_correlation"].dropna().mean()) if primary["update_correlation"].notna().any() else np.nan
+    mean_direction = float(primary["direction_accuracy"].dropna().mean()) if primary["direction_accuracy"].notna().any() else np.nan
+    median_amplitude = (
+        float(primary["update_amplitude_ratio"].replace([np.inf, -np.inf], np.nan).dropna().median())
+        if primary["update_amplitude_ratio"].replace([np.inf, -np.inf], np.nan).notna().any()
+        else np.nan
+    )
+    mean_rmse_gain = (
+        float(primary["rmse_improvement_vs_persistence"].dropna().mean())
+        if primary["rmse_improvement_vs_persistence"].notna().any()
+        else np.nan
+    )
+    corr_clear = bool(np.isfinite(mean_corr) and mean_corr >= thresholds["primary_source_mean_delta_correlation_min"])
+    direction_clear = bool(
+        np.isfinite(mean_direction)
+        and mean_direction >= thresholds["primary_source_mean_direction_accuracy_min"]
+    )
+    amplitude_clear = bool(
+        np.isfinite(median_amplitude)
+        and thresholds["primary_source_median_update_amplitude_ratio_min"]
+        <= median_amplitude
+        <= thresholds["primary_source_median_update_amplitude_ratio_max"]
+    )
+    persistence_clear = bool(
+        np.isfinite(mean_rmse_gain)
+        and mean_rmse_gain >= thresholds["primary_source_mean_rmse_improvement_vs_persistence_min"]
+    )
+    if corr_clear and direction_clear and amplitude_clear and persistence_clear:
+        verdict = "clears_prior_update_gate"
+        branch = "primary_source_updates_beat_persistence_with_direction_and_amplitude"
+    else:
+        verdict = "prior_update_gate_not_cleared"
+        branch = "correlation_direction_amplitude_or_persistence_gain_weak"
+    return {
+        "evidence_verdict": verdict,
+        "decision_tree_branch": branch,
+        "primary_update_source": primary_source,
+        "thresholds": thresholds,
+        "primary_source_mean_update_correlation": mean_corr,
+        "primary_source_mean_direction_accuracy": mean_direction,
+        "primary_source_median_update_amplitude_ratio": median_amplitude,
+        "primary_source_mean_rmse_improvement_vs_persistence": mean_rmse_gain,
+        "correlation_clear": corr_clear,
+        "direction_clear": direction_clear,
+        "amplitude_clear": amplitude_clear,
+        "persistence_clear": persistence_clear,
+    }
+
+
 def build_persona_ecology_report(
     manifest: dict[str, Any],
     regression_scores: pd.DataFrame,
@@ -1441,12 +1644,15 @@ def build_persona_ecology_report(
     *,
     period_scores: pd.DataFrame | None = None,
     update_scores: pd.DataFrame | None = None,
+    prior_update_scores: pd.DataFrame | None = None,
     action_period_summary: pd.DataFrame | None = None,
 ) -> str:
     period_scores = period_scores if period_scores is not None else pd.DataFrame()
     update_scores = update_scores if update_scores is not None else pd.DataFrame()
+    prior_update_scores = prior_update_scores if prior_update_scores is not None else pd.DataFrame()
     action_period_summary = action_period_summary if action_period_summary is not None else pd.DataFrame()
     ecology = manifest.get("ecology_evidence", {})
+    prior_update = manifest.get("prior_update_evidence", {})
     verdict = ecology.get("evidence_verdict", "unknown")
     if verdict == "fixture_ecology_harness_ready":
         bottom_line = (
@@ -1488,6 +1694,9 @@ def build_persona_ecology_report(
         f"- Behavior target source: `{ecology.get('behavior_target_source', manifest.get('behavior_target_source'))}`",
         f"- External behavior tested: `{ecology.get('external_behavior_tested')}`",
         f"- Feedback moved: `{ecology.get('feedback_moved')}`",
+        f"- Prior-update verdict: `{prior_update.get('evidence_verdict')}`",
+        f"- Primary update source: `{manifest.get('primary_update_source')}`",
+        f"- Pre-registered prior-update thresholds: `{json.dumps(manifest.get('pre_registered_prior_update_thresholds', {}), sort_keys=True)}`",
         "",
         "## Spine",
         (
@@ -1517,6 +1726,14 @@ def build_persona_ecology_report(
         "",
         "## Period Update Scores",
         markdown_table(update_scores.head(72)),
+        "",
+        "## Prior-Conditioned Update Scores",
+        (
+            "These rows score the economically relevant update: predicted current belief minus the supplied "
+            "empirical prior, compared with actual current survey response minus that same prior. Persistence "
+            "is the baseline where the respondent does not update from the prior."
+        ),
+        markdown_table(prior_update_scores.head(72)),
         "",
         "## Behavior Scores",
         (
@@ -1600,6 +1817,199 @@ def _limit_ecology_respondents(frame: pd.DataFrame, respondent_limit: int) -> pd
     return _normalize_period_weights(out).reset_index(drop=True)
 
 
+def _parse_period_ids(value: str) -> tuple[str, ...]:
+    return tuple(part.strip() for part in str(value).split(",") if part.strip())
+
+
+def _parse_sample_strata(value: str) -> tuple[str, ...]:
+    strata = tuple(part.strip() for part in str(value).split(",") if part.strip())
+    if not strata:
+        raise ValueError("--respondent-sample-strata must contain at least one column")
+    return strata
+
+
+def _select_ecology_panel(
+    frame: pd.DataFrame,
+    *,
+    respondent_limit: int,
+    respondent_sample_size: int,
+    respondent_sample_seed: int,
+    sample_strata: tuple[str, ...],
+    period_ids: tuple[str, ...],
+    require_complete_periods: bool,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    selected = frame.copy()
+    if period_ids:
+        selected = selected[selected["period_id"].astype(str).isin(period_ids)].copy()
+        if selected.empty:
+            raise ValueError(f"No panel rows match --period-ids: {', '.join(period_ids)}")
+    if require_complete_periods:
+        required = set(period_ids) if period_ids else set(selected["period_id"].astype(str).unique())
+        counts = selected.groupby("respondent_id")["period_id"].apply(lambda series: set(series.astype(str)))
+        keep = counts[counts.map(lambda values: required.issubset(values))].index
+        selected = selected[selected["respondent_id"].isin(keep)].copy()
+        if selected.empty:
+            raise ValueError("No respondents have complete coverage for the selected periods")
+    pre_sample = selected.copy()
+    if respondent_sample_size > 0:
+        selected, sample_manifest = _stratified_ecology_sample(
+            selected,
+            sample_size=respondent_sample_size,
+            seed=respondent_sample_seed,
+            strata=sample_strata,
+        )
+    else:
+        selected = _limit_ecology_respondents(selected, respondent_limit)
+        sample_manifest = {
+            "sampling_strategy": "head_limit" if respondent_limit > 0 and selected["respondent_id"].nunique() < pre_sample["respondent_id"].nunique() else "none",
+            "respondent_limit": int(respondent_limit),
+            "sample_size_requested": 0,
+            "sample_size_actual": int(selected["respondent_id"].nunique()),
+            "sample_seed": None,
+            "sample_strata": list(sample_strata),
+            "stratum_count": int(_respondent_strata_frame(selected, sample_strata).shape[0]) if not selected.empty else 0,
+            "stratum_counts": _ecology_stratum_count_records(pre_sample, selected, sample_strata) if not selected.empty else [],
+        }
+    manifest = {
+        **sample_manifest,
+        "period_ids_filter": list(period_ids),
+        "require_complete_periods": bool(require_complete_periods),
+        "pre_selection_row_count": int(frame.shape[0]),
+        "pre_selection_respondent_count": int(frame["respondent_id"].nunique()),
+        "post_period_filter_row_count": int(pre_sample.shape[0]),
+        "post_period_filter_respondent_count": int(pre_sample["respondent_id"].nunique()),
+        "selected_row_count": int(selected.shape[0]),
+        "selected_respondent_count": int(selected["respondent_id"].nunique()),
+        "selected_period_count": int(selected["period_index"].nunique()),
+        "weights_retained": True,
+        "weights_renormalized_after_selection": True,
+    }
+    return _normalize_period_weights(selected).reset_index(drop=True), manifest
+
+
+def _stratified_ecology_sample(
+    frame: pd.DataFrame,
+    *,
+    sample_size: int,
+    seed: int,
+    strata: tuple[str, ...],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive")
+    missing = [column for column in strata if column not in frame]
+    if missing:
+        raise ValueError(f"Cannot stratify ecology respondents; missing columns: {', '.join(missing)}")
+    respondent_frame = _respondent_strata_frame(frame, strata)
+    respondent_count = int(respondent_frame.shape[0])
+    if sample_size >= respondent_count:
+        out = _normalize_period_weights(frame.copy())
+        return out.reset_index(drop=True), {
+            "sampling_strategy": "all_respondents",
+            "sample_size_requested": int(sample_size),
+            "sample_size_actual": respondent_count,
+            "sample_seed": int(seed),
+            "sample_strata": list(strata),
+            "stratum_count": int(respondent_frame.groupby(list(strata), dropna=False).ngroups),
+            "stratum_counts": _ecology_stratum_count_records(frame, out, strata),
+        }
+    groups = list(respondent_frame.groupby(list(strata), dropna=False, sort=True))
+    if sample_size < len(groups):
+        raise ValueError(
+            f"Stratified sample size {sample_size} is smaller than the {len(groups)} non-empty strata; "
+            "increase --respondent-sample-size or reduce --respondent-sample-strata"
+        )
+    allocation = _proportional_stratum_allocation(groups, sample_size=sample_size, population_size=respondent_count)
+    rng = np.random.default_rng(seed)
+    chosen_ids: list[str] = []
+    for (_, group), count in zip(groups, allocation):
+        if count <= 0:
+            continue
+        chosen_ids.extend(rng.choice(group["respondent_id"].astype(str).to_numpy(), size=int(count), replace=False).tolist())
+    selected = frame[frame["respondent_id"].astype(str).isin(chosen_ids)].copy()
+    selected = _normalize_period_weights(selected)
+    return selected.reset_index(drop=True), {
+        "sampling_strategy": "stratified_respondents_without_replacement",
+        "sample_size_requested": int(sample_size),
+        "sample_size_actual": int(selected["respondent_id"].nunique()),
+        "sample_seed": int(seed),
+        "sample_strata": list(strata),
+        "stratum_count": int(len(groups)),
+        "stratum_counts": _ecology_stratum_count_records(frame, selected, strata),
+    }
+
+
+def _respondent_strata_frame(frame: pd.DataFrame, strata: tuple[str, ...]) -> pd.DataFrame:
+    columns = ["respondent_id", *strata]
+    return frame.sort_values(["respondent_id", "period_index"]).drop_duplicates("respondent_id")[columns].copy()
+
+
+def _proportional_stratum_allocation(
+    groups: list[tuple[Any, pd.DataFrame]],
+    *,
+    sample_size: int,
+    population_size: int,
+) -> list[int]:
+    exact = [group.shape[0] * sample_size / population_size for _, group in groups]
+    allocation = [max(1, min(group.shape[0], int(np.floor(value)))) for value, (_, group) in zip(exact, groups)]
+    remaining = sample_size - sum(allocation)
+    order = sorted(
+        range(len(groups)),
+        key=lambda idx: (exact[idx] - np.floor(exact[idx]), groups[idx][1].shape[0], str(groups[idx][0])),
+        reverse=True,
+    )
+    while remaining > 0:
+        progressed = False
+        for idx in order:
+            capacity = groups[idx][1].shape[0] - allocation[idx]
+            if capacity <= 0:
+                continue
+            allocation[idx] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    while remaining < 0:
+        progressed = False
+        for idx in reversed(order):
+            if allocation[idx] <= 1:
+                continue
+            allocation[idx] -= 1
+            remaining += 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    if sum(allocation) != sample_size:
+        raise ValueError(f"Could not allocate exact stratified sample size {sample_size}; allocated {sum(allocation)}")
+    return allocation
+
+
+def _ecology_stratum_count_records(population: pd.DataFrame, sampled: pd.DataFrame, strata: tuple[str, ...]) -> list[dict[str, Any]]:
+    population_respondents = _respondent_strata_frame(population, strata)
+    sampled_respondents = _respondent_strata_frame(sampled, strata) if not sampled.empty else pd.DataFrame(columns=["respondent_id", *strata])
+    population_counts = population_respondents.groupby(list(strata), dropna=False).agg(
+        population_respondent_count=("respondent_id", "size"),
+    )
+    sampled_counts = sampled_respondents.groupby(list(strata), dropna=False).agg(
+        sampled_respondent_count=("respondent_id", "size"),
+    )
+    joined = population_counts.join(sampled_counts, how="left").fillna({"sampled_respondent_count": 0})
+    records: list[dict[str, Any]] = []
+    for _, row in joined.reset_index().iterrows():
+        record = {column: row[column] for column in strata}
+        record.update(
+            {
+                "population_respondent_count": int(row["population_respondent_count"]),
+                "sampled_respondent_count": int(row["sampled_respondent_count"]),
+            }
+        )
+        records.append(record)
+    return records
+
+
 def _anonymize_csv_panel_ids(frame: pd.DataFrame) -> pd.DataFrame:
     out = frame.copy()
     ids = list(dict.fromkeys(out["respondent_id"].astype(str)))
@@ -1614,18 +2024,25 @@ def _respondent_input_manifest(
     source: str,
     respondent_csv: Path | None,
     normalized: pd.DataFrame,
+    pre_selection_normalized: pd.DataFrame,
     respondent_limit: int,
+    selection_manifest: dict[str, Any],
     anonymized: bool,
 ) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "source": source,
         "respondent_limit": int(respondent_limit),
         "respondent_ids_anonymized": bool(anonymized),
+        "pre_selection_normalized_row_count": int(pre_selection_normalized.shape[0]),
+        "pre_selection_normalized_respondent_count": int(pre_selection_normalized["respondent_id"].nunique())
+        if "respondent_id" in pre_selection_normalized
+        else 0,
         "normalized_row_count": int(normalized.shape[0]),
         "normalized_respondent_count": int(normalized["respondent_id"].nunique()) if "respondent_id" in normalized else 0,
         "normalized_period_count": int(normalized["period_index"].nunique()) if "period_index" in normalized else 0,
         "normalized_weight_sum": round_or_none(normalized["weight"].sum()) if "weight" in normalized else None,
         "behavior_target_columns": _available_behavior_targets(normalized),
+        "selection": selection_manifest,
     }
     if respondent_csv is not None:
         raw = pd.read_csv(respondent_csv)
@@ -1648,6 +2065,24 @@ def _respondent_input_manifest(
             }
         )
     return manifest
+
+
+def _split_roles_manifest(respondent_input: dict[str, Any], *, period_ids: tuple[str, ...], prior_mode: str) -> dict[str, Any]:
+    panel_kind = str(respondent_input.get("panel_kind") or "").lower()
+    if panel_kind == "real_sce_microdata_v1" and prior_mode == "empirical":
+        return {
+            "current_run_surface": ",".join(period_ids) if period_ids else "selected_real_sce_panel",
+            "current_run_role": "prior_conditioned_update_validation",
+            "test_wave_status": "december_2024_static_wave_spent_not_used_here",
+            "calibration_reserved_surface": "october_november_2024_panel_rows",
+            "holdout_reuse_rule": "declare thresholds_before_live_calls_and_do_not_tune_on_update_results",
+        }
+    return {
+        "current_run_surface": ",".join(period_ids) if period_ids else "unspecified",
+        "current_run_role": "development_or_fixture",
+        "test_wave_status": None,
+        "holdout_reuse_rule": "not_applicable",
+    }
 
 
 def _file_sha256(path: Path) -> str:
@@ -1944,6 +2379,12 @@ def _profile_anchor(profile: dict[str, Any], target: str) -> float:
         value += {"unemployed": 2.0, "not_in_labor_force": 0.6, "retired": 0.4}.get(employment, 0.0)
         value += 0.25 if liquid == "low" else 0.0
         return value
+    if target == "expected_unemployment_higher_prob":
+        value = 35.0
+        value += {"low": 5.0, "middle": 1.0, "high": -2.5}.get(income, 0.0)
+        value += {"unemployed": 12.0, "not_in_labor_force": 3.0, "retired": 1.5}.get(employment, 0.0)
+        value += 2.0 if liquid == "low" else 0.0
+        return value
     if target == "expected_real_income_growth":
         value = 1.0
         value += {"low": -0.45, "middle": 0.10, "high": 0.55}.get(income, 0.0)
@@ -1966,6 +2407,13 @@ def _environment_anchor(environment: dict[str, float], target: str) -> float:
             + 0.24 * environment["aggregate_expected_unemployment_rate"]
             + 0.70 * environment["news_labor_pressure"]
         )
+    if target == "expected_unemployment_higher_prob":
+        unemployment_anchor = float(
+            35.0
+            + 4.0 * (environment["observed_unemployment_rate"] - 4.5)
+            + 9.0 * environment["news_labor_pressure"]
+        )
+        return float(np.clip(unemployment_anchor, 0.0, 100.0))
     if target == "expected_real_income_growth":
         sentiment_gap = (environment["sentiment_index"] - 80.0) / 20.0
         return float(
@@ -1981,9 +2429,13 @@ def _aggregate_anchor(environment: dict[str, float], target: str) -> float:
     mapping = {
         "expected_inflation_1y": "aggregate_expected_inflation_1y",
         "expected_unemployment_rate": "aggregate_expected_unemployment_rate",
+        "expected_unemployment_higher_prob": "aggregate_expected_unemployment_higher_prob",
         "expected_real_income_growth": "aggregate_expected_real_income_growth",
     }
-    return float(environment.get(mapping.get(target, ""), INITIAL_PRIORS.get(target, 0.0)))
+    aggregate = mapping.get(target, "")
+    if target == "expected_unemployment_higher_prob" and aggregate not in environment:
+        return float(np.clip(35.0 + 4.0 * (environment.get("aggregate_expected_unemployment_rate", 4.5) - 4.5), 0.0, 100.0))
+    return float(environment.get(aggregate, INITIAL_PRIORS.get(target, 0.0)))
 
 
 def _fixture_actual_ecology_belief(
@@ -2025,6 +2477,8 @@ def _fixture_ecology_uncertainty(profile: dict[str, Any], environment: dict[str,
     base += 0.25 * float(environment.get("credit_tightness", 0.0))
     if target == "expected_unemployment_rate":
         base += 0.35
+    if target == "expected_unemployment_higher_prob":
+        base += 1.20
     if target == "expected_real_income_growth":
         base += 0.55
     return float(np.clip(base, 0.35, 5.0))

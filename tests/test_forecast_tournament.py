@@ -136,6 +136,7 @@ from macro_llm_tournament.prepare_sce_microdata import (
 import macro_llm_tournament.persona_belief_panel as persona_belief_panel_module
 from macro_llm_tournament.persona_ecology import (
     EcologyCard,
+    PRIOR_UPDATE_THRESHOLDS,
     PersonaEcologyClient,
     build_ecology_cards,
     build_fixture_ecology_panel,
@@ -149,6 +150,7 @@ from macro_llm_tournament.persona_ecology import (
     score_module_ablations,
     score_period_levels,
     score_period_updates,
+    score_prior_update_dynamics,
     score_temporal_dynamics,
     summarize_period_actions,
 )
@@ -2910,6 +2912,81 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertNotAlmostEqual(float(second["prior_prediction"]), float(empirical_second["prior_expected_inflation_1y"]))
         self.assertEqual(actions["source"].nunique(), 1)
 
+    def test_prior_update_scores_compare_prediction_updates_to_persistence(self):
+        panel = pd.DataFrame(
+            [
+                {
+                    "panel_row_id": "r1__p0",
+                    "respondent_id": "r1",
+                    "period_id": "p0",
+                    "period_index": 0,
+                    "weight": 1.0 / 3.0,
+                    "prior_expected_inflation_1y": 3.0,
+                    "actual_expected_inflation_1y": 4.0,
+                },
+                {
+                    "panel_row_id": "r2__p0",
+                    "respondent_id": "r2",
+                    "period_id": "p0",
+                    "period_index": 0,
+                    "weight": 1.0 / 3.0,
+                    "prior_expected_inflation_1y": 5.0,
+                    "actual_expected_inflation_1y": 3.0,
+                },
+                {
+                    "panel_row_id": "r3__p0",
+                    "respondent_id": "r3",
+                    "period_id": "p0",
+                    "period_index": 0,
+                    "weight": 1.0 / 3.0,
+                    "prior_expected_inflation_1y": 2.0,
+                    "actual_expected_inflation_1y": 2.5,
+                },
+            ]
+        )
+        predictions = pd.DataFrame(
+            [
+                {
+                    "panel_row_id": "r1__p0",
+                    "respondent_id": "r1",
+                    "period_id": "p0",
+                    "period_index": 0,
+                    "source": "llm_test",
+                    "target_name": "expected_inflation_1y",
+                    "prior_prediction": 3.0,
+                    "prediction": 3.8,
+                },
+                {
+                    "panel_row_id": "r2__p0",
+                    "respondent_id": "r2",
+                    "period_id": "p0",
+                    "period_index": 0,
+                    "source": "llm_test",
+                    "target_name": "expected_inflation_1y",
+                    "prior_prediction": 5.0,
+                    "prediction": 3.5,
+                },
+                {
+                    "panel_row_id": "r3__p0",
+                    "respondent_id": "r3",
+                    "period_id": "p0",
+                    "period_index": 0,
+                    "source": "llm_test",
+                    "target_name": "expected_inflation_1y",
+                    "prior_prediction": 2.0,
+                    "prediction": 2.4,
+                },
+            ]
+        )
+
+        scores = score_prior_update_dynamics(panel, predictions, target_fields=["expected_inflation_1y"])
+        row = scores.iloc[0]
+
+        self.assertEqual(int(row["n_updates"]), 3)
+        self.assertGreater(float(row["rmse_improvement_vs_persistence"]), 0.0)
+        self.assertAlmostEqual(float(row["direction_accuracy"]), 1.0)
+        self.assertGreater(float(row["update_correlation"]), 0.99)
+
     def test_persona_ecology_cli_fixture_writes_report(self):
         with TemporaryDirectory() as temp_dir:
             result = subprocess.run(
@@ -3157,6 +3234,105 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertEqual(manifest["behavior_target_source"], "external_csv_targets")
             self.assertNotIn("real_person", prompt_cards)
             self.assertEqual(set(panel["respondent_id"]), {"respondent_00001"})
+
+    def test_persona_ecology_cli_records_prior_update_contract_for_reserved_panel(self):
+        with TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "sce_panel.csv"
+            rows = []
+            for idx in range(1, 5):
+                for period_index, period_id, prior, actual in [
+                    (0, "sce_2024_10", 3.0, 3.0 + idx / 10.0),
+                    (1, "sce_2024_11", 3.0 + idx / 10.0, 3.2 + idx / 10.0),
+                    (2, "sce_2024_12", 9.0, 9.5),
+                ]:
+                    rows.append(
+                        {
+                            "respondent_id": f"sce_person_{idx}",
+                            "period_id": period_id,
+                            "period_index": period_index,
+                            "survey_date": f"2024-{10 + period_index:02d}-01",
+                            "weight": 1.0,
+                            "age_group": "35_54",
+                            "income_group": "middle",
+                            "education_group": "college_plus",
+                            "gender": "female",
+                            "region": "west",
+                            "employment_status": "employed",
+                            "homeownership": "owner",
+                            "liquid_wealth_group": "middle",
+                            "actual_expected_inflation_1y": actual,
+                            "actual_expected_unemployment_higher_prob": 30.0 + idx,
+                            "actual_expected_real_income_growth": 1.0,
+                            "prior_expected_inflation_1y": prior,
+                            "prior_expected_unemployment_higher_prob": 29.0 + idx,
+                            "prior_expected_real_income_growth": 0.8,
+                            "persona_panel_kind": "real_sce_microdata_v1",
+                            "target_provenance": "public_ny_fed_sce_microdata_responses",
+                        }
+                    )
+            pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_ecology",
+                    "--ecology-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5,gpt-5.4",
+                    "--respondent-source",
+                    "csv",
+                    "--survey-schema",
+                    "normalized",
+                    "--respondent-csv",
+                    str(csv_path),
+                    "--period-ids",
+                    "sce_2024_10,sce_2024_11",
+                    "--require-complete-periods",
+                    "--respondent-sample-size",
+                    "2",
+                    "--respondent-sample-seed",
+                    "20260707",
+                    "--prior-mode",
+                    "empirical",
+                    "--feedback-mode",
+                    "none",
+                    "--target-fields",
+                    "expected_inflation_1y,expected_unemployment_higher_prob,expected_real_income_growth",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
+            prompt_cards = (Path(temp_dir) / "persona_ecology_prompt_cards.jsonl").read_text(encoding="utf-8")
+            panel = pd.read_csv(Path(temp_dir) / "persona_ecology_panel.csv")
+            prior_scores = pd.read_csv(Path(temp_dir) / "persona_ecology_prior_update_scores.csv")
+            selection = manifest["respondent_input"]["selection"]
+            self.assertEqual(manifest["required_call_count"], 8)
+            self.assertEqual(manifest["panel_row_count"], 4)
+            self.assertEqual(set(panel["period_id"]), {"sce_2024_10", "sce_2024_11"})
+            self.assertEqual(selection["sampling_strategy"], "stratified_respondents_without_replacement")
+            self.assertEqual(selection["sample_seed"], 20260707)
+            self.assertTrue(selection["require_complete_periods"])
+            self.assertEqual(manifest["split_roles"]["current_run_role"], "prior_conditioned_update_validation")
+            self.assertEqual(manifest["split_roles"]["test_wave_status"], "december_2024_static_wave_spent_not_used_here")
+            self.assertEqual(manifest["pre_registered_prior_update_thresholds"], PRIOR_UPDATE_THRESHOLDS)
+            self.assertEqual(manifest["primary_update_source"], "llm_codex_cli_gpt-5.5")
+            self.assertIn("prior_update_evidence", manifest)
+            self.assertFalse(prior_scores.empty)
+            self.assertIn("persona_ecology_prior_update_scores.csv", manifest["outputs"])
+            self.assertNotIn("sce_2024_12", prompt_cards)
+            self.assertNotIn("actual_expected", prompt_cards)
 
     def test_prepare_persona_holdouts_uses_vintage_environment_and_marks_synthetic(self):
         with TemporaryDirectory() as temp_dir:
