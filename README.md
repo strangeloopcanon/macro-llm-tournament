@@ -142,6 +142,14 @@ make phase4-matched-twins-fixture
 
 This locks the output-to-proxy mapping, runs the same accounting-constrained demand economy with an LLM-belief fixture and an adaptive-expectations twin, and writes `outputs/phase4_matched_twins_fixture/` with the mapping hash, proxy cards, twin paths, accounting, proxy forecasts, scores, manifest, and `phase4_matched_twins_report.md`. Fixture mode is a readiness gate only: live/replay mode is blocked until real prior-state household inputs and a locked replay cache are supplied.
 
+Replay the banked Codex prior-update result through the Phase 4 matched-twin economy:
+
+```bash
+make phase4-prior-update-codex-replay
+```
+
+This consumes `outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100/`, filters to `llm_codex_cli_gpt-5.5`, builds respondent-derived household states from the real SCE panel without copying `actual_*` targets into prompts, and compares that LLM-updater economy to the adaptive-expectations twin on the locked FRED proxy mapping. The default target is the strict one-card run because the banked Codex prior-update ecology has two periods; `--ecology-period-policy hold_last` is available only as an explicitly labeled extrapolation ablation.
+
 Run the zero-cost forecast audit fixture:
 
 ```bash

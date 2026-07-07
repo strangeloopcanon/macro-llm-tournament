@@ -23,7 +23,7 @@ That is not the original maximal claim, but it is a real result. It says where L
 | Can profile-only LLM personas reproduce real SCE household belief heterogeneity? | No. | In a 500-respondent December 2024 SCE run, the evidence verdict is `null_gradient_failure`; median within-variance ratio is `0.0129`; max weighted KS is `0.5475`. |
 | Can richer backstory prompts fix that failure? | No. | In the November 2024 validation campaign, both GPT-5.5 and GPT-5.4 receive `backstory_caricature`; Arm 3 is skipped by design. |
 | Can prior-conditioned agents update beliefs? | Yes, modestly. | On repeated October-November 2024 SCE respondents, GPT-5.5 clears the locked prior-update gate: update correlation `0.3578`, direction accuracy `0.5769`, amplitude ratio `0.3234`, and RMSE improvement versus persistence `0.0437`. |
-| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and the Phase 4 matched-twin fixture is now wired, but the live empirical comparison has not run. |
+| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and Phase 4 now runs an exploratory matched-twin replay, but the LLM-updater economy loses to the adaptive-expectations twin on the first FRED proxy pass. |
 
 ## Finding 1: The Aggregate Belief Engine Works
 
@@ -171,7 +171,9 @@ The right economy architecture now looks different from the early "personas simu
 4. Treat behavior mechanisms as separately validated modules, not as free-form LLM allocation guesses.
 5. Compare the resulting economy to an adaptive-expectations twin: the same demand economy with LLM belief updates swapped out for a standard adaptive baseline.
 
-That final comparison now has a fixture harness. `outputs/phase4_matched_twins_fixture/` locks the output-to-proxy mapping, runs the LLM-belief and adaptive-expectations twins from the same initial state, preserves accounting, and emits comparable post-cutoff proxy scores. Its verdict is `phase4_matched_twin_fixture_ready`, with max accounting residual `2.91e-11` and zero live calls. This proves the comparison is runnable and auditable, not that the LLM economy is empirically better.
+That final comparison now has a fixture harness and an exploratory replay. `outputs/phase4_matched_twins_fixture/` locks the output-to-proxy mapping, runs the LLM-belief and adaptive-expectations twins from the same initial state, preserves accounting, and emits comparable post-cutoff proxy scores. Its verdict is `phase4_matched_twin_fixture_ready`, with max accounting residual `2.91e-11` and zero live calls.
+
+The first real-SCE prior-update replay uses the banked Codex ecology run in `outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100/`, filters to `llm_codex_cli_gpt-5.5`, and feeds those prior-conditioned belief updates into the deterministic demand economy. On the strict one-card FRED proxy run, the adaptive twin wins: scaled RMSE `11.6667` versus `12.9021` for the LLM-updater path. The LLM-updater path has better direction accuracy (`1.0000` versus `0.8000`), but it is too pessimistic on consumption growth and too high on the saving-rate proxy. The five-card `hold_last` ablation says the same thing: adaptive scaled RMSE `12.6666`; LLM-updater scaled RMSE `13.1210`. Accounting passes in both runs. This is a useful negative: the validated belief updater is not yet enough to improve the macro proxy economy.
 
 ## What We Can Claim Now
 
@@ -186,6 +188,7 @@ The evidence also supports three negative claims:
 1. **Profile-only personas fail on real SCE microdata.**
 2. **Backstory elicitation fails by caricature rather than rescuing heterogeneity.**
 3. **No behavior architecture currently clears both in-domain credibility and out-of-domain holdout tests.**
+4. **The first Phase 4 matched-twin replay does not beat adaptive expectations.**
 
 The full claim remains open:
 
@@ -195,10 +198,10 @@ The full claim remains open:
 
 The next phase should not chase richer personas. It should build from the result that survived.
 
-1. Lock the real prior-conditioned belief-updating payload and replay-cache contract.
-2. Test it once on a fresh SCE or Michigan panel holdout.
-3. Feed the locked updater into the Phase 4 matched-twin runner.
-4. Score the LLM-updater economy against the adaptive-expectations twin using the pre-written output mapping.
+1. Build a longer, same-horizon prior-update panel before spending more Phase 4 score surface.
+2. Revisit the bridge from SCE beliefs to demand-economy primitives, especially the unemployment-higher-probability to personal job-risk mapping and the saving-rate level.
+3. Keep the Phase 4 output mapping locked unless there is a pre-registered replacement.
+4. Run the next matched-twin comparison only when the household panel horizon, belief replay horizon, and proxy scoring horizon are aligned.
 5. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
 
 Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. The behavior route needs new mechanisms or new data before another holdout is spent.
@@ -229,8 +232,10 @@ The December 2024 profile-only wave is spent. The November 2024 backstory valida
 
 ### Phase 4 matched twins
 
-The Phase 4 fixture compares two versions of the same deterministic demand economy: an LLM-belief fixture and an adaptive-expectations twin. It writes the locked proxy mapping, cards, targets, household states, twin paths, accounting, forecasts, joined errors, scores, manifest, and `phase4_matched_twins_report.md`. Live/replay mode is blocked until real prior-state household inputs and a locked replay cache are supplied.
+The Phase 4 fixture compares two versions of the same deterministic demand economy: an LLM-belief fixture and an adaptive-expectations twin. It writes the locked proxy mapping, cards, targets, household states, twin paths, accounting, forecasts, joined errors, scores, manifest, and `phase4_matched_twins_report.md`.
+
+The Phase 4 replay adapter consumes persona-ecology predictions rather than raw prompt payloads. It joins on the normalized CSV outputs, not prompt-facing relative IDs; derives household states from demographics, weights, and prior beliefs; and excludes `actual_*` labels from the demand-economy input. The strict Codex replay artifact is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard/`. The extrapolating ablation is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_holdlast_5cards/`.
 
 ### Reproducibility notes
 
-The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The latest full test run passed `139` tests.
+The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The latest full test run passed `140` tests.

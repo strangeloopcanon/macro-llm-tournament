@@ -71,6 +71,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asof-end", default="2026-04-15")
     parser.add_argument("--history-months", type=int, default=18)
     parser.add_argument("--scoreable-only", action="store_true")
+    parser.add_argument("--belief-source", choices=("fixture", "persona_ecology_replay"), default="fixture")
+    parser.add_argument("--persona-ecology-dir", default=None)
+    parser.add_argument("--primary-ecology-source", default="")
+    parser.add_argument("--ecology-period-policy", choices=("strict", "hold_last"), default="strict")
     parser.add_argument("--household-source", choices=("fixture", "csv"), default="fixture")
     parser.add_argument("--household-csv", default=None)
     parser.add_argument("--household-count", type=int, default=24)
@@ -111,14 +115,12 @@ def main() -> int:
         if not cards:
             raise ValueError("No post-cutoff proxy cards were built.")
 
-        households = load_households(args)
+        ecology_bundle = load_persona_ecology_bundle(args) if args.belief_source == "persona_ecology_replay" else None
+        households = load_phase4_households(args, ecology_bundle=ecology_bundle)
         period_count = max(int(args.period_count), len(cards) + 1, 2)
         cache_dir = output_dir / "fresh_phase4_matched_twins_cache" if args.fresh_cache else WORK_ROOT / "phase4_matched_twins_cache"
         scenarios = [DEFAULT_SCENARIO]
-        twins = [
-            DemandEconomyClient(args.provider, args.model, cache_dir, mode=args.mode, variant="llm_belief", max_live_calls=args.max_live_calls),
-            DemandEconomyClient(args.provider, "adaptive", cache_dir, mode="fixture", variant="adaptive", max_live_calls=0),
-        ]
+        twins = build_phase4_clients(args, cache_dir=cache_dir, ecology_bundle=ecology_bundle, period_count=period_count)
 
         all_initial: list[pd.DataFrame] = []
         all_beliefs: list[pd.DataFrame] = []
@@ -153,7 +155,13 @@ def main() -> int:
         path_comparison = build_path_comparison(periods_frame)
         proxy_forecasts = economy_proxy_forecasts(periods_frame, cards, mapping)
         proxy_scores, joined = score_proxy_forecasts(proxy_forecasts, targets)
-        verdict = classify_phase4_fixture(periods_frame, accounting_frame, proxy_scores)
+        verdict = classify_phase4_run(
+            periods_frame,
+            accounting_frame,
+            proxy_scores,
+            belief_source=args.belief_source,
+            data_mode=args.data_mode,
+        )
 
         write_outputs(
             output_dir,
@@ -179,9 +187,12 @@ def main() -> int:
                 "verdict": verdict["verdict"],
                 "claim_scope": verdict["claim_scope"],
                 "passed": bool(verdict["passed"]),
+                "belief_source": args.belief_source,
+                "ecology_period_policy": args.ecology_period_policy,
                 "mapping_sha256": mapping_sha,
                 "mapping_spec_version": PHASE4_VERSION,
                 "data_status": data_status,
+                "persona_ecology_input": ecology_input_manifest(ecology_bundle, period_count=period_count),
                 "card_count": int(len(cards)),
                 "target_rows": int(targets.shape[0]),
                 "scoreable_target_rows": int(targets["target_available"].sum()) if not targets.empty else 0,
@@ -207,10 +218,17 @@ def main() -> int:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.mode != "fixture":
-        raise ValueError("Phase 4 live/replay is blocked until real household prior-state inputs and a locked replay cache are supplied.")
+    if args.belief_source == "fixture" and args.mode != "fixture":
+        raise ValueError("Phase 4 live/replay is blocked for fixture belief source; use --mode fixture.")
+    if args.belief_source == "persona_ecology_replay" and args.mode != "replay":
+        raise ValueError("Phase 4 persona ecology replay must use --mode replay.")
     if args.max_live_calls != 0:
-        raise ValueError("Phase 4 fixture mode must use --max-live-calls 0.")
+        raise ValueError("Phase 4 matched-twin runs must use --max-live-calls 0; run persona ecology live upstream first.")
+    if args.belief_source == "persona_ecology_replay":
+        if not args.persona_ecology_dir:
+            raise ValueError("--persona-ecology-dir is required with --belief-source persona_ecology_replay")
+        if not Path(args.persona_ecology_dir).exists():
+            raise ValueError(f"--persona-ecology-dir does not exist: {args.persona_ecology_dir}")
     if args.household_source == "csv":
         if not args.household_csv:
             raise ValueError("--household-csv is required when --household-source csv")
@@ -218,10 +236,383 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--household-csv does not exist: {args.household_csv}")
 
 
+def load_phase4_households(args: argparse.Namespace, *, ecology_bundle: dict[str, Any] | None) -> pd.DataFrame:
+    if ecology_bundle is not None:
+        return ecology_bundle["households"]
+    return load_households(args)
+
+
 def load_households(args: argparse.Namespace) -> pd.DataFrame:
     if args.household_source == "csv":
         return normalize_demand_households(pd.read_csv(Path(args.household_csv)))
     return build_fixture_demand_households(args.household_count)
+
+
+def build_phase4_clients(
+    args: argparse.Namespace,
+    *,
+    cache_dir: Path,
+    ecology_bundle: dict[str, Any] | None,
+    period_count: int,
+) -> list[Any]:
+    if args.belief_source == "persona_ecology_replay":
+        if ecology_bundle is None:
+            raise ValueError("persona ecology replay source was requested but no ecology bundle was loaded")
+        return [
+            PersonaEcologyReplayDemandClient(ecology_bundle, period_count=period_count, period_policy=args.ecology_period_policy),
+            DemandEconomyClient(args.provider, "adaptive", cache_dir, mode="fixture", variant="adaptive", max_live_calls=0),
+        ]
+    return [
+        DemandEconomyClient(args.provider, args.model, cache_dir, mode=args.mode, variant="llm_belief", max_live_calls=args.max_live_calls),
+        DemandEconomyClient(args.provider, "adaptive", cache_dir, mode="fixture", variant="adaptive", max_live_calls=0),
+    ]
+
+
+def load_persona_ecology_bundle(args: argparse.Namespace) -> dict[str, Any]:
+    root = Path(args.persona_ecology_dir)
+    manifest_path = root / "manifest.json"
+    panel_path = root / "persona_ecology_panel.csv"
+    predictions_path = root / "persona_ecology_predictions.csv"
+    if not manifest_path.exists():
+        raise ValueError(f"Persona ecology manifest missing: {manifest_path}")
+    if not panel_path.exists():
+        raise ValueError(f"Persona ecology panel missing: {panel_path}")
+    if not predictions_path.exists():
+        raise ValueError(f"Persona ecology predictions missing: {predictions_path}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    source = args.primary_ecology_source or str(manifest.get("primary_update_source") or "")
+    if not source:
+        raise ValueError("--primary-ecology-source is required because the ecology manifest has no primary_update_source")
+
+    panel = pd.read_csv(panel_path)
+    predictions = pd.read_csv(predictions_path)
+    required_targets = {
+        "expected_inflation_1y",
+        "expected_unemployment_higher_prob",
+        "expected_real_income_growth",
+    }
+    predictions = predictions[predictions["source"].astype(str).eq(source)].copy()
+    if predictions.empty:
+        raise ValueError(f"Persona ecology predictions contain no rows for source `{source}`")
+    missing_targets = required_targets - set(predictions["target_name"].astype(str))
+    if missing_targets:
+        raise ValueError(f"Persona ecology predictions missing required targets: {', '.join(sorted(missing_targets))}")
+
+    wide = build_ecology_prediction_wide(predictions)
+    period_indices = sorted(int(value) for value in wide["period_index"].dropna().unique())
+    if not period_indices:
+        raise ValueError("Persona ecology predictions contain no period_index values")
+    households = build_households_from_ecology_panel(panel, wide)
+    coverage = ecology_period_coverage(wide, households)
+    return {
+        "root": root,
+        "manifest": manifest,
+        "panel": panel,
+        "predictions": predictions,
+        "wide": wide,
+        "households": households,
+        "coverage": coverage,
+        "source": source,
+        "manifest_sha256": file_sha256(manifest_path),
+        "panel_sha256": file_sha256(panel_path),
+        "predictions_sha256": file_sha256(predictions_path),
+    }
+
+
+def build_ecology_prediction_wide(predictions: pd.DataFrame) -> pd.DataFrame:
+    index_cols = ["respondent_id", "period_index", "period_id", "source", "provider", "model"]
+    for column in index_cols:
+        if column not in predictions:
+            raise ValueError(f"Persona ecology predictions missing `{column}`")
+    value_pieces = []
+    for value_column in ["prior_prediction", "prediction", "p10", "p50", "p90"]:
+        pivot = predictions.pivot_table(
+            index=index_cols,
+            columns="target_name",
+            values=value_column,
+            aggfunc="first",
+        )
+        pivot.columns = [f"{value_column}_{column}" for column in pivot.columns]
+        value_pieces.append(pivot)
+    metadata = (
+        predictions.groupby(index_cols, dropna=False)[
+            [
+                "confidence",
+                "uncertainty",
+                "profile_weight",
+                "prior_weight",
+                "environment_weight",
+                "aggregate_feedback_weight",
+                "cache_hit",
+                "call_source",
+            ]
+        ]
+        .first()
+        .reset_index()
+        .set_index(index_cols)
+    )
+    wide = pd.concat([metadata, *value_pieces], axis=1).reset_index()
+    return wide.sort_values(["period_index", "respondent_id"]).reset_index(drop=True)
+
+
+def ecology_period_coverage(wide: pd.DataFrame, households: pd.DataFrame) -> dict[str, Any]:
+    respondent_ids = set(households["type_id"].astype(str))
+    period_counts = wide[wide["respondent_id"].astype(str).isin(respondent_ids)].groupby("period_index")["respondent_id"].nunique()
+    return {
+        "period_indices": [int(value) for value in sorted(period_counts.index.tolist())],
+        "respondents_by_period": {str(int(index)): int(value) for index, value in period_counts.items()},
+        "household_count": int(len(respondent_ids)),
+    }
+
+
+def build_households_from_ecology_panel(panel: pd.DataFrame, wide: pd.DataFrame) -> pd.DataFrame:
+    required = {"respondent_id", "period_index", "weight", "income_group", "liquid_wealth_group", "age_group", "employment_status"}
+    missing = required - set(panel.columns)
+    if missing:
+        raise ValueError(f"Persona ecology panel missing columns required for households: {', '.join(sorted(missing))}")
+    first_period = int(pd.to_numeric(panel["period_index"], errors="coerce").min())
+    base = panel[pd.to_numeric(panel["period_index"], errors="coerce").eq(first_period)].copy()
+    available_ids = set(wide[wide["period_index"].astype(int).eq(first_period)]["respondent_id"].astype(str))
+    base = base[base["respondent_id"].astype(str).isin(available_ids)].copy()
+    if base.empty:
+        raise ValueError("No first-period persona ecology respondents have replay predictions")
+
+    rows: list[dict[str, Any]] = []
+    for _, row in base.drop_duplicates("respondent_id").iterrows():
+        respondent_id = str(row["respondent_id"])
+        prior_inflation = float(row.get("prior_expected_inflation_1y", row.get("actual_expected_inflation_1y", 3.0)))
+        prior_unemployment_higher = float(
+            row.get("prior_expected_unemployment_higher_prob", row.get("actual_expected_unemployment_higher_prob", 35.0))
+        )
+        prior_income = float(row.get("prior_expected_real_income_growth", row.get("actual_expected_real_income_growth", 1.0)))
+        income_group = normalize_group(row.get("income_group"), default="middle", allowed=("low", "middle", "high"))
+        liquidity_group = normalize_group(row.get("liquid_wealth_group"), default="middle", allowed=("low", "middle", "high"))
+        annual_income = income_to_annual_income(income_group)
+        baseline_consumption_annual = annual_income * income_consumption_ratio(income_group)
+        liquid_assets = liquidity_months(liquidity_group, income_group) * (baseline_consumption_annual / 12.0)
+        job_loss = unemployment_higher_to_job_loss(prior_unemployment_higher)
+        job_loss_risk_type = "high" if job_loss >= 9.0 or str(row.get("employment_status", "")).lower() in {"unemployed", "not_employed"} else "low"
+        rows.append(
+            {
+                "type_id": respondent_id,
+                "label": f"SCE prior-update respondent {respondent_id}",
+                "population_weight": float(row.get("weight", 1.0)),
+                "age_bucket": age_to_bucket(row.get("age_group")),
+                "income_group": income_group,
+                "liquidity_group": "low" if liquidity_group == "low" else "high",
+                "job_loss_risk_type": job_loss_risk_type,
+                "employment_status": str(row.get("employment_status", "unknown")),
+                "annual_income": annual_income,
+                "baseline_consumption_annual": baseline_consumption_annual,
+                "liquid_assets": liquid_assets,
+                "debt": annual_income * debt_service_burden(income_group) * (1.3 if liquidity_group == "low" else 0.8),
+                "debt_service_burden": debt_service_burden(income_group),
+                "base_mpc": base_mpc(liquidity_group, income_group, job_loss_risk_type),
+                "base_saving_rate": base_saving_rate(liquidity_group, income_group),
+                "rate_sensitivity": 0.35 + (0.20 if liquidity_group != "low" else 0.04) + (0.08 if income_group == "high" else 0.0),
+                "income_sensitivity": {"low": 0.82, "middle": 0.58, "high": 0.36}[income_group],
+                "precautionary_sensitivity": 0.34 + (0.28 if liquidity_group == "low" else 0.08) + (0.16 if job_loss_risk_type == "high" else 0.0),
+                "baseline_job_loss_probability": job_loss,
+                "target_buffer_months": 1.6 if liquidity_group == "low" else 5.2,
+                "inflation_expectation_1y": prior_inflation,
+                "income_growth_expectation_1y": prior_income,
+                "confidence_index": confidence_from_priors(prior_unemployment_higher, prior_income, prior_inflation, income_group),
+                "attention_weight_prices": 0.68 if income_group == "low" else 0.56 if income_group == "middle" else 0.46,
+                "attention_weight_jobs": 0.75 if job_loss_risk_type == "high" else 0.48,
+                "attention_weight_rates": 0.66 if liquidity_group != "low" or income_group == "high" else 0.40,
+                "income_volatility": 0.10 + (0.08 if job_loss_risk_type == "high" else 0.02) + (0.04 if income_group == "low" else 0.0),
+                "subsistence_floor_share": 0.56 if income_group == "low" else 0.48 if income_group == "middle" else 0.38,
+            }
+        )
+    return normalize_demand_households(pd.DataFrame(rows))
+
+
+class PersonaEcologyReplayDemandClient:
+    variant = "llm_belief"
+
+    def __init__(self, ecology_bundle: dict[str, Any], *, period_count: int, period_policy: str):
+        self.ecology_bundle = ecology_bundle
+        self.period_count = int(period_count)
+        self.period_policy = period_policy
+        self.raw_records: list[dict[str, Any]] = []
+        self._wide_by_key = {
+            (str(row["respondent_id"]), int(row["period_index"])): row
+            for _, row in ecology_bundle["wide"].iterrows()
+        }
+        self._available_periods = sorted({period for _, period in self._wide_by_key})
+        if not self._available_periods:
+            raise ValueError("Persona ecology replay has no available periods")
+        if self.period_policy == "strict" and max(self._available_periods) < self.period_count - 1:
+            raise ValueError(
+                "Persona ecology replay does not cover the requested Phase 4 periods: "
+                f"needs 0..{self.period_count - 1}, has 0..{max(self._available_periods)}"
+            )
+
+    @property
+    def source(self) -> str:
+        return f"{self.ecology_bundle['source']}__phase4_prior_replay"
+
+    @property
+    def live_call_count(self) -> int:
+        return 0
+
+    @property
+    def cache_hit_count(self) -> int:
+        predictions = self.ecology_bundle["predictions"]
+        if "cache_hit" not in predictions:
+            return 0
+        calls = predictions.drop_duplicates(["respondent_id", "period_index"])
+        return int(calls["cache_hit"].astype(bool).sum())
+
+    def belief_panel(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        requested_period = int(period_state["period_index"])
+        ecology_period = self._ecology_period_for(requested_period)
+        beliefs: dict[str, dict[str, Any]] = {}
+        for state in household_states:
+            type_id = str(state["type_id"])
+            row = self._wide_by_key.get((type_id, ecology_period))
+            if row is None:
+                raise ValueError(f"Persona ecology replay missing respondent={type_id}, period_index={ecology_period}")
+            belief = ecology_row_to_demand_belief(row, state=state)
+            beliefs[type_id] = belief
+        payload = {
+            "prompt_version": PHASE4_VERSION,
+            "beliefs_by_type": beliefs,
+            "direct_actions_by_type": {},
+        }
+        self.raw_records.append(
+            {
+                "source": self.source,
+                "variant": self.variant,
+                "scenario_id": scenario.scenario_id,
+                "period_id": period_state["period_id"],
+                "period_index": requested_period,
+                "provider": "persona_ecology_replay",
+                "model": self.ecology_bundle["source"],
+                "cache_hit": True,
+                "cache_path": str(self.ecology_bundle["root"] / "persona_ecology_predictions.csv"),
+                "ecology_period_index": ecology_period,
+                "payload": payload,
+            }
+        )
+        return payload
+
+    def _ecology_period_for(self, requested_period: int) -> int:
+        if requested_period in self._available_periods:
+            return requested_period
+        if self.period_policy == "hold_last":
+            return max(period for period in self._available_periods if period <= requested_period)
+        raise ValueError(f"Persona ecology replay has no period_index={requested_period}")
+
+
+def ecology_row_to_demand_belief(row: pd.Series, *, state: dict[str, Any]) -> dict[str, Any]:
+    inflation = float(row["prediction_expected_inflation_1y"])
+    unemployment_higher = float(row["prediction_expected_unemployment_higher_prob"])
+    income_growth = float(row["prediction_expected_real_income_growth"])
+    uncertainty = float(row.get("uncertainty", 0.6))
+    confidence = confidence_from_priors(unemployment_higher, income_growth, inflation, str(state.get("income_group", "middle")))
+    confidence = float(np.clip(confidence + 8.0 * (float(row.get("confidence", 0.6)) - 0.6), 0.0, 100.0))
+    low_liquid = str(state.get("liquidity_group", "")).lower() == "low"
+    precaution = 2.4 + 0.055 * unemployment_higher + 0.45 * uncertainty + (1.0 if low_liquid else 0.1) + max(0.0, -income_growth) * 0.12
+    return {
+        "type_id": str(state["type_id"]),
+        "expected_inflation_next_period": float(np.clip(inflation, -5.0, 15.0)),
+        "expected_income_growth_next_period": float(np.clip(income_growth, -12.0, 12.0)),
+        "perceived_job_loss_probability": unemployment_higher_to_job_loss(unemployment_higher),
+        "confidence_index": confidence,
+        "precautionary_saving_score": float(np.clip(precaution, 0.0, 10.0)),
+        "attention_weight_prices": float(np.clip(0.45 + 0.45 * float(row.get("environment_weight", 0.3)), 0.0, 1.0)),
+        "attention_weight_jobs": float(np.clip(0.35 + 0.35 * float(row.get("prior_weight", 0.4)) + 0.20 * float(row.get("aggregate_feedback_weight", 0.1)), 0.0, 1.0)),
+        "attention_weight_rates": float(np.clip(0.35 + 0.40 * float(row.get("environment_weight", 0.3)), 0.0, 1.0)),
+        "reason_codes": ["sce_prior_update_replay", f"ecology_period_{int(row['period_index'])}"],
+        "causal_path": ["real respondent prior", "codex_cli belief update", "deterministic demand policy"],
+    }
+
+
+def normalize_group(value: Any, *, default: str, allowed: tuple[str, ...]) -> str:
+    text = str(value).strip().lower()
+    return text if text in allowed else default
+
+
+def age_to_bucket(value: Any) -> str:
+    text = str(value).strip().lower()
+    return "older" if text in {"55_plus", "55+", "older", "retired"} else "prime"
+
+
+def income_to_annual_income(group: str) -> float:
+    return {"low": 38000.0, "middle": 76000.0, "high": 135000.0}.get(group, 76000.0)
+
+
+def income_consumption_ratio(group: str) -> float:
+    return {"low": 0.94, "middle": 0.82, "high": 0.68}.get(group, 0.82)
+
+
+def liquidity_months(liquidity_group: str, income_group: str) -> float:
+    if liquidity_group == "low":
+        return {"low": 0.6, "middle": 0.9, "high": 1.4}.get(income_group, 0.9)
+    if liquidity_group == "middle":
+        return {"low": 1.8, "middle": 2.8, "high": 4.2}.get(income_group, 2.8)
+    return {"low": 3.8, "middle": 5.2, "high": 8.5}.get(income_group, 5.2)
+
+
+def debt_service_burden(income_group: str) -> float:
+    return {"low": 0.16, "middle": 0.13, "high": 0.09}.get(income_group, 0.13)
+
+
+def base_mpc(liquidity_group: str, income_group: str, job_loss_risk_type: str) -> float:
+    out = 0.72 if liquidity_group == "low" else 0.24
+    out += {"low": 0.09, "middle": 0.0, "high": -0.08}.get(income_group, 0.0)
+    out += 0.04 if job_loss_risk_type == "high" else -0.02
+    return float(np.clip(out, 0.08, 0.92))
+
+
+def base_saving_rate(liquidity_group: str, income_group: str) -> float:
+    return float(np.clip(0.12 + (0.08 if liquidity_group != "low" else -0.03) + (0.05 if income_group == "high" else 0.0), 0.02, 0.35))
+
+
+def unemployment_higher_to_job_loss(value: float) -> float:
+    return float(np.clip(0.24 * float(value), 1.0, 24.0))
+
+
+def confidence_from_priors(unemployment_higher: float, income_growth: float, inflation: float, income_group: str) -> float:
+    income_adjustment = {"low": -4.0, "middle": 0.0, "high": 5.0}.get(income_group, 0.0)
+    return float(np.clip(63.0 + income_adjustment - 0.36 * float(unemployment_higher) + 1.2 * float(income_growth) - 0.45 * max(0.0, float(inflation) - 2.0), 0.0, 100.0))
+
+
+def ecology_input_manifest(ecology_bundle: dict[str, Any] | None, *, period_count: int) -> dict[str, Any] | None:
+    if ecology_bundle is None:
+        return None
+    manifest = ecology_bundle["manifest"]
+    return {
+        "root": str(ecology_bundle["root"]),
+        "source": ecology_bundle["source"],
+        "upstream_status": manifest.get("status"),
+        "upstream_prior_update_evidence": manifest.get("prior_update_evidence"),
+        "upstream_provider": manifest.get("provider"),
+        "upstream_models": manifest.get("models"),
+        "upstream_prior_mode": manifest.get("prior_mode"),
+        "upstream_feedback_mode": manifest.get("feedback_mode"),
+        "upstream_date_mode": manifest.get("date_mode"),
+        "requested_phase4_period_count": int(period_count),
+        "coverage": ecology_bundle["coverage"],
+        "manifest_sha256": ecology_bundle["manifest_sha256"],
+        "panel_sha256": ecology_bundle["panel_sha256"],
+        "predictions_sha256": ecology_bundle["predictions_sha256"],
+        "adapter_note": (
+            "SCE unemployment-higher probabilities are mapped to personal job-loss-risk inputs by a fixed "
+            "0.24 multiplier; this is an explicit bridge assumption, not a fitted parameter."
+        ),
+    }
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def default_output_mapping() -> list[OutputMappingSpec]:
@@ -344,12 +735,30 @@ def build_path_comparison(periods: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def classify_phase4_fixture(periods: pd.DataFrame, accounting: pd.DataFrame, scores: pd.DataFrame) -> dict[str, Any]:
+def classify_phase4_run(
+    periods: pd.DataFrame,
+    accounting: pd.DataFrame,
+    scores: pd.DataFrame,
+    *,
+    belief_source: str,
+    data_mode: str,
+) -> dict[str, Any]:
     variants = set(periods["variant"].astype(str)) if not periods.empty else set()
     has_twins = {"llm_belief", "adaptive"}.issubset(variants)
     accounting_ok = max_accounting_abs_residual(accounting) <= ACCOUNTING_TOLERANCE
     has_scores = not scores.empty and "ALL" in set(scores["target_name"].astype(str))
     passed = bool(has_twins and accounting_ok and has_scores)
+    if belief_source == "persona_ecology_replay":
+        verdict = "phase4_matched_twin_replay_scored" if passed else "phase4_matched_twin_replay_needs_work"
+        claim_scope = (
+            "Exploratory replay: the runner feeds banked real-SCE prior-update predictions into the deterministic demand economy "
+            "and compares that path to an adaptive-expectations twin. This isolates the belief-updater channel, but it is not a "
+            "final empirical macro-validity claim until the household panel, replay horizon, and output mapping are all pre-registered "
+            "for the same confirmatory run."
+        )
+        if data_mode == "fixture":
+            claim_scope += " Proxy targets are deterministic fixtures in this run."
+        return {"passed": passed, "verdict": verdict, "claim_scope": claim_scope}
     return {
         "passed": passed,
         "verdict": "phase4_matched_twin_fixture_ready" if passed else "phase4_matched_twin_fixture_needs_work",
@@ -436,7 +845,7 @@ def build_report(manifest: dict[str, Any], scores: pd.DataFrame, comparison: pd.
         phase4_bottom_line(manifest),
         "",
         "## What This Tests",
-        "This runner compares the same accounting-constrained demand economy under two belief-updating rules: an LLM belief-updater fixture and an adaptive-expectations twin. Real household heterogeneity and live prior-update caches are not used in fixture mode, so this is a readiness gate, not an empirical macro-validity result.",
+        phase4_test_description(manifest),
         "",
         "## Locked Output Mapping",
         f"- Mapping SHA-256: `{manifest.get('mapping_sha256')}`",
@@ -458,10 +867,33 @@ def build_report(manifest: dict[str, Any], scores: pd.DataFrame, comparison: pd.
     return "\n".join(lines)
 
 
+def phase4_test_description(manifest: dict[str, Any]) -> str:
+    if manifest.get("belief_source") == "persona_ecology_replay":
+        return (
+            "This runner compares the same accounting-constrained demand economy under two belief-updating rules: "
+            "a banked prior-conditioned LLM belief-updater replay and an adaptive-expectations twin. Real SCE respondent "
+            "heterogeneity seeds the household table, while deterministic code owns behavior, aggregation, feedback, and accounting. "
+            "The result is exploratory unless the household panel horizon, belief replay horizon, and proxy scoring horizon are "
+            "pre-registered for a confirmatory run."
+        )
+    return (
+        "This runner compares the same accounting-constrained demand economy under two belief-updating rules: an LLM belief-updater "
+        "fixture and an adaptive-expectations twin. Real household heterogeneity and live prior-update caches are not used in fixture "
+        "mode, so this is a readiness gate, not an empirical macro-validity result."
+    )
+
+
 def phase4_bottom_line(manifest: dict[str, Any]) -> str:
     verdict = manifest.get("verdict", "unknown")
     winner = manifest.get("winner_source")
     if manifest.get("passed"):
+        if manifest.get("belief_source") == "persona_ecology_replay":
+            return (
+                f"`{verdict}`. The replay runner fed banked real-SCE prior-update beliefs into the demand economy, "
+                f"ran the adaptive-expectations twin from the same respondent-derived household state, preserved accounting, "
+                f"and emitted proxy scores. Best source by scaled RMSE: `{winner}`. This is an exploratory end-to-end result, "
+                "not the final macro-validity claim."
+            )
         return (
             f"`{verdict}`. The fixture runner locks the post-cutoff proxy mapping, runs matched LLM-updater and "
             f"adaptive twins from the same initial state, preserves accounting, and emits comparable proxy scores. "
@@ -505,6 +937,10 @@ def base_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "asof_end": args.asof_end,
         "history_months": int(args.history_months),
         "scoreable_only": bool(args.scoreable_only),
+        "belief_source": args.belief_source,
+        "persona_ecology_dir": args.persona_ecology_dir,
+        "primary_ecology_source": args.primary_ecology_source,
+        "ecology_period_policy": args.ecology_period_policy,
         "household_source": args.household_source,
         "household_count_requested": int(args.household_count),
         "period_count_requested": int(args.period_count),
