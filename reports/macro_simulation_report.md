@@ -8,9 +8,11 @@ First, the forecast result is real. On a 147-card, date-free vintage macro split
 
 Second, the behavior result now splits by shock type, and that split is the finding. On stimulus-style targets the mechanisms were designed around, raw GPT-5.5 loses to a hand-tuned liquidity rule. On a held-out lottery-windfall family, the rules break and raw GPT-5.5 wins. On a new UI-exhaustion income-loss holdout, raw GPT-5.5 loses to a simple flat rule. The behavioral signal is real but not generic: it transfers to windfall-size reasoning, not yet to predictable income-loss dynamics.
 
-Third, we cannot yet carry that signal into an interpretable simulated economy. A pre-registered blend mechanism failed its holdout test. A primitive-to-action kernel — the model emits beliefs and stresses, deterministic code turns them into spending, saving, and debt repayment — passes every sign audit but destroys the out-of-domain signal, and calibrating it on selection targets overfits. The interpretable layer is the open problem, and we know precisely where it fails.
+Third, the real-data persona gate failed. The approved 500-respondent SCE design run was live, stratified, leak-checked, and pre-registered. It did not reproduce real household belief heterogeneity. The models got some inflation and income-gradient signs right, but they compressed individual dispersion by roughly one to two orders of magnitude and got the unemployment-higher-probability gradients mostly wrong.
 
-The claim this evidence supports: **LLMs contain genuine, contamination-audited macro belief signal, and raw GPT-5.5 contains useful household-behavior priors in at least one out-of-domain shock family. Turning that into a validated simulated economy still requires a behavior architecture that preserves the signal across shock types and a persona layer scored on real microdata.**
+Fourth, we cannot yet carry the belief signal into a validated simulated economy. A pre-registered blend mechanism failed its holdout test. A primitive-to-action kernel — the model emits beliefs and stresses, deterministic code turns them into spending, saving, and debt repayment — passes every sign audit but destroys the out-of-domain signal, and calibrating it on selection targets overfits. The interpretable layer remains open, and the persona layer is now an empirical miss rather than an untested dependency.
+
+The claim this evidence supports: **LLMs contain genuine, contamination-audited macro belief signal, and raw GPT-5.5 contains useful household-behavior priors in one out-of-domain windfall family. But the current profile-only persona setup does not reproduce real SCE household belief heterogeneity, and the project has not yet achieved a validated LLM-based simulated economy.**
 
 ## The Forecast Result
 
@@ -84,13 +86,28 @@ That real-data path has now been exercised on public SCE microdata. The converte
 
 The holdout-prep CLI aligns real SCE waves to the vintage FRED/SPF environment, writes static and panel holdouts, normalizes weights by period, and records `real_sce_microdata_v1` provenance. The current real holdout files contain 951 static respondents for December 2024 and 3,022 panel rows across October-December 2024.
 
-The mandatory 4-call canary also ran: two respondents, GPT-5.5 and GPT-5.4, via `openai_responses`, with zero cache hits. Prompt-card inspection found no leakage of `actual_*` target responses, raw question codes, or SCE target columns. The canary is too small to score as evidence, but it flags a likely hard problem: both models overpredicted the SCE unemployment-higher probability for the two sampled respondents by large margins. That is a canary finding, not a design-run verdict.
+The mandatory 4-call canary also ran: two respondents, GPT-5.5 and GPT-5.4, via `openai_responses`, with zero cache hits. Prompt-card inspection found no leakage of `actual_*` target responses, raw question codes, or SCE target columns. The canary was too small to score as evidence, but it correctly flagged the hard problem: both models overpredicted the SCE unemployment-higher probability for the two sampled respondents by large margins.
+
+The approved design run is now complete. It sampled 500 of the 951 December 2024 respondents, stratified across `income_group x age_group x education_group`, with seed `20260707`; every non-empty stratum is represented. It ran GPT-5.5 and GPT-5.4 through `openai_responses`: 1,000 live calls, zero cache hits, 3,000 prediction rows. The December 2024 wave is the test surface and is now spent; the October-November 2024 panel rows remain reserved for future validation/calibration work.
+
+The result is a clear empirical failure for the current persona layer:
+
+- Evidence verdict: `null_gradient_failure`, branch `gradients_flat_or_wrong`.
+- Regression sign-match rate: `0.625`, below the pre-registered `0.75` threshold.
+- Median within-variance ratio: `0.0129`, far below the `0.5` threshold.
+- Max weighted KS statistic: `0.5475`, above the `0.35` threshold.
+- Median distribution std ratio: `0.1190`, below the `0.45` lower bound.
+- Common-core check passes: max mean pairwise source correlation `0.8719`, below the `0.95` collapse threshold.
+
+The failure mode is informative. Inflation gradients mostly line up, and real-income gradients partly line up. The unemployment-higher-probability target breaks the persona story: raw survey mean is `35.84`; GPT-5.5 predicts `45.16` and GPT-5.4 predicts `53.36`. More importantly, the models invert several real gradients: older, less-educated, female, and low-income respondents in the sampled SCE wave report lower unemployment-higher probabilities than their reference groups, while the model generally pushes those groups higher. Across all targets, the simulated distributions are far too narrow: inflation simulated standard deviation is `0.60-0.70` versus survey `5.84`; real-income-growth standard deviation is `1.13-1.18` versus survey `9.97`; unemployment-higher-probability standard deviation is `6.75-8.45` versus survey `26.41`.
+
+This is not a prompt-leakage or data-plumbing failure. It is the result the empirical gate was designed to find: profile-only LLM personas do not currently reproduce real SCE belief heterogeneity well enough to serve as validated household belief agents.
 
 ## What Comes Next
 
-1. **Pause before the design-scale real-SCE persona run.** The canary passed the mechanics and leakage checks. The next run is the 500-respondent, two-model design surface, roughly 1,000 calls plus retry headroom, and requires explicit approval.
-2. **Score the empirical persona layer.** If distribution shape fails against real data, that is a headline result rather than a bug; only validation-fit, locked calibration may address level shifts.
-3. **End-to-end comparator setup.** Once the real persona layer is committed, feed persona beliefs through constrained raw behavior inside the demand economy and compare against the fixed adaptive-expectations twin on the post-cutoff FRED behavior proxy gate. Primitive v3 can be included as a secondary reported variant, not the primary engine.
-4. **Let the post-cutoff forecast gate accrue.** Frozen post-cutoff cards get rescored as public data arrives, converting the forecast claim from recall-audit-defended to genuinely post-cutoff over time. The repo now has a zero-live-call `postcutoff-replay-refresh` Make target for that loop.
+1. **Do not treat profile-only personas as validated agents.** The real SCE test failed. Any end-to-end economy run using them now should be labeled exploratory, not evidence for the main claim.
+2. **If we repair the persona layer, use a new locked design.** The December 2024 test wave is spent. A future persona architecture should be developed on reserved validation data, then tested once on a newly declared SCE holdout wave. No prompt tuning on the December result.
+3. **Keep the current sendable claim narrow.** The strongest result remains the contamination-audited macro belief engine. The behavior result is windfall-scoped. The persona result is a negative finding.
+4. **Let the post-cutoff forecast gate accrue.** Frozen post-cutoff cards get rescored as public data arrives, converting the forecast claim from recall-audit-defended to genuinely post-cutoff over time. The repo has a zero-live-call `postcutoff-replay-refresh` Make target for that loop.
 
 The forecast audit — baselines, bootstrap intervals, DM-style tests, both recall probes, belief-structure audit, cutoff status — stays fixed in this report as the evidence base.
