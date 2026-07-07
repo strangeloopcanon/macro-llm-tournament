@@ -23,6 +23,7 @@ from .llm_common import LLMUnavailable
 PERSONA_BELIEF_PANEL_VERSION = "persona_belief_panel_v1"
 PERSONA_BELIEF_PROMPT_VERSION = "persona_belief_panel_v1"
 SURVEY_SCHEMAS = ("normalized", "sce")
+DEFAULT_SAMPLE_STRATA = ("income_group", "age_group", "education_group")
 DEFAULT_TARGET_FIELDS = (
     "expected_inflation_1y",
     "expected_unemployment_rate",
@@ -177,6 +178,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--survey-schema", choices=SURVEY_SCHEMAS, default="normalized")
     parser.add_argument("--respondent-count", type=int, default=54)
     parser.add_argument("--respondent-limit", type=int, default=0)
+    parser.add_argument("--respondent-sample-size", type=int, default=0)
+    parser.add_argument("--respondent-sample-seed", type=int, default=0)
+    parser.add_argument("--respondent-sample-strata", default=",".join(DEFAULT_SAMPLE_STRATA))
     parser.add_argument("--survey-date", default="2026-01-01")
     parser.add_argument("--target-fields", default=",".join(DEFAULT_TARGET_FIELDS))
     parser.add_argument("--output-dir", default=None)
@@ -198,6 +202,8 @@ def main() -> int:
         raise SystemExit("--fresh-cache and --cache-dir cannot be combined; use one fresh run or one explicit resume cache")
     if not models:
         raise SystemExit("--models must contain at least one model")
+    if args.respondent_limit > 0 and args.respondent_sample_size > 0:
+        raise SystemExit("--respondent-limit and --respondent-sample-size cannot be combined")
     if args.respondent_source == "csv":
         if not args.respondent_csv:
             raise SystemExit("--respondent-csv is required when --respondent-source csv")
@@ -223,7 +229,15 @@ def main() -> int:
         survey_schema=args.survey_schema,
     )
     respondents = _anonymize_csv_respondent_ids(respondents) if args.respondent_source == "csv" else respondents
-    respondents = _limit_static_respondents(respondents, args.respondent_limit)
+    pre_selection_respondents = respondents.copy()
+    sample_strata = _parse_sample_strata(args.respondent_sample_strata)
+    respondents, selection_manifest = _select_static_respondents(
+        respondents,
+        respondent_limit=args.respondent_limit,
+        sample_size=args.respondent_sample_size,
+        sample_seed=args.respondent_sample_seed,
+        sample_strata=sample_strata,
+    )
     required_calls = int(respondents.shape[0] * len(models))
     if args.belief_mode == "live" and args.fresh_cache and args.max_live_calls < required_calls:
         raise SystemExit(
@@ -237,7 +251,9 @@ def main() -> int:
         source=args.respondent_source,
         respondent_csv=respondent_csv,
         normalized=respondents,
+        pre_selection_normalized=pre_selection_respondents,
         respondent_limit=args.respondent_limit,
+        selection_manifest=selection_manifest,
         anonymized=args.respondent_source == "csv",
     )
     manifest: dict[str, Any] = {
@@ -258,7 +274,12 @@ def main() -> int:
         "respondent_input": respondent_input,
         "respondent_count": int(respondents.shape[0]),
         "respondent_limit": int(args.respondent_limit),
+        "respondent_sample_size": int(args.respondent_sample_size),
+        "respondent_sample_seed": int(args.respondent_sample_seed),
+        "respondent_sample_strata": list(sample_strata),
         "target_fields": target_fields,
+        "pre_registered_evidence_thresholds": EVIDENCE_THRESHOLDS,
+        "split_roles": _split_roles_manifest(respondent_input),
         "required_call_count": required_calls,
         "provider_execution_cwd": _safe_relative(provider_execution_cwd) if provider_execution_cwd else None,
         "shared_cache_allowed": bool(not args.fresh_cache and not args.cache_dir),
@@ -1178,6 +1199,8 @@ def build_persona_belief_report(
         source_label = "synthetic enriched respondent panel"
     else:
         source_label = "data-grounded respondent panel"
+    selection = respondent_input.get("selection", {}) if isinstance(respondent_input, dict) else {}
+    split_roles = manifest.get("split_roles", {})
     if evidence.get("evidence_verdict") == "clears_heterogeneity_gate":
         bottom_line = (
             f"The {source_label} clears the heterogeneity gate: adjusted gradients mostly match, "
@@ -1208,6 +1231,8 @@ def build_persona_belief_report(
         f"- Respondents: `{manifest.get('respondent_count')}` from `{manifest.get('respondent_source')}`",
         f"- Panel kind: `{respondent_input.get('panel_kind')}`",
         f"- Target provenance: `{respondent_input.get('target_provenance')}`",
+        f"- Selection: `{selection.get('sampling_strategy')}` sample `{selection.get('sample_size_actual')}` of `{selection.get('pre_selection_row_count')}`, seed `{selection.get('sample_seed')}`",
+        f"- Split role: `{split_roles.get('current_run_role')}` on `{split_roles.get('current_run_surface')}`",
         f"- Live calls used: `{manifest.get('live_call_count', 0)}` of cap `{manifest.get('max_live_calls', 0)}`",
         f"- Cache hits: `{manifest.get('cache_hit_count', 0)}`",
         f"- Evidence verdict: `{evidence.get('evidence_verdict')}`",
@@ -1217,6 +1242,7 @@ def build_persona_belief_report(
         f"- Max weighted KS statistic: `{round_or_none(max_ks_stat)}`",
         f"- Median distribution std ratio: `{round_or_none(median_std_ratio)}`",
         f"- Max mean pairwise source correlation: `{round_or_none(common_core_max)}`",
+        f"- Pre-registered thresholds: `{json.dumps(manifest.get('pre_registered_evidence_thresholds', {}), sort_keys=True)}`",
         "",
         "## Regression Gradient Match",
         markdown_table(regression_scores.head(48)),
@@ -1495,14 +1521,175 @@ def _fixture_employment(idx: int, income: str, age: str) -> str:
     return "employed"
 
 
+def _parse_sample_strata(value: str) -> tuple[str, ...]:
+    strata = tuple(part.strip() for part in str(value).split(",") if part.strip())
+    if not strata:
+        raise ValueError("--respondent-sample-strata must contain at least one column")
+    return strata
+
+
+def _select_static_respondents(
+    frame: pd.DataFrame,
+    *,
+    respondent_limit: int,
+    sample_size: int,
+    sample_seed: int,
+    sample_strata: tuple[str, ...],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if sample_size > 0:
+        return _stratified_static_sample(frame, sample_size=sample_size, seed=sample_seed, strata=sample_strata)
+    limited = _limit_static_respondents(frame, respondent_limit)
+    return limited, {
+        "sampling_strategy": "head_limit" if respondent_limit > 0 and frame.shape[0] > respondent_limit else "none",
+        "respondent_limit": int(respondent_limit),
+        "pre_selection_row_count": int(frame.shape[0]),
+        "sample_size_requested": 0,
+        "sample_size_actual": int(limited.shape[0]),
+        "weights_retained": True,
+        "weights_renormalized_after_selection": bool(limited.shape[0] != frame.shape[0]),
+    }
+
+
+def _stratified_static_sample(
+    frame: pd.DataFrame,
+    *,
+    sample_size: int,
+    seed: int,
+    strata: tuple[str, ...] = DEFAULT_SAMPLE_STRATA,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive")
+    missing = [column for column in strata if column not in frame]
+    if missing:
+        raise ValueError(f"Cannot stratify respondents; missing columns: {', '.join(missing)}")
+    if frame.empty:
+        raise ValueError("Cannot sample an empty respondent panel")
+    if sample_size >= frame.shape[0]:
+        out = _renormalize_weights(frame.copy())
+        return out.reset_index(drop=True), {
+            "sampling_strategy": "all_rows",
+            "sample_size_requested": int(sample_size),
+            "sample_size_actual": int(out.shape[0]),
+            "sample_seed": int(seed),
+            "sample_strata": list(strata),
+            "pre_selection_row_count": int(frame.shape[0]),
+            "stratum_count": int(frame.groupby(list(strata), dropna=False).ngroups),
+            "stratum_counts": _stratum_count_records(frame, out, strata),
+            "weights_retained": True,
+            "weights_renormalized_after_selection": False,
+        }
+
+    groups = list(frame.groupby(list(strata), dropna=False, sort=True))
+    if sample_size < len(groups):
+        raise ValueError(
+            f"Stratified sample size {sample_size} is smaller than the {len(groups)} non-empty strata; "
+            "increase --respondent-sample-size or reduce --respondent-sample-strata"
+        )
+    allocation = _proportional_stratum_allocation(groups, sample_size=sample_size, population_size=frame.shape[0])
+    rng = np.random.default_rng(seed)
+    chosen_indices: list[Any] = []
+    for (key, group), count in zip(groups, allocation):
+        if count <= 0:
+            continue
+        chosen_indices.extend(rng.choice(group.index.to_numpy(), size=int(count), replace=False).tolist())
+    sampled = frame.loc[sorted(chosen_indices)].copy()
+    sampled = _renormalize_weights(sampled)
+    return sampled.reset_index(drop=True), {
+        "sampling_strategy": "stratified_without_replacement",
+        "sample_size_requested": int(sample_size),
+        "sample_size_actual": int(sampled.shape[0]),
+        "sample_seed": int(seed),
+        "sample_strata": list(strata),
+        "pre_selection_row_count": int(frame.shape[0]),
+        "stratum_count": int(len(groups)),
+        "stratum_counts": _stratum_count_records(frame, sampled, strata),
+        "weights_retained": True,
+        "weights_renormalized_after_selection": True,
+    }
+
+
+def _proportional_stratum_allocation(
+    groups: list[tuple[Any, pd.DataFrame]],
+    *,
+    sample_size: int,
+    population_size: int,
+) -> list[int]:
+    exact = [group.shape[0] * sample_size / population_size for _, group in groups]
+    allocation = [max(1, min(group.shape[0], int(np.floor(value)))) for value, (_, group) in zip(exact, groups)]
+    remaining = sample_size - sum(allocation)
+    order = sorted(
+        range(len(groups)),
+        key=lambda idx: (exact[idx] - np.floor(exact[idx]), groups[idx][1].shape[0], str(groups[idx][0])),
+        reverse=True,
+    )
+    while remaining > 0:
+        progressed = False
+        for idx in order:
+            capacity = groups[idx][1].shape[0] - allocation[idx]
+            if capacity <= 0:
+                continue
+            allocation[idx] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    while remaining < 0:
+        progressed = False
+        for idx in reversed(order):
+            if allocation[idx] <= 1:
+                continue
+            allocation[idx] -= 1
+            remaining += 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    if sum(allocation) != sample_size:
+        raise ValueError(f"Could not allocate exact stratified sample size {sample_size}; allocated {sum(allocation)}")
+    return allocation
+
+
+def _stratum_count_records(population: pd.DataFrame, sampled: pd.DataFrame, strata: tuple[str, ...]) -> list[dict[str, Any]]:
+    population_counts = population.groupby(list(strata), dropna=False).agg(
+        population_count=("respondent_id", "size"),
+        population_weight_sum=("weight", "sum"),
+    )
+    sampled_counts = sampled.groupby(list(strata), dropna=False).agg(
+        sampled_count=("respondent_id", "size"),
+        sampled_weight_sum=("weight", "sum"),
+    )
+    joined = population_counts.join(sampled_counts, how="left").fillna({"sampled_count": 0, "sampled_weight_sum": 0.0})
+    records: list[dict[str, Any]] = []
+    for key, row in joined.reset_index().iterrows():
+        record = {column: row[column] for column in strata}
+        record.update(
+            {
+                "population_count": int(row["population_count"]),
+                "sampled_count": int(row["sampled_count"]),
+                "population_weight_sum": round_or_none(row["population_weight_sum"]),
+                "sampled_weight_sum": round_or_none(row["sampled_weight_sum"]),
+            }
+        )
+        records.append(record)
+    return records
+
+
 def _limit_static_respondents(frame: pd.DataFrame, respondent_limit: int) -> pd.DataFrame:
     if respondent_limit <= 0 or frame.shape[0] <= respondent_limit:
         return frame.reset_index(drop=True)
     keep = sorted(frame["respondent_id"].astype(str).unique())[:respondent_limit]
     out = frame[frame["respondent_id"].astype(str).isin(keep)].copy()
+    return _renormalize_weights(out).reset_index(drop=True)
+
+
+def _renormalize_weights(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
     total = float(out["weight"].sum())
     out["weight"] = 1.0 / max(1, out.shape[0]) if total <= 0 else out["weight"] / total
-    return out.reset_index(drop=True)
+    return out
 
 
 def _anonymize_csv_respondent_ids(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1518,16 +1705,23 @@ def _respondent_input_manifest(
     source: str,
     respondent_csv: Path | None,
     normalized: pd.DataFrame,
+    pre_selection_normalized: pd.DataFrame,
     respondent_limit: int,
+    selection_manifest: dict[str, Any],
     anonymized: bool,
 ) -> dict[str, Any]:
     manifest: dict[str, Any] = {
         "source": source,
         "respondent_limit": int(respondent_limit),
         "respondent_ids_anonymized": bool(anonymized),
+        "pre_selection_normalized_row_count": int(pre_selection_normalized.shape[0]),
+        "pre_selection_normalized_respondent_count": int(pre_selection_normalized["respondent_id"].nunique())
+        if "respondent_id" in pre_selection_normalized
+        else 0,
         "normalized_row_count": int(normalized.shape[0]),
         "normalized_respondent_count": int(normalized["respondent_id"].nunique()) if "respondent_id" in normalized else 0,
         "normalized_weight_sum": round_or_none(normalized["weight"].sum()) if "weight" in normalized else None,
+        "selection": selection_manifest,
     }
     if respondent_csv is not None:
         raw = pd.read_csv(respondent_csv)
@@ -1550,6 +1744,25 @@ def _respondent_input_manifest(
             }
         )
     return manifest
+
+
+def _split_roles_manifest(respondent_input: dict[str, Any]) -> dict[str, Any]:
+    panel_kind = str(respondent_input.get("panel_kind") or "").lower()
+    if panel_kind == "real_sce_microdata_v1":
+        return {
+            "current_run_surface": "december_2024_static_wave",
+            "current_run_role": "test_report_once",
+            "calibration_reserved_surface": "october_november_2024_panel_rows",
+            "calibration_reserved_file": "work/persona_beliefs/sce_panel_holdout.csv",
+            "ecology_multi_wave_status": "reserved_for_later",
+            "holdout_reuse_rule": "do_not_tune_prompts_or_thresholds_on_december_2024_results",
+        }
+    return {
+        "current_run_surface": "unspecified",
+        "current_run_role": "development_or_fixture",
+        "calibration_reserved_surface": None,
+        "holdout_reuse_rule": "not_applicable",
+    }
 
 
 def _raw_unique_value(frame: pd.DataFrame, column: str) -> str | None:

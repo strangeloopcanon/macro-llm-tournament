@@ -126,6 +126,7 @@ from macro_llm_tournament.persona_belief_panel import (
     score_variance_flattening,
     _client_mode_and_cap,
     _sanitized_argv,
+    _stratified_static_sample,
 )
 from macro_llm_tournament.prepare_sce_microdata import (
     SCE_REAL_TARGET_FIELDS,
@@ -2135,6 +2136,57 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertEqual(verdict["evidence_verdict"], "partial_flattening_and_common_core_failure")
         self.assertIn("distribution_clear", verdict)
 
+    def test_stratified_static_sample_records_seed_and_preserves_strata(self):
+        rows = []
+        idx = 0
+        for income in ["low", "high"]:
+            for age in ["18_34", "55_plus"]:
+                for education in ["high_school_or_less", "college_plus"]:
+                    for replicate in range(4):
+                        idx += 1
+                        rows.append(
+                            {
+                                "respondent_id": f"resp_{idx:03d}",
+                                "survey_source": "test",
+                                "survey_date": "2024-12-01",
+                                "weight": float(idx),
+                                "age_group": age,
+                                "income_group": income,
+                                "education_group": education,
+                                "gender": "female" if replicate % 2 else "male",
+                                "region": "west",
+                                "employment_status": "employed",
+                                "homeownership": "owner",
+                                "liquid_wealth_group": income,
+                                "actual_expected_inflation_1y": 3.0,
+                                "actual_expected_unemployment_higher_prob": 30.0,
+                                "actual_expected_real_income_growth": 1.0,
+                            }
+                        )
+        respondents = pd.DataFrame(rows)
+
+        sampled, manifest = _stratified_static_sample(
+            respondents,
+            sample_size=16,
+            seed=20260707,
+            strata=("income_group", "age_group", "education_group"),
+        )
+        sampled_again, manifest_again = _stratified_static_sample(
+            respondents,
+            sample_size=16,
+            seed=20260707,
+            strata=("income_group", "age_group", "education_group"),
+        )
+
+        self.assertEqual(sampled.shape[0], 16)
+        self.assertEqual(manifest["sampling_strategy"], "stratified_without_replacement")
+        self.assertEqual(manifest["sample_seed"], 20260707)
+        self.assertAlmostEqual(float(sampled["weight"].sum()), 1.0)
+        self.assertEqual(sampled["respondent_id"].tolist(), sampled_again["respondent_id"].tolist())
+        self.assertEqual(manifest["stratum_counts"], manifest_again["stratum_counts"])
+        for record in manifest["stratum_counts"]:
+            self.assertGreaterEqual(record["sampled_count"], 1)
+
     def test_sce_normalizer_maps_public_columns_without_prompt_target_leakage(self):
         raw = pd.DataFrame(
             [
@@ -2260,6 +2312,95 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertTrue(manifest["respondent_input"]["respondent_ids_anonymized"])
             self.assertNotIn("actual_expected_inflation_1y", prompts)
             self.assertNotIn("q9mean", prompts)
+
+    def test_persona_belief_panel_cli_records_stratified_sample_contract(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            csv_path = temp_path / "sce_sample.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "respondent_id": f"person_{idx:03d}",
+                        "survey_source": "ny_fed_sce_real_microdata",
+                        "survey_date": "2024-12-01",
+                        "weight": 1.0 + idx,
+                        "age_group": age,
+                        "income_group": income,
+                        "education_group": education,
+                        "gender": "female" if idx % 2 else "male",
+                        "region": "west",
+                        "employment_status": "employed",
+                        "homeownership": "owner",
+                        "liquid_wealth_group": income,
+                        "actual_expected_inflation_1y": 3.0 + idx / 10.0,
+                        "actual_expected_unemployment_higher_prob": 25.0 + idx,
+                        "actual_expected_real_income_growth": 1.0,
+                        "persona_panel_kind": "real_sce_microdata_v1",
+                        "target_provenance": "public_ny_fed_sce_microdata_responses",
+                    }
+                    for idx, (income, age, education) in enumerate(
+                        [
+                            ("low", "18_34", "high_school_or_less"),
+                            ("low", "18_34", "high_school_or_less"),
+                            ("middle", "35_54", "some_college"),
+                            ("middle", "35_54", "some_college"),
+                            ("high", "55_plus", "college_plus"),
+                            ("high", "55_plus", "college_plus"),
+                        ],
+                        start=1,
+                    )
+                ]
+            ).to_csv(csv_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_belief_panel",
+                    "--belief-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5,gpt-5.4",
+                    "--respondent-source",
+                    "csv",
+                    "--survey-schema",
+                    "normalized",
+                    "--respondent-csv",
+                    str(csv_path),
+                    "--respondent-sample-size",
+                    "3",
+                    "--respondent-sample-seed",
+                    "20260707",
+                    "--respondent-sample-strata",
+                    "income_group,age_group,education_group",
+                    "--target-fields",
+                    "expected_inflation_1y,expected_unemployment_higher_prob,expected_real_income_growth",
+                    "--output-dir",
+                    str(temp_path / "out"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((temp_path / "out" / "manifest.json").read_text(encoding="utf-8"))
+            selection = manifest["respondent_input"]["selection"]
+            self.assertEqual(manifest["respondent_count"], 3)
+            self.assertEqual(selection["sampling_strategy"], "stratified_without_replacement")
+            self.assertEqual(selection["sample_seed"], 20260707)
+            self.assertEqual(selection["stratum_count"], 3)
+            self.assertEqual(manifest["split_roles"]["current_run_role"], "test_report_once")
+            self.assertEqual(
+                manifest["pre_registered_evidence_thresholds"],
+                persona_belief_panel_module.EVIDENCE_THRESHOLDS,
+            )
+            report = (temp_path / "out" / "persona_belief_panel_report.md").read_text(encoding="utf-8")
+            self.assertIn("Pre-registered thresholds", report)
 
     def test_sce_microdata_converter_derives_real_targets_and_fills_demographics(self):
         raw = pd.DataFrame(
