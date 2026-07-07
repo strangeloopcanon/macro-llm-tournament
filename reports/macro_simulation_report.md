@@ -1,140 +1,232 @@
-# Macro LLM Simulation: Results
+# Macro LLM Simulation: What the Evidence Now Says
 
-## Bottom Line
+## Executive Finding
 
-We tested whether frontier LLMs can act as macroeconomic belief engines: forecast hidden macro outcomes, survive contamination audits, and drive household behavior inside an accounting-constrained simulated economy. Five results came out of it.
+The project started with a broad question: can LLM agents simulate the macroeconomy well enough to produce useful forecasts and counterfactuals?
 
-First, the forecast result is real. On a 147-card, date-free vintage macro split with hidden targets, raw GPT-5.5 and GPT-5.4 beat no-change, rolling mean, rolling trend, AR(2), and recursive least-squares baselines in aggregate, and the win survives origin-cluster bootstrapping. Live recall probes show the models are not retrieving remembered outcomes: exact realized-value recall was zero across all 147 cards, and the qualitative recall edge over a majority baseline is near zero.
+The answer is now narrower, cleaner, and more useful. Frontier LLMs are good macro belief engines. They forecast hidden macro outcomes better than strong statistical baselines, survive direct recall audits, and update beliefs in the right direction when given a person's prior beliefs. They are not, at least in the current evidence, reliable generators of individual household heterogeneity from demographics or backstories. And the project has not yet shown a validated LLM-based simulated economy.
 
-Second, the behavior result now splits by shock type, and that split is the finding. On stimulus-style targets the mechanisms were designed around, raw GPT-5.5 loses to a hand-tuned liquidity rule. On a held-out lottery-windfall family, the rules break and raw GPT-5.5 wins. On a new UI-exhaustion income-loss holdout, raw GPT-5.5 loses to a simple flat rule. The behavioral signal is real but not generic: it transfers to windfall-size reasoning, not yet to predictable income-loss dynamics.
+The short version:
 
-Third, the real-data profile-only persona gate failed. The approved 500-respondent SCE design run was live, stratified, leak-checked, and pre-registered. It did not reproduce real household belief heterogeneity. The models got some inflation and income-gradient signs right, but they compressed individual dispersion by roughly one to two orders of magnitude and got the unemployment-higher-probability gradients mostly wrong.
+**LLMs are belief updaters, not belief generators. Individual heterogeneity has to come from data; once it is supplied, the model can partly move it in the right direction.**
 
-Fourth, prior-conditioned updating works in a narrower but more economically relevant sense. On 100 repeated SCE respondents across October-November 2024, date-blind prompts gave each agent its own prior beliefs and current environment, then scored the update from prior to current belief. GPT-5.5 cleared the locked update gate: mean update correlation `0.3578`, direction accuracy `0.5769`, median update-amplitude ratio `0.3234`, and RMSE improvement versus persistence `0.0437`. This does not fix the cross-sectional heterogeneity failure; it says that when the model is given a person's previous beliefs, it can partly model how beliefs move.
+That is not the original maximal claim, but it is a real result. It says where LLMs add signal, where they fail, and what an honest macro-agent architecture should look like next.
 
-Fifth, we cannot yet carry the belief signal into a validated simulated economy. A pre-registered blend mechanism failed its holdout test. A primitive-to-action kernel — the model emits beliefs and stresses, deterministic code turns them into spending, saving, and debt repayment — passes every sign audit but destroys the out-of-domain signal, and calibrating it on selection targets overfits. The interpretable behavior layer remains open. The persona layer is no longer simply an empirical miss: profile-only personas failed, while prior-conditioned update agents now have a first positive gate.
+## Results at a Glance
 
-The claim this evidence supports: **LLMs contain genuine, contamination-audited macro belief signal; raw GPT-5.5 contains useful household-behavior priors in one out-of-domain windfall family; and prior-conditioned SCE agents show real belief-updating signal. But profile-only personas do not reproduce real SCE household belief heterogeneity, and the project has not yet achieved a validated LLM-based simulated economy.**
+| Question | Result | Evidence |
+| --- | --- | --- |
+| Can GPT-5.5 and GPT-5.4 forecast hidden macro outcomes? | Yes. | On 147 date-free vintage macro cards, raw GPT-5.5 WNAE is `0.8945`; GPT-5.4 is `0.9064`; the best deterministic baseline, no-change, is `1.1260`. GPT-5.5 improves over no-change by `20.56%`, with an origin-cluster bootstrap interval of `[0.0688, 0.4153]`. |
+| Is the forecast result explained by remembered realized values? | No evidence of that. | Live recall probes found zero exact realized-value recall across all 147 cards. Qualitative recall was near the majority baseline: GPT-5.5 was `+0.0181`; GPT-5.4 was `-0.0136`. |
+| Does raw GPT-5.5 predict household behavior better than simple rules? | Only in one out-of-domain family. | It loses to a tuned liquidity rule on stimulus targets, wins on lottery windfalls, then loses again on UI-exhaustion income-loss targets. |
+| Can interpretable kernels preserve the behavior signal? | Not yet. | Blend and primitive-to-action mechanisms either fail holdout tests or overfit selection targets. Sign-correct primitives are not enough. |
+| Can profile-only LLM personas reproduce real SCE household belief heterogeneity? | No. | In a 500-respondent December 2024 SCE run, the evidence verdict is `null_gradient_failure`; median within-variance ratio is `0.0129`; max weighted KS is `0.5475`. |
+| Can richer backstory prompts fix that failure? | No. | In the November 2024 validation campaign, both GPT-5.5 and GPT-5.4 receive `backstory_caricature`; Arm 3 is skipped by design. |
+| Can prior-conditioned agents update beliefs? | Yes, modestly. | On repeated October-November 2024 SCE respondents, GPT-5.5 clears the locked prior-update gate: update correlation `0.3578`, direction accuracy `0.5769`, amplitude ratio `0.3234`, and RMSE improvement versus persistence `0.0437`. |
+| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, but the behavior and persona layers do not yet clear the empirical gates needed for the full claim. |
 
-## The Forecast Result
+## Finding 1: The Aggregate Belief Engine Works
 
-The tournament builds as-of prompt cards from vintage FRED/ALFRED macro data. Cards are date-free: prompts use relative periods and hide calendar dates, named crises, and realized values. Each source forecasts the same hidden targets and is scored on weighted normalized absolute error (WNAE).
+The forecast tournament builds as-of prompt cards from vintage FRED/ALFRED macro data. Cards are date-free: prompts use relative periods and hide calendar dates, named crises, and realized target values. Every source forecasts the same hidden targets and is scored on weighted normalized absolute error (WNAE).
 
-| Source | Test WNAE | Status |
+| Source | Test WNAE | Interpretation |
 | --- | ---: | --- |
 | GPT-5.5 raw | 0.8945 | Best overall |
 | GPT-5.4 raw | 0.9064 | Pass |
 | No change | 1.1260 | Best deterministic baseline |
 | Rolling trend | 1.2668 | Baseline |
 | Rolling mean | 1.2790 | Baseline |
-| GPT-5.4 calibrated | 1.3933 | Fails |
-| GPT-5.5 calibrated | 1.8851 | Fails |
+| GPT-5.4 calibrated | 1.3933 | Calibration hurts |
+| GPT-5.5 calibrated | 1.8851 | Calibration hurts |
 | AR(2) | 2.4307 | Baseline |
 | Recursive least squares | 4.2816 | Baseline |
 
-GPT-5.5 lowers mean origin-level loss by `0.2315` versus the best deterministic baseline, a `20.56%` improvement. The origin-cluster bootstrap interval is `[0.0688, 0.4153]`, with `99.82%` of draws positive. Direction accuracy is `69.39%` for both GPT models versus `6.80%` for no-change.
+GPT-5.5 lowers mean origin-level loss by `0.2315` versus the best deterministic baseline, a `20.56%` improvement. The origin-cluster bootstrap interval is `[0.0688, 0.4153]`, and `99.82%` of draws are positive. Direction accuracy is `69.39%` for both GPT models versus `6.80%` for no-change.
 
 The cleanest family-level win is real consumption growth: GPT-5.5 beats no-change by `29.96%`, with bootstrap mean loss reduction `[0.2786, 1.1281]` and a DM-style p-value of `0.0033`. Output, policy rates, and unemployment improve by `20-34%` against their best baselines, though those intervals cross zero. Inflation is the miss: rolling trend beats GPT-5.5 on inflation growth (`0.2626` versus `0.2904`).
 
-A validation-fitted residual calibration makes held-out forecasts worse (see the table), so the empirical signal is in the raw belief forecasts. Confidence does carry information — the confidence-error correlation is `-0.5453` for GPT-5.5 and `-0.5646` for GPT-5.4 — which a future calibration layer should use.
+The raw model is the result. A validation-fitted residual calibration makes held-out forecasts worse, so the current evidence does not support post-hoc calibration as a free improvement. Confidence does carry information: the confidence-error correlation is `-0.5453` for GPT-5.5 and `-0.5646` for GPT-5.4.
 
-### Contamination
+### Contamination audit
 
-The test targets run from `2020-01-01` to `2025-02-01`. Against the Codex GPT-5 cutoff of `2024-09-30`, 14 of 147 cards are post-cutoff, so this is a hidden-target vintage test, not a post-cutoff test; a separate post-cutoff gate accrues scoreable rows as public data arrives. The contamination defense is the recall audit, run live on the same 147 cards:
+The test targets run from `2020-01-01` to `2025-02-01`. Against the Codex GPT-5 cutoff of `2024-09-30`, 14 of 147 cards are post-cutoff, so the main forecast tournament is a hidden-target vintage test, not a purely post-cutoff test. The contamination defense is the recall audit, run live on the same 147 cards.
 
-- **Exact recall: zero.** Neither model returned a usable numeric realized value for any card when asked directly, without tools, whether it remembered the outcome.
-- **Qualitative recall: near the base rate.** Asked about path direction, level versus normal, and crisis/calm status, GPT-5.5 scores `+0.0181` above the qualitative majority baseline on mean card accuracy; GPT-5.4 is `-0.0136` below it. The models remember broad macro eras, especially turbulence (`0.76` accuracy), but not the outcomes being scored.
+- Exact recall is zero. Neither model returned a usable numeric realized value for any card when asked directly, without tools, whether it remembered the outcome.
+- Qualitative recall is near the base rate. Asked about path direction, level versus normal, and crisis/calm status, GPT-5.5 scores `+0.0181` above the qualitative majority baseline on mean card accuracy; GPT-5.4 scores `-0.0136` below it.
+- The forecasts do not look like a disguised trend extrapolator. GPT-5.5's underreaction slope is `-0.0279`, closest to zero among scored sources, against `-1.13` to `-1.15` for rolling baselines. Its extrapolation slope is `-0.1940`, versus `-1.0000` for rolling mean and `-1.4819` for AR(2).
 
-The forecasts also do not look like a disguised trend extrapolator. GPT-5.5's underreaction slope is `-0.0279` — closest to zero among scored sources — against `-1.13` to `-1.15` for the rolling baselines, and its extrapolation slope is `-0.1940` against `-1.0000` for rolling mean and `-1.4819` for AR(2).
+## Finding 2: Behavior Signal Exists, But It Is Shock-Specific
 
-## The Behavior Result
+The behavior gate asks whether model-generated household responses match published behavioral moments better than simple rules. The rules are deliberately strong: a liquidity rule, a flat rule, and a permanent-income rule.
 
-The behavior gate scores household responses against published moments with three rule baselines: a liquidity rule, a flat rule, and a permanent-income rule. Targets are split explicitly, and scoreboards never pool splits:
+The result is split, and the split is the point.
 
-- `behavior_selection_v1`: 11 aggregate plus 6 cell-level stimulus/rebate targets used during development.
-- `behavior_holdout_v1`: 5 lottery-windfall targets from Fagereng-Holm-Natvik. This holdout is spent and frozen.
-- `behavior_holdout_ui_v1`: 3 UI-exhaustion path targets from Ganong-Noel: about a 6% nondurable-spending drop at unemployment onset, less than 1% monthly drift during UI receipt, and about a 12% drop at predictable benefit exhaustion. The checking/liquidity gradient remains an unscored gap until a directly scoreable public number is pinned down.
+On stimulus-style targets, raw GPT-5.5 loses to the liquidity rule. Aggregate range RMSE is `0.0762` for GPT-5.5 versus `0.0560` for the liquidity rule. On cell-level EIP MPC, GPT-5.5 is `0.0387`; the liquidity rule is `0.0272`.
 
-On the selection split, raw GPT-5.5 loses to the liquidity rule: range RMSE `0.0762` versus `0.0560` on aggregate targets, `0.0387` versus `0.0272` on cell-level EIP MPC. In-domain, a rule tuned to the literature is still the better predictor.
+On the lottery-windfall holdout, the ordering reverses. Raw GPT-5.5 scores `0.0844`. The best simple rule, the flat 30 percent rule, scores `0.2608`. The in-domain liquidity rule breaks badly at `1.1231`, including a low/high liquidity gradient of `5.0` against a target of `2.0`. GPT-5.5 carries the shock-size intuition the rules miss: lottery MPC falls with prize size.
 
-On the lottery holdout, the ordering inverts. Raw GPT-5.5 scores `0.0844`. The best rule, the flat 30 percent rule, scores `0.2608`. The liquidity rule — the in-domain champion — scores `1.1231`, predicting spending shares above one and a liquidity gradient of `5.0` against a target of `2.0`. The model tracks what the rules cannot: lottery MPC falls with prize size, and raw GPT-5.5 carries that shock-size gradient (`0.0843` on the shock-size family, best of all sources).
+On the UI-exhaustion income-loss holdout, GPT-5.5 loses again. Raw GPT-5.5 scores `0.0397`; the best rule, a flat UI spending-drop rule, scores `0.0289`. A residual-over-liquidity ablation scores `0.0353`, and the primitive path scores `0.0311`; both lose.
 
-On the UI-exhaustion holdout, the result flips back against the model. Raw GPT-5.5 scores `0.0397`; the best rule, the flat UI spending-drop rule, scores `0.0289`. The residual-over-liquidity ablation scores `0.0353`, and the primitive path scores `0.0311`; both lose. This is a clean negative result for the broad “LLM behavior generalizes out of domain” claim. The lottery win is not enough: income-gain windfalls and predictable income-loss exhaustion are different mechanisms.
+So the behavior result is not "LLM agents predict household behavior." It is more specific: **raw GPT-5.5 contains behavioral priors that transfer to windfall-size reasoning, but not yet to predictable income-loss dynamics.**
 
-The architecture-fidelity run then tested three locked behavior architectures on the UI holdout, without rescoring the spent lottery holdout:
+## Finding 3: Interpretable Behavior Kernels Failed Productively
 
-- **A. Constrained raw:** raw GPT-5.5 allocation/drop shares, UI RMSE `0.0397`.
-- **B. Constrained choice:** the model chooses a named policy family and bounded parameters, then code executes it. The first pass did not fairly evaluate this architecture: one bounded policy could still drive high-liquidity EIP spending to zero, making the low/high liquidity ratio divide by a near-zero denominator and exploding selection RMSE to `248,350,850.7`. That is a bounds-enforcement bug, now fixed in code for future selection-split development. It is not a holdout result to interpret.
-- **C. Primitive v3:** the model emits richer primitives — including income-change attention, predictable-drop attention, windfall permanence, and spending commitments — and deterministic code maps them into behavior. It is promising but unconfirmed: UI RMSE `0.0200`, beating both raw GPT-5.5 and the flat rule (`0.0289`), but selection-split RMSE is `0.3401`, far worse than raw GPT-5.5 (`0.0762`) and the liquidity rule (`0.0560`).
+The project then tried to make the behavior signal usable inside an economy. That required moving away from raw allocation shares and toward interpretable mechanisms.
 
-Two mechanisms tried to make that signal usable, and both failed informatively:
+Two routes failed:
 
-- **The fixed 50 percent liquidity-prior blend**, pre-specified after it won on selection cell targets, fails the holdout at `0.3857` versus the flat rule's `0.2608`. Demoted to an ablation.
-- **The primitive-to-action kernel** has GPT-5.5 emit bounded primitives only — perceived job-loss risk, expected income growth, precautionary motive, liquidity stress, debt-repayment urgency, durable pull-forward, log shock size, confidence — and the payload fails closed if the model outputs allocation shares. A deterministic kernel maps primitives to actions. It passes all sign audits: liquidity stress raises MPC, job risk raises saving, debt urgency raises repayment, larger windfalls lower MPC. Calibrated on the selection split only and locked, it narrowly beats the liquidity rule there (`0.0539` versus `0.0560`) and then fails the holdout at `0.8510`. Sign-correct, interpretable, and wrong out of domain.
+- The fixed 50 percent liquidity-prior blend won on selected cell targets, then failed the lottery holdout at `0.3857` versus the flat rule's `0.2608`. That demotes the blend to an ablation.
+- The primitive-to-action kernel made GPT-5.5 emit bounded primitives only: perceived job-loss risk, expected income growth, precautionary motive, liquidity stress, debt-repayment urgency, durable pull-forward, log shock size, and confidence. Deterministic code then mapped those primitives to spending, saving, debt repayment, and liquidity. It passed every sign audit, narrowly beat the liquidity rule on the selection split (`0.0539` versus `0.0560`), and then failed the holdout at `0.8510`.
 
-The corrected Phase 2 rule is stricter than the original one: an architecture must be within 25 percent of raw GPT-5.5 on the UI holdout and within 25 percent of the best observed source on the selection split. Under that rule, no behavior architecture passes. The diagnosis is sharper now. The raw model has windfall signal that the rules miss, but it does not automatically solve predictable income-loss behavior. Primitive v3 may encode useful income-loss primitives, but it is not credible as the economy engine while it is wrong on the stimulus literature. The Phase 4 primary should therefore be architecture A, constrained raw, with primitive v3 reported only as a secondary variant.
+That is an important negative. A mechanism can have the right signs and still be wrong out of domain. The primitive interface preserved interpretability but destroyed the raw model's useful windfall signal.
 
-Underneath the gate, the HANK-lite demand economy passes its full lab surface: transfer MPC gradients, rate-hike contraction, job-risk precaution, belief feedback, and per-period accounting identities, with the GPT-5.5 belief module clearing all 19 validation metrics in the live 12-cell run. The sandbox is playable and accounting-safe; what it awaits is a behavior layer worth putting inside it.
+The later architecture-fidelity run tested three behavior architectures on the UI holdout:
 
-## The Persona Layer
+| Architecture | Result |
+| --- | --- |
+| Constrained raw | UI RMSE `0.0397`; credible as a baseline, but not a win. |
+| Constrained choice | The first pass exposed a bounds bug that exploded selection RMSE to `248,350,850.7`. That was fixed for future selection-split work; the result is not interpretable as a holdout score. |
+| Primitive v3 | UI RMSE `0.0200`, beating the flat rule (`0.0289`), but selection-split RMSE is `0.3401`, far worse than raw GPT-5.5 and the liquidity rule. Promising, but not credible as the economy engine. |
 
-The persona panel asks whether data-grounded personas reproduce the cross-sectional structure of household beliefs. The live panel covers 54 synthetic-enriched SCE-style respondents across GPT-5.5 and GPT-5.4 — 108 model responses — anchored to public aggregate survey beliefs and vintage macro context.
+The corrected rule is now stricter: an architecture must stay close to raw GPT-5.5 on the holdout and stay close to the best observed source on the selection split. Under that rule, no behavior architecture passes.
 
-Structure passes cleanly: all 24 demographic contrasts score with the correct sign, the median within-variance ratio is `1.1025` (no stereotype flattening), and the maximum cross-model common-core correlation is `0.8912`, below the `0.95` collapse threshold. Distribution shape fails: maximum KS statistic `0.7407` against a `0.35` threshold, driven by unemployment expectations (target mean `4.43`, models predict `5.22-5.34`) and upward-shifted inflation.
+## Finding 4: Profile-Only Personas Do Not Reproduce Real Household Beliefs
 
-The scope note that governs this section: the targets are synthetic, anchored to public aggregates. The panel validates the wiring and scoring machinery end to end; empirical persona claims wait on real respondent-level microdata (SCE or Michigan).
+The persona layer asks whether LLMs can reproduce the cross-sectional structure of household beliefs. The synthetic wiring test passed enough to prove the machinery worked, but the real SCE test is the one that matters.
 
-That real-data path has now been exercised on public SCE microdata. The converter reads the NY Fed public-use SCE workbooks, uses `frbny-sce-public-microdata-latest.xlsx` as the target panel, and uses all three raw workbooks for demographic backfill. It writes `work/persona_beliefs/sce_real_microdata.csv`: 78,996 scoreable monthly responses from 10,617 respondents, January 2020 through August 2025. Inflation is `Q9_cent50`; unemployment is scored as the actual SCE question, `Q4new`, the percent chance that U.S. unemployment will be higher in 12 months; real income growth is derived as nominal expected household income growth (`Q25v2part2`) minus the respondent's inflation expectation.
+The real-data run used public New York Fed Survey of Consumer Expectations microdata. It sampled 500 December 2024 respondents from 951 available rows, stratified across `income_group x age_group x education_group`, with seed `20260707`. It ran GPT-5.5 and GPT-5.4 on profile-only prompts: 1,000 live calls and 3,000 prediction rows. The prompt-card audit found no target leakage.
 
-The holdout-prep CLI aligns real SCE waves to the vintage FRED/SPF environment, writes static and panel holdouts, normalizes weights by period, and records `real_sce_microdata_v1` provenance. The current real holdout files contain 951 static respondents for December 2024 and 3,022 panel rows across October-December 2024.
+The result is a clean empirical failure:
 
-The mandatory 4-call canary also ran: two respondents, GPT-5.5 and GPT-5.4, via `openai_responses`, with zero cache hits. Prompt-card inspection found no leakage of `actual_*` target responses, raw question codes, or SCE target columns. The canary was too small to score as evidence, but it correctly flagged the hard problem: both models overpredicted the SCE unemployment-higher probability for the two sampled respondents by large margins.
-
-The approved design run is now complete. It sampled 500 of the 951 December 2024 respondents, stratified across `income_group x age_group x education_group`, with seed `20260707`; every non-empty stratum is represented. It ran GPT-5.5 and GPT-5.4 through `openai_responses`: 1,000 live calls, zero cache hits, 3,000 prediction rows. The December 2024 wave is the profile-only test surface and is now spent.
-
-The result is a clear empirical failure for the current persona layer:
-
-- Evidence verdict: `null_gradient_failure`, branch `gradients_flat_or_wrong`.
-- Regression sign-match rate: `0.625`, below the pre-registered `0.75` threshold.
-- Median within-variance ratio: `0.0129`, far below the `0.5` threshold.
+- Evidence verdict: `null_gradient_failure`.
+- Regression sign-match rate: `0.625`, below the `0.75` threshold.
+- Median within-variance ratio: `0.0129`, far below the `0.50` threshold.
 - Max weighted KS statistic: `0.5475`, above the `0.35` threshold.
-- Median distribution std ratio: `0.1190`, below the `0.45` lower bound.
+- Median distribution std ratio: `0.1190`, below the `0.45` lower band.
 - Common-core check passes: max mean pairwise source correlation `0.8719`, below the `0.95` collapse threshold.
 
-The failure mode is informative. Inflation gradients mostly line up, and real-income gradients partly line up. The unemployment-higher-probability target breaks the persona story: raw survey mean is `35.84`; GPT-5.5 predicts `45.16` and GPT-5.4 predicts `53.36`. More importantly, the models invert several real gradients: older, less-educated, female, and low-income respondents in the sampled SCE wave report lower unemployment-higher probabilities than their reference groups, while the model generally pushes those groups higher. Across all targets, the simulated distributions are far too narrow: inflation simulated standard deviation is `0.60-0.70` versus survey `5.84`; real-income-growth standard deviation is `1.13-1.18` versus survey `9.97`; unemployment-higher-probability standard deviation is `6.75-8.45` versus survey `26.41`.
+The failure mode is not random noise. Inflation gradients mostly line up, and real-income gradients partly line up. The unemployment-higher-probability target breaks the persona story. The raw survey mean is `35.84`; GPT-5.5 predicts `45.16`; GPT-5.4 predicts `53.36`. The models also invert several real gradients: older, less-educated, female, and low-income respondents in the sampled SCE wave report lower unemployment-higher probabilities than their reference groups, while the model generally pushes those groups higher.
 
-This is not a prompt-leakage or data-plumbing failure. It is the result the empirical gate was designed to find: profile-only LLM personas do not currently reproduce real SCE belief heterogeneity well enough to serve as validated household belief agents.
+The deeper failure is dispersion. Simulated distributions are far too narrow:
 
-The follow-up prior-conditioned update gate changes the persona story, but only in the narrower direction that matters for an economy. It sampled 100 repeated respondents from the October-November 2024 SCE panel, stratified across `income_group x age_group x education_group`, with seed `20260707`. Prompts were date-blind (`period_0`, `period_1`), used `prior-mode empirical`, and included each respondent's own previous beliefs plus the as-of macro environment. They did not include held-out current responses, raw SCE question codes, December 2024 rows, or `actual_*` target columns.
+| Target | Survey standard deviation | Simulated standard deviation |
+| --- | ---: | ---: |
+| Inflation expectations | 5.84 | 0.60-0.70 |
+| Real-income-growth expectations | 9.97 | 1.13-1.18 |
+| Unemployment-higher probability | 26.41 | 6.75-8.45 |
 
-That run used the Codex CLI provider, not the direct API: GPT-5.5 and GPT-5.4, 200 panel rows, 400 total model records. The first invocation reached 396 records and failed on one empty Codex response; the successful final invocation reused those 396 cache records and made the remaining 4 live calls. The cache now contains the full 400-record Codex run.
+This is not a data-plumbing failure. It is the result the gate was built to detect: profile-only LLM personas do not currently reproduce real SCE belief heterogeneity.
 
-The locked primary update gate clears for GPT-5.5:
+## Finding 5: Backstory Prompts Do Not Rescue Personas
 
-- Evidence verdict: `clears_prior_update_gate`.
+The elicitation campaign tested whether richer prompting could rescue the profile-only failure. It used a locked November 2024 validation wave and ran through `codex_cli` only, with high reasoning effort.
+
+Arm 0 rescored the spent December run using draws from each model's p10-p90 bands instead of point answers. This half-rescued the spread story, but only half. Median within-variance ratio rose to `0.4821`, near the `0.50` threshold. But p10-p90 interval coverage was only `0.3876` against an 80 percent target, and max weighted KS stayed at `0.3944` against a `0.35` threshold. The missing spread is partly in the bands, but the bands still miss too many real respondents.
+
+Arm 1 ran the live point-vs-backstory test: the same 100 stratified November respondents, GPT-5.5 and GPT-5.4, point prompts versus backstory prompts. Neither model passed.
+
+| Model | Arm 1 verdict | What happened |
+| --- | --- | --- |
+| GPT-5.5 | `backstory_caricature` | Spread improved by `2.40x`, below the `3.0x` threshold; KS worsened; group-mean error grew by `34.3%`. Gradient signs did not degrade, but the levels guard failed. |
+| GPT-5.4 | `backstory_caricature` | Spread improved by `2.71x`, still below threshold; KS worsened; gradient signs degraded; group-mean error grew by `35.4%`. |
+
+The caricature guard mattered. Backstories did add movement, but they moved group means in the wrong way without adding enough real individual dispersion.
+
+Arm 2 asked each model, cold and without respondent hints, for the unconditional distribution of real SCE answers. This split the diagnosis cleanly. GPT-5.5's inflation deciles were good for this task, with decile MAE `0.8569`; GPT-5.4's inflation decile MAE was `0.8013`. Real-income-growth decile MAE was `0.9371` for GPT-5.5 and `1.5222` for GPT-5.4. But unemployment-higher-probability deciles were bad for both, with decile MAE `15.0`.
+
+So the models know rough unconditional shapes for some belief distributions. They cannot place a specific respondent inside those distributions from demographics or invented life texture.
+
+Arm 3, the sealed June 2025 priors-plus-backstory confirmation, did not run. That was the locked rule: Arm 3 fires only if Arm 1 passes for at least one model. No confirmatory calls were spent on the sealed wave.
+
+## Finding 6: Prior-Conditioned Updating Is the Surviving Persona Result
+
+The strongest persona result is not generation. It is updating.
+
+The prior-conditioned update gate sampled 100 repeated SCE respondents from the October-November 2024 panel, stratified across `income_group x age_group x education_group`, with seed `20260707`. Prompts were date-blind, used `prior-mode empirical`, and included each respondent's own previous beliefs plus the as-of macro environment. They did not include held-out current responses, raw SCE question codes, December 2024 rows, or `actual_*` target columns.
+
+GPT-5.5 clears the locked primary update gate:
+
 - Mean update correlation: `0.3578`, above the `0.10` threshold.
 - Mean direction accuracy: `0.5769`, above the `0.55` threshold.
 - Median update-amplitude ratio: `0.3234`, inside the `[0.25, 2.00]` band.
 - Mean RMSE improvement versus persistence: `0.0437`, above the `0.02` threshold.
 
-GPT-5.4 also clears directionally: mean update correlation `0.3976`, direction accuracy `0.5677`, median update-amplitude ratio `0.4140`, and mean RMSE improvement versus persistence `0.0575`. The positive result is not a broad distributional pass. In the same run, both models still compress within-group variance: mean within-variance ratio is `0.1677` for GPT-5.5 and `0.1266` for GPT-5.4. GPT-5.5's distribution distance is better than the December profile-only run but still misses the unemployment and real-income shapes: max KS `0.3691` against the old `0.35` distribution threshold. The stricter period-to-period delta table is also weak: simulated October-to-November deltas are negatively correlated with actual respondent deltas. So the result is specific: empirical priors help the model choose useful prior-to-current belief updates; they do not yet make a full household-belief simulator.
+GPT-5.4 clears directionally too: update correlation `0.3976`, direction accuracy `0.5677`, amplitude ratio `0.4140`, and RMSE improvement versus persistence `0.0575`.
 
-The later elicitation campaign tested whether the profile-only failure could be rescued by eliciting richer distributions or richer personas. It was run through `codex_cli` only, with high reasoning effort, on the locked November 2024 validation wave.
+The result is modest and underreactive. It does not fix the cross-sectional dispersion problem. Both models still compress within-group variance: mean within-variance ratio is `0.1677` for GPT-5.5 and `0.1266` for GPT-5.4. GPT-5.5's max KS is `0.3691`, still just above the old `0.35` distribution threshold. The stricter period-to-period delta table is weak.
 
-Arm 0 was free: it rescored the spent December 2024 profile-only run using draws from each model's p10-p90 bands instead of point answers. Distributional draws recover much more spread than the point answers: median within-variance ratio rises to `0.4821`, near the original `0.50` threshold. But the bands are not calibrated enough to rescue the persona layer: max weighted KS is still `0.3944` against the `0.35` threshold, and p10-p90 interval coverage is only `0.3876` against an 80 percent target. The spread is partly in the bands, but the bands miss too many real respondents.
+But this is the architecture lesson. Give the model a person's prior belief state, and it can partly model how that belief moves. Ask it to conjure the person from demographics or a backstory, and it collapses the distribution.
 
-Arm 1 was the live point-vs-backstory test: the same 100 stratified November respondents, GPT-5.5 and GPT-5.4, point prompts versus backstory prompts. Neither model passed. GPT-5.5's backstory prompts improved within-variance ratio by `2.40x` (`0.0135` to `0.0325`), but the pre-registered threshold was `3.0x`; KS worsened from `0.6552` to `0.6803`; group-mean error grew by `34.3%`, above the 20 percent guardrail. GPT-5.4 improved spread by `2.71x`, also below threshold, while KS worsened, gradient signs degraded, and group-mean error grew by `35.4%`. Both models received the verdict `backstory_caricature`.
+## What This Means for the Macro Economy
 
-Arm 2 was a 6-call no-hints probe: ask each model, cold, for the unconditional distribution of real SCE answers. This showed the issue is not complete absence of survey-distribution knowledge. Both models produced plausible inflation and income-growth deciles: inflation decile MAE was `0.8569` for GPT-5.5 and `0.8013` for GPT-5.4; real-income-growth decile MAE was `0.9371` and `1.5222`. The unemployment-higher-probability distribution was much worse for both models, with decile MAE `15.0`. Both models also overestimated focal rounding/heaping. The diagnosis is now sharper: the models have rough unconditional distributional priors, but demographic profiles and backstories do not locate individual respondents inside those distributions.
+The accounting-safe demand economy is useful, but the full macro-agent claim is not yet achieved.
 
-Arm 3, the sealed June 2025 priors-plus-backstory confirmation, did not run. That was the pre-registered rule: Arm 3 fires only if Arm 1 passes for at least one model. No live confirmatory calls were spent on the sealed wave. The result is therefore final for this branch: backstory elicitation does not rescue profile-only personas, and the surviving positive persona result remains the narrower prior-conditioned update gate.
+The sandbox can run transfer shocks, rate hikes, job-risk shocks, belief feedback, and per-period accounting checks. It passes its lab validation surface. The problem is upstream: the household belief and behavior layers do not yet supply a validated empirical engine.
 
-## What Comes Next
+The right economy architecture now looks different from the early "personas simulate households" idea:
 
-1. **Use prior-conditioned agents, not profile-only agents, for the next ecology.** Profile-only personas failed. Prior-conditioned agents cleared a first update gate. The next economy run should treat households as persistent belief states, not demographic sketches.
-2. **Do not chase richer backstory prompts.** The live validation campaign says the missing information is not prose texture; it is respondent state. Future persona work should use history, priors, repeated-wave latent state, or observed belief trajectories.
-3. **Test the update mechanism once on a fresh panel holdout before calling it validated.** October-November 2024 has now been used. A future prior-conditioned architecture should be locked on validation data and tested once on a newly declared SCE or Michigan panel wave.
-4. **Do not promote behavior yet.** The strongest result remains the contamination-audited macro belief engine. The behavior result is windfall-scoped, the income-loss result is negative, and no behavior architecture clears both in-domain and holdout bars.
-5. **Let the post-cutoff forecast gate accrue.** Frozen post-cutoff cards get rescored as public data arrives, converting the forecast claim from recall-audit-defended to genuinely post-cutoff over time. The repo has a zero-live-call `postcutoff-replay-refresh` Make target for that loop.
+1. Start households with empirical belief states or latent states inferred from panel data.
+2. Let LLMs update those states from new information, rather than inventing the states from profiles.
+3. Keep deterministic code responsible for feasibility, budgets, accounting, and market clearing.
+4. Treat behavior mechanisms as separately validated modules, not as free-form LLM allocation guesses.
+5. Compare the resulting economy to an adaptive-expectations twin: the same demand economy with LLM belief updates swapped out for a standard adaptive baseline.
 
-The forecast audit — baselines, bootstrap intervals, DM-style tests, both recall probes, belief-structure audit, cutoff status — stays fixed in this report as the evidence base.
+That final comparison is still future work. It should be run only after the prior-update mechanism is locked and tested once on a fresh panel holdout.
+
+## What We Can Claim Now
+
+The evidence supports three positive claims:
+
+1. **Frontier LLMs contain audited macro belief signal.** GPT-5.5 and GPT-5.4 beat strong empirical baselines on a hidden-target vintage macro tournament, and live recall probes do not find realized-value recall.
+2. **Raw GPT-5.5 contains behavior signal in one out-of-domain windfall family.** It generalizes where tuned rules break, but that result does not transfer to predictable income-loss dynamics.
+3. **Prior-conditioned agents can partly update real household beliefs.** The model is useful when it operates on supplied respondent state.
+
+The evidence also supports three negative claims:
+
+1. **Profile-only personas fail on real SCE microdata.**
+2. **Backstory elicitation fails by caricature rather than rescuing heterogeneity.**
+3. **No behavior architecture currently clears both in-domain credibility and out-of-domain holdout tests.**
+
+The full claim remains open:
+
+**We have not yet shown that an LLM-based simulated economy predicts real macro behavior better than strong empirical alternatives.**
+
+## Recommended Next Work
+
+The next phase should not chase richer personas. It should build from the result that survived.
+
+1. Lock a prior-conditioned belief-updating mechanism.
+2. Test it once on a fresh SCE or Michigan panel holdout.
+3. Feed the locked updater into the demand economy.
+4. Compare the resulting economy against an adaptive-expectations twin.
+5. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
+
+Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. The behavior route needs new mechanisms or new data before another holdout is spent.
+
+## Methods Appendix
+
+### Forecast tournament
+
+The forecast tournament uses 147 date-free vintage macro cards built from as-of FRED/ALFRED data. Prompts hide realized values, calendar crisis labels, and target dates. Sources are scored on WNAE and compared to no-change, rolling mean, rolling trend, AR(2), and recursive least-squares baselines. Family-level comparisons use bootstrap and DM-style checks.
+
+### Recall audit
+
+The recall audit asks the live model, without tools, whether it remembers the realized value or qualitative path for each card. Exact realized-value recall is scored separately from broad qualitative era recall.
+
+### Behavior gate
+
+The behavior gate scores model and rule-generated household actions against published public moments. Splits are kept separate:
+
+- `behavior_selection_v1`: stimulus/rebate targets used during development.
+- `behavior_holdout_v1`: lottery windfall targets. This holdout is spent and frozen.
+- `behavior_holdout_ui_v1`: UI-exhaustion income-loss targets.
+
+### Persona gates
+
+The real persona gates use public SCE microdata. Inflation is the SCE density-median one-year inflation expectation. Unemployment is scored as the actual SCE question: percent chance U.S. unemployment will be higher in 12 months. Real income growth is derived as nominal expected household income growth minus the respondent's inflation expectation.
+
+The December 2024 profile-only wave is spent. The November 2024 backstory validation wave is spent. The sealed June 2025 priors-plus-backstory confirmation was not spent because the pre-registered Arm 1 condition failed.
+
+### Reproducibility notes
+
+The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The latest full test run passed `136` tests.
