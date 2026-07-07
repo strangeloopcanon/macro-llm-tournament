@@ -78,7 +78,8 @@ Design decisions baked into the diagram: the LLM never chooses actions (that was
 - `src/macro_llm_tournament/agent_economy.py` runs the forecast-first typed agent economy CLI.
 - `src/macro_llm_tournament/agent_llm.py`, `agent_runtime.py`, `agent_types.py`, `agent_targets.py`, and `agent_report.py` hold the LLM-agent schema, accounting runtime, SCF-style type cells, origin-level household-belief scoring, and report rendering.
 - `src/macro_llm_tournament/behavior_gate.py` scores typed household agents against a packaged public stimulus-response target catalog for aggregate MPC, liquidity gradients, debt repayment, liquid saving, directional debt/saving gradients by liquidity, and cell-level MPC-by-liquidity targets; unverified direct-target gaps stay unscored.
-- `src/macro_llm_tournament/behavior_ecology.py` runs the individual-household behavior ecology: concrete seeded households answer one shock each in the first person (dollars, not shares), a policy arm elicits response schedules evaluated by code, and pre-registered differentiation metrics test whether elicitation compression survives.
+- `src/macro_llm_tournament/behavior_ecology.py` runs the individual-household behavior ecology: concrete seeded households answer one shock each in the first person (dollars, not shares), a policy arm elicits response schedules evaluated by code, and pre-registered differentiation metrics test whether elicitation compression survives. It can also replay already-banked policy schedules on fresh behavior families such as the CTC holdout without new model calls.
+- `src/macro_llm_tournament/state_policy_schedules.py` builds state-conditioned behavior-policy profiles. A live model writes bounded schedules over household balance sheets and belief gaps; the demand economy later interpolates those schedules and owns budget/accounting feasibility.
 - `src/macro_llm_tournament/persona_belief_panel.py` runs data-grounded persona belief panels and scores cross-sectional gradients, within-group spread, distribution distance, and common-core correlation.
 - `src/macro_llm_tournament/persona_ecology.py` runs respondent-seeded belief ecologies with profile, prior-expectation, external-information, behavior, and aggregate-feedback modules.
 - `src/macro_llm_tournament/demand_economy.py` runs the abstract HANK-lite demand economy: household belief modules form inflation, income, job-risk, confidence, and precautionary-saving beliefs; deterministic structural code converts those beliefs into budget-constrained consumption, aggregate demand, output, employment, sticky inflation, and policy feedback.
@@ -220,6 +221,30 @@ make phase4-prior-update-policy-schedule-replay
 ```
 
 This uses the banked policy schedules in `outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json` as the shared behavior layer for both twins. The LLM-authored schedules supply conditional transfer and income-risk response functions; deterministic code matches each SCE household to the nearest SCF schedule cell, interpolates the schedule, enforces budgets, and keeps accounting. This is still retrospective because it reuses an already scored FRED month.
+
+Score the fresh CTC behavior holdout using those already-banked schedules and zero new model calls:
+
+```bash
+make behavior-ecology-ctc-holdout-replay
+```
+
+This evaluates `ctc_2021_monthly_child_credit_style` against the new `behavior_holdout_ctc_v1` split. The CTC spending target is anchored on the BLS Consumer Expenditure estimate; saving/debt and income-gradient rows are secondary rough allocation checks from the Brookings/Social Policy Institute survey.
+
+Build the state-conditioned behavior-policy profile through Codex CLI:
+
+```bash
+make state-policy-schedules-live
+```
+
+This makes one live Codex call by default, using the real-SCE prior-update household panel to define reusable household-state archetypes. It writes `outputs/state_policy_schedules_live_gpt55_sce_prior_update/state_behavior_policy_profile.json`.
+
+Run Phase 4 with that state-conditioned profile as the shared behavior layer:
+
+```bash
+make phase4-prior-update-state-schedule-replay
+```
+
+This is the current "natural household behavior" bridge: real SCE heterogeneity supplies household state, the LLM-updater supplies beliefs, an LLM-authored policy profile maps state and belief gaps to behavior schedules, and deterministic code executes the schedules and aggregates the macro economy.
 
 Run the zero-cost forecast audit fixture:
 

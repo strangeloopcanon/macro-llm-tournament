@@ -23,6 +23,7 @@ selection surface, not confirmatory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -443,10 +444,21 @@ def evaluate_policy_at_scenario(
 
 
 class EcologyLLMClient:
-    def __init__(self, provider: str, model: str, cache_dir: Path, *, mode: str, max_live_calls: int):
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        cache_dir: Path,
+        *,
+        mode: str,
+        max_live_calls: int,
+        raw_policy_records_path: Path | None = None,
+    ):
         self.provider = provider
         self.model = model
         self.mode = mode
+        self.raw_policy_records_path = raw_policy_records_path
+        self._raw_policy_records = _load_policy_record_payloads(raw_policy_records_path) if raw_policy_records_path else {}
         self._household_client = AgentLLMClient(
             provider, model, cache_dir, mode=mode, max_live_calls=max_live_calls, system_preamble=NATURAL_BEHAVIOR_PREAMBLE
         )
@@ -483,7 +495,15 @@ class EcologyLLMClient:
         return normalized
 
     def policy(self, scenarios: Iterable[BehaviorScenario], type_cells: pd.DataFrame, *, family: str) -> dict[str, dict[str, Any]]:
-        if self.mode == "fixture":
+        if family in self._raw_policy_records:
+            data = {
+                "provider": self.provider,
+                "model": self.model,
+                "payload": self._raw_policy_records[family],
+                "cache_hit": True,
+                "cache_path": str(self.raw_policy_records_path),
+            }
+        elif self.mode == "fixture":
             data = {"provider": self.provider, "model": self.model, "payload": fixture_policy_payload(type_cells, family=family)}
         else:
             prompt = policy_prompt(scenarios, type_cells, family=family)
@@ -498,6 +518,21 @@ class EcologyLLMClient:
             }
         )
         return normalized
+
+
+def _load_policy_record_payloads(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise SystemExit("--policy-raw-records-json must contain a JSON list")
+    out: dict[str, Any] = {}
+    for family in ("transfer", "income_loss"):
+        record_type = f"policy_{family}"
+        matches = [record for record in data if isinstance(record, dict) and str(record.get("record_type")) == record_type]
+        if matches:
+            out[family] = matches[-1].get("payload", matches[-1])
+    return out
 
 
 def run_ecology_arm(
@@ -583,6 +618,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario-ids", default=None, help="Comma-separated scenario filter (for parallel shards)")
     parser.add_argument("--scf-wave", type=int, default=2022)
     parser.add_argument("--cache-dir", default=None)
+    parser.add_argument(
+        "--policy-raw-records-json",
+        default=None,
+        help="Existing behavior_ecology raw records to reuse for policy schedules without new calls.",
+    )
     parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
 
@@ -596,6 +636,9 @@ def main() -> int:
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_ROOT / f"behavior_ecology_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(args.cache_dir) if args.cache_dir else WORK_ROOT / "behavior_ecology_cache"
+    policy_raw_records_path = Path(args.policy_raw_records_json) if args.policy_raw_records_json else None
+    if policy_raw_records_path is not None and not policy_raw_records_path.exists():
+        raise SystemExit(f"--policy-raw-records-json does not exist: {policy_raw_records_path}")
 
     scenario_filter = {s.strip() for s in args.scenario_ids.split(",")} if args.scenario_ids else None
     scenarios = [s for s in BEHAVIOR_SCENARIOS if scenario_filter is None or s.scenario_id in scenario_filter]
@@ -613,6 +656,8 @@ def main() -> int:
         "max_live_calls": int(args.max_live_calls),
         "ecology_prompt_version": ECOLOGY_PROMPT_VERSION,
         "policy_prompt_version": POLICY_PROMPT_VERSION,
+        "policy_raw_records_json": str(policy_raw_records_path) if policy_raw_records_path else None,
+        "policy_raw_records_sha256": hashlib.sha256(policy_raw_records_path.read_bytes()).hexdigest() if policy_raw_records_path else None,
         "preregistered_metrics": PREREGISTERED_METRICS,
         "claim_scope": CLAIM_SCOPE,
         "status": "running",
@@ -621,7 +666,14 @@ def main() -> int:
     try:
         type_cells, _ = build_household_type_cells(work_dir=WORK_ROOT / "scf", wave=args.scf_wave)
         households = sample_households(type_cells, households_per_cell=args.households_per_cell, seed=args.seed)
-        client = EcologyLLMClient(args.provider, args.model, cache_dir, mode=args.mode, max_live_calls=args.max_live_calls)
+        client = EcologyLLMClient(
+            args.provider,
+            args.model,
+            cache_dir,
+            mode=args.mode,
+            max_live_calls=args.max_live_calls,
+            raw_policy_records_path=policy_raw_records_path,
+        )
 
         frames: list[pd.DataFrame] = []
         if "ecology" in arms:

@@ -106,6 +106,24 @@ Result: no on the first retrospective FRED proxy run. The schedule executor is n
 
 Status: keep as the new mainline architecture and a negative first macro replay.
 
+### 12. Fresh CTC Behavior Holdout
+
+Question: do the already-banked GPT-5.5 policy schedules generalize to one fresh behavior family?
+
+Result: yes, directionally. The new `behavior_holdout_ctc_v1` split scores a monthly Child Tax Credit style payment. It uses a BLS Consumer Expenditure spending target and Brookings/Social Policy Institute saving/debt/income-gradient usage moments. The run replays the existing GPT-5.5 policy schedules from `outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json`, so it spends zero new policy calls. Policy schedules beat the liquidity rule overall on CTC range RMSE (`0.0097` versus `0.0207`) and predict spending near the BLS target (`0.4569` versus target `0.44`). The miss is income-gradient debt repayment: the policy schedule under-predicts how much more low-income households use CTC money for debt repayment.
+
+Status: keep as a positive behavior-interface result with caveat. It promotes schedules beyond spent lottery/UI families, but it does not validate the macro economy.
+
+### 13. State-Conditioned Policy Schedules
+
+Question: can a more natural household bridge improve Phase 4 by making behavior policy depend on actual SCE household state and belief gaps?
+
+Result: yes as an improvement, no as a win. A one-call live Codex GPT-5.5 run created ten SCE-derived household-state archetype schedules in `outputs/state_policy_schedules_live_gpt55_sce_prior_update/`. The demand economy now has `state_schedule` mode: it matches each household to a state-policy archetype, interpolates transfer and belief-stress schedules, disables the older hand-built belief-drag bridge, and keeps deterministic budget/accounting execution.
+
+The strict one-card Phase 4 replay improves the LLM-updater scaled RMSE from `6.5296` under generic schedules to `5.0843` under state schedules, but adaptive still scores `1.3471`. The five-card hold-last diagnostic improves the LLM-updater from `3.8132` to `3.2132`, but adaptive still scores `1.7290`.
+
+Status: keep as the current best bridge and a negative macro result. The architecture is closer to the north star, but it still does not beat the adaptive twin.
+
 ## The Lessons
 
 1. LLMs contain audited aggregate macro belief signal.
@@ -113,17 +131,18 @@ Status: keep as the new mainline architecture and a negative first macro replay.
 3. LLMs can update supplied household belief state.
 4. Direct action elicitation compresses behavior.
 5. First-person role-play restores dynamics but collapses cross-sectional heterogeneity.
-6. Policy schedules are the best behavior interface so far.
-7. Deterministic execution remains non-negotiable: budgets, feasibility, accounting, and aggregation belong in code.
-8. The macro-simulation claim is still open. The current LLM-updater economy does not beat the adaptive twin.
+6. Policy schedules are the best behavior interface so far, and the fresh CTC holdout gives that statement one new-family check.
+7. State-conditioned schedules are the best macro bridge so far, but still lose to adaptive expectations.
+8. Deterministic execution remains non-negotiable: budgets, feasibility, accounting, and aggregation belong in code.
+9. The macro-simulation claim is still open. The current LLM-updater economy does not beat the adaptive twin.
 
 ## What Should Happen Next
 
 The next real test needs new evidence, not more reuse of spent holdouts.
 
-1. Build a fresh behavior holdout family and score the policy-schedule arm once.
+1. Diagnose the remaining state-schedule Phase 4 loss by target series and household-state profile.
 2. Build a longer same-horizon SCE prior-update panel.
-3. Improve the bridge from updated beliefs to schedule execution on development dynamics only.
-4. Keep the Phase 4 v2 FRED mapping locked until the next newly scoreable month.
-5. Run the next Phase 4 comparison as confirmatory only after the panel horizon, belief replay horizon, behavior executor, and target mapping are all fixed in the manifest.
-
+3. Improve the bridge from updated beliefs to state-schedule execution on development dynamics only.
+4. Freeze CTC, lottery, and UI for mechanism evaluation; any new behavior promotion needs a new family.
+5. Keep the Phase 4 v2 FRED mapping locked until the next newly scoreable month.
+6. Run the next Phase 4 comparison as confirmatory only after the panel horizon, belief replay horizon, behavior executor, and target mapping are all fixed in the manifest.

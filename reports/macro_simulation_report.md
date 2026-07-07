@@ -23,8 +23,9 @@ That is not the original maximal claim, but it is a real result. It says where L
 | Can profile-only LLM personas reproduce real SCE household belief heterogeneity? | No. | In a 500-respondent December 2024 SCE run, the evidence verdict is `null_gradient_failure`; median within-variance ratio is `0.0129`; max weighted KS is `0.5475`. |
 | Can richer backstory prompts fix that failure? | No. | In the November 2024 validation campaign, both GPT-5.5 and GPT-5.4 receive `backstory_caricature`; Arm 3 is skipped by design. |
 | Can prior-conditioned agents update beliefs? | Yes, modestly. | On repeated October-November 2024 SCE respondents, GPT-5.5 clears the locked prior-update gate: update correlation `0.3578`, direction accuracy `0.5769`, amplitude ratio `0.3234`, and RMSE improvement versus persistence `0.0437`. |
-| Does the policy-schedule behavior layer rescue the Phase 4 economy? | No, not yet. | The schedule executor is now wired into Phase 4 and uses the same GPT-5.5-authored policy functions for both twins. On the strict retrospective FRED month, adaptive still wins: scaled RMSE `0.8457` versus `6.5296` for the LLM-updater schedule economy. |
-| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and Phase 4 now runs exploratory matched-twin replays under both fixed-kernel and policy-schedule behavior executors, but the LLM-updater economy loses to the adaptive-expectations twin on both first FRED proxy passes. |
+| Does the policy-schedule behavior layer generalize to a fresh behavior family? | Directionally yes. | The new CTC holdout (`behavior_holdout_ctc_v1`) scores already-banked GPT-5.5 policy schedules with zero new calls. Policy schedules beat the liquidity rule overall: range RMSE `0.0097` versus `0.0207`, though they miss part of the income-gradient shape. |
+| Does the state-conditioned policy layer rescue the Phase 4 economy? | No, but it improves the bridge. | The live Codex state-policy profile improves the LLM-updater economy versus the generic schedule executor: strict scaled RMSE `5.0843` versus `6.5296`; five-card hold-last RMSE `3.2132` versus `3.8132`. Adaptive still wins both runs. |
+| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and Phase 4 now runs exploratory matched-twin replays under fixed-kernel, generic policy-schedule, and state-conditioned schedule executors. The LLM-updater economy still loses to the adaptive-expectations twin on the current FRED proxy passes. |
 
 ## Finding 1: The Aggregate Belief Engine Works
 
@@ -104,6 +105,21 @@ Three results:
 1. **Compression is an interface artifact, but it moves rather than disappears.** First-person grounding restores scenario differentiation (the UI cliff lands on the band edge; the ecology arm posts the best UI-path score ever observed, `0.0194`) while destroying cross-household differentiation: role-played individuals nearly all behave like the same prudent median person, collapsing the EIP liquidity spending ratio to `1.14` against a target of `3`-`6`. Cell-level elicitation has exactly the opposite failure. Where the model aggregates in its head, it keeps stylized cross-sectional facts and flattens scenario response; where it role-plays, it keeps scenario response and flattens the cross-section.
 2. **Schedule elicitation is the first LLM-derived source to beat the strongest rule on the selection split** (`0.0507` versus `0.0560`) while also beating the best rule on the lottery family (`0.1392` versus `0.2608`). Asking the model for the *function* and letting code evaluate it preserves both differentiation axes at once. Opus 4.8 replicates the ordering, and its policy arm puts the lottery gradient inside the pre-registered band (`0.305`).
 3. **These families are spent.** The lottery and UI targets have now been used for mechanism selection repeatedly, so the policy-arm win is a selection-surface result. Promoting it to a claim requires a genuinely untouched behavior family scored once.
+
+### Fresh CTC Holdout: Policy Schedules Survive One New Family
+
+The fresh behavior family is the 2021 monthly Child Tax Credit. It is useful because it is neither a one-time rebate/lottery windfall nor a predictable UI income-loss event. The new split is `behavior_holdout_ctc_v1`, and it was scored once using the already-banked GPT-5.5 policy schedules from `outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json`. That means zero new policy calls and no prompt revision after seeing the targets.
+
+The main CTC spending target is anchored on the BLS Consumer Expenditure working paper estimate that households spent `44%` of each imputed CTC dollar over the reference quarter. Secondary saving/debt and income-gradient rows use the Brookings/Social Policy Institute survey usage shares: `53%` mostly spent, `30%` mostly saved, and `17%` mostly paid down debt, with higher-income households more likely to save and lower-income households more likely to repay debt.
+
+| Source | CTC overall range RMSE | CTC MPC prediction | Notes |
+| --- | ---: | ---: | --- |
+| GPT-5.5 policy schedule | `0.0097` | `0.4569` | Best overall; beats liquidity rule. |
+| Liquidity rule | `0.0207` | `0.4001` | Strong on income gradients, weaker overall. |
+| Flat 30% rule | `0.0866` | `0.3000` | Too low on CTC spending. |
+| Permanent-income rule | `0.2049` | `0.1000` | Much too low. |
+
+This promotes the policy-schedule behavior result from "only seen on spent lottery/UI families" to "survives one fresh behavior family." It is still not the full macro claim. The schedule arm's weakest CTC component is income-gradient debt repayment: it under-predicts the low-income versus high-income debt-repayment gap. That is a useful miss because it tells us where the next schedule prompt or state conditioning needs pressure.
 
 ## Finding 3: Interpretable Behavior Kernels Failed Productively
 
@@ -250,6 +266,10 @@ The policy-schedule executor is now wired into the same Phase 4 matched-twin run
 
 The first schedule-executor Phase 4 replay is also negative. On the strict retrospective one-card FRED proxy run, adaptive wins: scaled RMSE `0.8457` versus `6.5296` for the LLM-updater path. Both twins have direction accuracy `1.0000`, but the LLM-updater schedule economy over-contracts consumption growth and overshoots the saving-rate change. The five-card `hold_last` ablation gives the same ordering: adaptive scaled RMSE `1.2074`; LLM-updater scaled RMSE `3.8132`. Accounting passes in both schedule-mode runs. Confirmatory scoring under mapping v2 begins with the next newly scoreable data month. This is a useful negative: policy schedules are the right behavior interface, but the current belief-to-behavior bridge still does not beat adaptive expectations.
 
+The next bridge version is state-conditioned policy schedules. A new live Codex CLI run wrote `outputs/state_policy_schedules_live_gpt55_sce_prior_update/state_behavior_policy_profile.json`: one GPT-5.5 call, ten SCE-derived household-state archetypes, and bounded schedules over transfer size, job-risk belief gaps, inflation gaps, confidence drops, and real-rate gaps. In `state_schedule` mode, the demand economy matches each SCE household to the nearest state-policy archetype, interpolates the LLM-authored schedules, and disables the older hand-built belief-drag bridge so the schedule owns belief-to-action transmission.
+
+That improves the LLM path but still does not rescue Phase 4. On the strict one-card retrospective FRED run, state schedules reduce the LLM-updater scaled RMSE from `6.5296` to `5.0843`, while adaptive scores `1.3471`. On the five-card `hold_last` diagnostic, state schedules reduce the LLM-updater scaled RMSE from `3.8132` to `3.2132`, while adaptive scores `1.7290`. Accounting passes with max residual `2.91e-11` or better. The current interpretation is precise: **state-conditioned schedules are the better natural-behavior bridge, but the simulated economy still does not predict the FRED proxy surface better than adaptive expectations.**
+
 ## What We Can Claim Now
 
 The evidence supports three positive claims:
@@ -257,7 +277,8 @@ The evidence supports three positive claims:
 1. **Frontier LLMs contain audited macro belief signal.** GPT-5.5 and GPT-5.4 beat strong empirical baselines on a hidden-target vintage macro tournament, and live recall probes do not find realized-value recall.
 2. **Raw GPT-5.5 contains behavior signal in one out-of-domain windfall family.** It generalizes where tuned rules break, but that result does not transfer to predictable income-loss dynamics.
 3. **Prior-conditioned agents can partly update real household beliefs.** The model is useful when it operates on supplied respondent state.
-4. **Policy-schedule elicitation is the best behavior interface found so far.** It is the first LLM-derived behavior source to beat the liquidity rule on the selection split, and it is now executable inside the demand economy.
+4. **Policy-schedule elicitation is the best behavior interface found so far.** It is the first LLM-derived behavior source to beat the liquidity rule on the selection split, it survives one fresh CTC behavior family, and it is now executable inside the demand economy.
+5. **State-conditioned schedules improve the macro bridge.** They do not win, but they reduce the LLM-updater Phase 4 error relative to the generic schedule executor while preserving accounting.
 
 The evidence also supports three negative claims:
 
@@ -266,6 +287,7 @@ The evidence also supports three negative claims:
 3. **No behavior architecture currently clears both in-domain credibility and out-of-domain holdout tests.**
 4. **The first Phase 4 matched-twin replay does not beat adaptive expectations.**
 5. **The first Phase 4 policy-schedule replay also does not beat adaptive expectations.**
+6. **The first Phase 4 state-schedule replay still does not beat adaptive expectations.**
 
 The full claim remains open:
 
@@ -273,13 +295,14 @@ The full claim remains open:
 
 ## Recommended Next Work
 
-The next phase should not chase richer personas. It should build from the results that survived: prior-conditioned belief updating, and schedule-based behavior elicitation.
+The next phase should not chase richer personas. It should build from the results that survived: prior-conditioned belief updating, schedule-based behavior elicitation, and state-conditioned execution.
 
-1. Define one fresh behavior holdout family (untouched by any selection so far) and score the policy-schedule arm against it once, pre-registered. That is the promotion test for the first LLM source that beat the liquidity rule on the selection split.
+1. Diagnose the remaining Phase 4 loss under `state_schedule`: which mapped series and which household-state profiles produce the consumption/saving miss?
 2. Build a longer, same-horizon prior-update panel before spending more Phase 4 score surface.
-3. Improve the belief-to-policy bridge in the schedule executor. The current mapping turns LLM-updated beliefs into too much consumption contraction; the next version should be validated on development dynamics before any new FRED month is scored.
-4. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
-5. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
+3. Improve the state-policy bridge on development dynamics only. The current version reduces but does not remove over-contraction; the next version should be judged before any new FRED month is scored.
+4. Keep the CTC, lottery, and UI behavior families frozen for mechanism evaluation. Any further behavior promotion needs a new never-scored family.
+5. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
+6. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
 
 Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. Point-behavior elicitation is closed; the schedule interface is the live route.
 
@@ -300,6 +323,7 @@ The behavior gate scores model and rule-generated household actions against publ
 - `behavior_selection_v1`: stimulus/rebate targets used during development.
 - `behavior_holdout_v1`: lottery windfall targets. This holdout is spent and frozen.
 - `behavior_holdout_ui_v1`: UI-exhaustion income-loss targets.
+- `behavior_holdout_ctc_v1`: monthly Child Tax Credit targets. This is the newest behavior family; it has been scored once against the already-banked policy schedules.
 
 ### Persona gates
 
@@ -311,8 +335,8 @@ The December 2024 profile-only wave is spent. The November 2024 backstory valida
 
 The Phase 4 fixture compares two versions of the same deterministic demand economy: an LLM-belief fixture and an adaptive-expectations twin. It writes the locked proxy mapping, cards, targets, household states, twin paths, accounting, forecasts, joined errors, scores, manifest, and `phase4_matched_twins_report.md`.
 
-The Phase 4 replay adapter consumes persona-ecology predictions rather than raw prompt payloads. It joins on the normalized CSV outputs, not prompt-facing relative IDs; derives household states from demographics, weights, and prior beliefs; and excludes `actual_*` labels from the demand-economy input. The strict fixed-kernel Codex replay artifact is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard/`. The fixed-kernel extrapolating ablation is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_holdlast_5cards/`. The strict policy-schedule replay artifact is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_onecard/`. The policy-schedule extrapolating ablation is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_holdlast_5cards/`. All current replay artifacts use mapping schema v2 and `scoring_label: retrospective`; the first confirmatory v2 score is reserved for the next newly scoreable data month.
+The Phase 4 replay adapter consumes persona-ecology predictions rather than raw prompt payloads. It joins on the normalized CSV outputs, not prompt-facing relative IDs; derives household states from demographics, weights, and prior beliefs; and excludes `actual_*` labels from the demand-economy input. The strict fixed-kernel Codex replay artifact is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard/`. The fixed-kernel extrapolating ablation is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_holdlast_5cards/`. The strict policy-schedule replay artifact is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_onecard/`. The policy-schedule extrapolating ablation is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_holdlast_5cards/`. The state-conditioned policy profile is `outputs/state_policy_schedules_live_gpt55_sce_prior_update/`. The strict state-schedule replay artifact is `outputs/phase4_matched_twins_state_schedule_codex_replay_fred_onecard/`. The state-schedule extrapolating ablation is `outputs/phase4_matched_twins_state_schedule_codex_replay_fred_holdlast_5cards/`. All current replay artifacts use mapping schema v2 and `scoring_label: retrospective`; the first confirmatory v2 score is reserved for the next newly scoreable data month.
 
 ### Reproducibility notes
 
-The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full test run passed `149` tests.
+The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full local test run passed `152` tests.

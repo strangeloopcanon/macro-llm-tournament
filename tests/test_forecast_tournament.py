@@ -25,6 +25,7 @@ from macro_llm_tournament.agent_economy import (
 )
 from macro_llm_tournament.behavior_gate import (
     BEHAVIOR_SCENARIOS,
+    BEHAVIOR_CTC_HOLDOUT_SPLIT,
     BEHAVIOR_HOLDOUT_SPLIT,
     BEHAVIOR_PRESPECIFIED_SUFFIX,
     BEHAVIOR_SELECTION_SPLIT,
@@ -1008,7 +1009,12 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn("evaluation_split", scores.columns)
         self.assertEqual(
             set(scores[scores["target_family"] == "ALL"]["evaluation_split"]),
-            {BEHAVIOR_SELECTION_SPLIT, BEHAVIOR_HOLDOUT_SPLIT, BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT},
+            {
+                BEHAVIOR_SELECTION_SPLIT,
+                BEHAVIOR_HOLDOUT_SPLIT,
+                BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
+                BEHAVIOR_CTC_HOLDOUT_SPLIT,
+            },
         )
         self.assertIn("debt_saving", set(scores["target_family"]))
         self.assertIn("directional_debt_saving", set(scores["target_family"]))
@@ -1023,6 +1029,11 @@ class ForecastTournamentTests(unittest.TestCase):
             evaluation_split=BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT,
         )
         self.assertFalse(ui_holdout_targets.empty)
+        ctc_holdout_targets = behavior_targets_frame(
+            target_scope="aggregate",
+            evaluation_split=BEHAVIOR_CTC_HOLDOUT_SPLIT,
+        )
+        self.assertFalse(ctc_holdout_targets.empty)
         self.assertEqual(set(ui_holdout_targets["evaluation_split"]), {BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT})
         self.assertEqual(set(ui_holdout_targets["scenario_id"]), {
             "ui_onset_income_loss_style",

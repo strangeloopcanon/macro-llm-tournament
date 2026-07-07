@@ -278,6 +278,84 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
             self.assertTrue(decisions["behavior_policy_type_id"].astype(str).str.len().gt(0).any())
             self.assertIn("LLM-authored behavior-policy schedule", report)
 
+    def test_phase4_state_schedule_mode_uses_state_conditioned_policy_profile(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ecology_dir = root / "ecology"
+            state_policy_dir = root / "state_policy"
+            output_dir = root / "phase4"
+            _write_minimal_ecology_dir(ecology_dir)
+
+            state_result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.state_policy_schedules",
+                    "--mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--household-source",
+                    "persona_ecology_replay",
+                    "--persona-ecology-dir",
+                    str(ecology_dir),
+                    "--output-dir",
+                    str(state_policy_dir),
+                ],
+                cwd=REPO_ROOT,
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(state_result.returncode, 0, state_result.stderr)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.phase4_matched_twins",
+                    "--mode",
+                    "replay",
+                    "--belief-source",
+                    "persona_ecology_replay",
+                    "--persona-ecology-dir",
+                    str(ecology_dir),
+                    "--data-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--asof-start",
+                    "2025-12-15",
+                    "--asof-end",
+                    "2025-12-15",
+                    "--period-count",
+                    "2",
+                    "--behavior-policy-mode",
+                    "state_schedule",
+                    "--behavior-policy-state-profile-json",
+                    str(state_policy_dir / "state_behavior_policy_profile.json"),
+                    "--output-dir",
+                    str(output_dir),
+                ],
+                cwd=REPO_ROOT,
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+            decisions = pd.read_csv(output_dir / "phase4_household_decisions.csv")
+            report = (output_dir / "phase4_matched_twins_report.md").read_text(encoding="utf-8")
+
+            self.assertEqual(manifest["behavior_policy"]["mode"], "state_schedule")
+            self.assertEqual(manifest["behavior_policy"]["schema_version"], "demand_behavior_state_policy_schedule_v1")
+            self.assertIn("state_schedule", set(decisions["behavior_policy_mode"].astype(str)))
+            self.assertTrue(decisions["behavior_policy_type_id"].astype(str).str.len().gt(0).any())
+            self.assertIn("state-conditioned behavior-policy schedule", report)
+
 
 def _write_minimal_ecology_dir(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)

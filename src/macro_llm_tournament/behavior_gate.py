@@ -45,6 +45,7 @@ BEHAVIOR_BASELINE_TIE_TOLERANCE = 1e-9
 BEHAVIOR_SELECTION_SPLIT = "behavior_selection_v1"
 BEHAVIOR_HOLDOUT_SPLIT = "behavior_holdout_v1"
 BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT = "behavior_holdout_ui_v1"
+BEHAVIOR_CTC_HOLDOUT_SPLIT = "behavior_holdout_ctc_v1"
 BEHAVIOR_PRESPECIFIED_SUFFIX = "__liquidity_prior_50"
 BEHAVIOR_PRIMITIVE_FIELDS = [
     "perceived_job_loss_risk_pp",
@@ -216,6 +217,20 @@ BEHAVIOR_SCENARIOS: tuple[BehaviorScenario, ...] = (
         "income_loss",
         0.33,
         6,
+    ),
+    BehaviorScenario(
+        "ctc_2021_monthly_child_credit_style",
+        "Monthly child tax credit payment",
+        "date_free_holdout",
+        485.0,
+        3,
+        (
+            "A household with qualifying children receives a recurring monthly Child Tax Credit style payment. "
+            "The payment is expected for several months, is labeled for supporting children and household needs, "
+            "and arrives during a period of elevated prices. The response is the share of the payment used over "
+            "the current quarter."
+        ),
+        "external_ctc_holdout",
     ),
 )
 
@@ -828,6 +843,7 @@ def _base_action_from_merged(row: pd.Series, *, source: str, reason: str) -> dic
         "type_id": row["type_id"],
         "population_weight": float(row["population_weight_llm"]),
         "liquidity_group": row["liquidity_group_llm"],
+        "income_group": row.get("income_group_llm", row.get("income_group", "middle")),
         "transfer_amount": float(row["transfer_amount_llm"]),
         "income_loss_pct": float(row.get("income_loss_pct_llm", row.get("income_loss_pct", 0.0))),
         "confidence": 0.5,
@@ -1617,6 +1633,8 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
         scenario_id, source = keys
         low = group[group["liquidity_group"] == "low"]
         high = group[group["liquidity_group"] == "high"]
+        low_income = group[group["income_group"] == "low"]
+        high_income = group[group["income_group"] == "high"]
         aggregate_total = _weighted_average(group, "total_spending_share")
         aggregate_nondurable = _weighted_average(group, "nondurable_spending_share")
         aggregate_durable = _weighted_average(group, "durable_spending_share")
@@ -1626,6 +1644,10 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
         high_debt = _weighted_average(high, "debt_repayment_share")
         low_liquid_saving = _weighted_average(low, "liquid_saving_share")
         high_liquid_saving = _weighted_average(high, "liquid_saving_share")
+        low_income_debt = _weighted_average(low_income, "debt_repayment_share")
+        high_income_debt = _weighted_average(high_income, "debt_repayment_share")
+        low_income_saving = _weighted_average(low_income, "liquid_saving_share")
+        high_income_saving = _weighted_average(high_income, "liquid_saving_share")
         rows.append(
             {
                 "scenario_id": scenario_id,
@@ -1651,6 +1673,12 @@ def aggregate_behavior_actions(actions: pd.DataFrame) -> pd.DataFrame:
                 "low_liquidity_liquid_saving_share": low_liquid_saving,
                 "high_liquidity_liquid_saving_share": high_liquid_saving,
                 "high_minus_low_liquid_saving_share": high_liquid_saving - low_liquid_saving,
+                "low_income_debt_repayment_share": low_income_debt,
+                "high_income_debt_repayment_share": high_income_debt,
+                "low_minus_high_income_debt_repayment_share": low_income_debt - high_income_debt,
+                "low_income_liquid_saving_share": low_income_saving,
+                "high_income_liquid_saving_share": high_income_saving,
+                "high_minus_low_income_liquid_saving_share": high_income_saving - low_income_saving,
             }
         )
     return pd.DataFrame(rows)
@@ -1929,6 +1957,7 @@ def _infer_behavior_evaluation_split(frame: pd.DataFrame) -> np.ndarray:
     family = frame["target_family"].fillna("").astype(str)
     inferred = np.full(frame.shape[0], BEHAVIOR_SELECTION_SPLIT, dtype=object)
     inferred[family.str.startswith("holdout_ui_").to_numpy()] = BEHAVIOR_UI_EXHAUSTION_HOLDOUT_SPLIT
+    inferred[family.str.startswith("holdout_ctc").to_numpy()] = BEHAVIOR_CTC_HOLDOUT_SPLIT
     inferred[family.str.startswith("holdout_lottery").to_numpy()] = BEHAVIOR_HOLDOUT_SPLIT
     other_holdout = family.str.startswith("holdout_").to_numpy() & (inferred == BEHAVIOR_SELECTION_SPLIT)
     inferred[other_holdout] = BEHAVIOR_HOLDOUT_SPLIT
@@ -2175,6 +2204,7 @@ def _behavior_action_row(scenario: BehaviorScenario, type_cell: pd.Series, respo
         "type_id": str(type_cell["type_id"]),
         "population_weight": float(type_cell["population_weight"]),
         "liquidity_group": _liquidity_group(type_cell),
+        "income_group": _income_group(type_cell),
         "transfer_amount": float(scenario.transfer_amount),
         "income_loss_pct": float(scenario.income_loss_pct),
         "total_spending_share": float(response["total_spending_share"]),
@@ -2185,6 +2215,18 @@ def _behavior_action_row(scenario: BehaviorScenario, type_cell: pd.Series, respo
         "confidence": float(response.get("confidence", 0.5)),
         "reason": str(response.get("reason", ""))[:300],
     }
+
+
+def _income_group(type_cell: pd.Series) -> str:
+    explicit = str(type_cell.get("income_group", "")).strip().lower()
+    if explicit in {"low", "middle", "high"}:
+        return explicit
+    annual_income = float(type_cell.get("annual_income", 0.0))
+    if annual_income < 80000.0:
+        return "low"
+    if annual_income >= 160000.0:
+        return "high"
+    return "middle"
 
 
 def _liquidity_rule_response(scenario: BehaviorScenario, type_cell: pd.Series) -> dict[str, Any]:

@@ -19,6 +19,7 @@ from .demand_economy import (
     behavior_policy_manifest,
     build_fixture_demand_households,
     load_behavior_policy_profile,
+    load_state_behavior_policy_profile,
     normalize_demand_households,
     run_demand_economy,
 )
@@ -86,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feedback-mode", choices=("closed_loop", "none"), default="closed_loop")
     parser.add_argument("--behavior-policy-mode", choices=BEHAVIOR_POLICY_MODES, default="fixed_kernel")
     parser.add_argument("--behavior-policy-raw-records-json", default=None)
+    parser.add_argument("--behavior-policy-state-profile-json", default=None)
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--output-dir", default=None)
@@ -123,7 +125,7 @@ def main() -> int:
 
         ecology_bundle = load_persona_ecology_bundle(args) if args.belief_source == "persona_ecology_replay" else None
         households = load_phase4_households(args, ecology_bundle=ecology_bundle)
-        behavior_policy_profile = load_behavior_policy_profile(Path(args.behavior_policy_raw_records_json)) if args.behavior_policy_mode == "schedule" else None
+        behavior_policy_profile = load_phase4_behavior_policy_profile(args)
         period_count = max(int(args.period_count), len(cards) + 1, 2)
         cache_dir = output_dir / "fresh_phase4_matched_twins_cache" if args.fresh_cache else WORK_ROOT / "phase4_matched_twins_cache"
         scenarios = [DEFAULT_SCENARIO]
@@ -241,6 +243,11 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--behavior-policy-raw-records-json is required when --behavior-policy-mode schedule")
         if not Path(args.behavior_policy_raw_records_json).exists():
             raise ValueError(f"--behavior-policy-raw-records-json does not exist: {args.behavior_policy_raw_records_json}")
+    if args.behavior_policy_mode == "state_schedule":
+        if not args.behavior_policy_state_profile_json:
+            raise ValueError("--behavior-policy-state-profile-json is required when --behavior-policy-mode state_schedule")
+        if not Path(args.behavior_policy_state_profile_json).exists():
+            raise ValueError(f"--behavior-policy-state-profile-json does not exist: {args.behavior_policy_state_profile_json}")
     if args.belief_source == "persona_ecology_replay":
         if not args.persona_ecology_dir:
             raise ValueError("--persona-ecology-dir is required with --belief-source persona_ecology_replay")
@@ -251,6 +258,14 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--household-csv is required when --household-source csv")
         if not Path(args.household_csv).exists():
             raise ValueError(f"--household-csv does not exist: {args.household_csv}")
+
+
+def load_phase4_behavior_policy_profile(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.behavior_policy_mode == "schedule":
+        return load_behavior_policy_profile(Path(args.behavior_policy_raw_records_json))
+    if args.behavior_policy_mode == "state_schedule":
+        return load_state_behavior_policy_profile(Path(args.behavior_policy_state_profile_json))
+    return None
 
 
 def load_phase4_households(args: argparse.Namespace, *, ecology_bundle: dict[str, Any] | None) -> pd.DataFrame:
@@ -993,6 +1008,14 @@ def phase4_behavior_policy_description(manifest: dict[str, Any]) -> str:
             "income-risk response functions upstream; this runner only interpolates those functions against each "
             "household state, enforces budgets, and aggregates. The matched-twin comparison therefore isolates the "
             "belief-updater channel while holding the behavior executor fixed."
+        )
+    if policy.get("mode") == "state_schedule":
+        return (
+            "Both twins use the same LLM-authored state-conditioned behavior-policy schedule. The model supplied "
+            "bounded policy functions over household balance sheets and belief gaps upstream; this runner matches "
+            "each respondent-derived household to the nearest policy profile, interpolates those functions, enforces "
+            "budgets, and aggregates. The matched-twin comparison therefore tests whether prior-conditioned LLM belief "
+            "updates add value once behavior is executed through the most natural policy-function bridge currently in the repo."
         )
     return (
         "Both twins use the fixed deterministic demand kernel. This is the older behavior layer and remains available "
