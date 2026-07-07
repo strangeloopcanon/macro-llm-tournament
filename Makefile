@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture macro-playground-fixture phase4-matched-twins-fixture macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -181,6 +181,17 @@ macro-playground-fixture:
 		--mode fixture \
 		--max-live-calls 0 \
 		--output-dir outputs/macro_playground_fixture
+
+phase4-matched-twins-fixture:
+	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
+		--mode fixture \
+		--data-mode fixture \
+		--max-live-calls 0 \
+		--household-source fixture \
+		--household-count 24 \
+		--period-count 12 \
+		--feedback-mode closed_loop \
+		--output-dir outputs/phase4_matched_twins_fixture
 
 macro-performance-fixture: demand-economy-fixture demand-vintage-oos-fixture
 	PYTHONPATH=src python3 -m macro_llm_tournament.macro_performance_gate \

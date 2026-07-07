@@ -23,7 +23,7 @@ That is not the original maximal claim, but it is a real result. It says where L
 | Can profile-only LLM personas reproduce real SCE household belief heterogeneity? | No. | In a 500-respondent December 2024 SCE run, the evidence verdict is `null_gradient_failure`; median within-variance ratio is `0.0129`; max weighted KS is `0.5475`. |
 | Can richer backstory prompts fix that failure? | No. | In the November 2024 validation campaign, both GPT-5.5 and GPT-5.4 receive `backstory_caricature`; Arm 3 is skipped by design. |
 | Can prior-conditioned agents update beliefs? | Yes, modestly. | On repeated October-November 2024 SCE respondents, GPT-5.5 clears the locked prior-update gate: update correlation `0.3578`, direction accuracy `0.5769`, amplitude ratio `0.3234`, and RMSE improvement versus persistence `0.0437`. |
-| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, but the behavior and persona layers do not yet clear the empirical gates needed for the full claim. |
+| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and the Phase 4 matched-twin fixture is now wired, but the live empirical comparison has not run. |
 
 ## Finding 1: The Aggregate Belief Engine Works
 
@@ -171,7 +171,7 @@ The right economy architecture now looks different from the early "personas simu
 4. Treat behavior mechanisms as separately validated modules, not as free-form LLM allocation guesses.
 5. Compare the resulting economy to an adaptive-expectations twin: the same demand economy with LLM belief updates swapped out for a standard adaptive baseline.
 
-That final comparison is still future work. It should be run only after the prior-update mechanism is locked and tested once on a fresh panel holdout.
+That final comparison now has a fixture harness. `outputs/phase4_matched_twins_fixture/` locks the output-to-proxy mapping, runs the LLM-belief and adaptive-expectations twins from the same initial state, preserves accounting, and emits comparable post-cutoff proxy scores. Its verdict is `phase4_matched_twin_fixture_ready`, with max accounting residual `2.91e-11` and zero live calls. This proves the comparison is runnable and auditable, not that the LLM economy is empirically better.
 
 ## What We Can Claim Now
 
@@ -195,10 +195,10 @@ The full claim remains open:
 
 The next phase should not chase richer personas. It should build from the result that survived.
 
-1. Lock a prior-conditioned belief-updating mechanism.
+1. Lock the real prior-conditioned belief-updating payload and replay-cache contract.
 2. Test it once on a fresh SCE or Michigan panel holdout.
-3. Feed the locked updater into the demand economy.
-4. Compare the resulting economy against an adaptive-expectations twin.
+3. Feed the locked updater into the Phase 4 matched-twin runner.
+4. Score the LLM-updater economy against the adaptive-expectations twin using the pre-written output mapping.
 5. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
 
 Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. The behavior route needs new mechanisms or new data before another holdout is spent.
@@ -227,6 +227,10 @@ The real persona gates use public SCE microdata. Inflation is the SCE density-me
 
 The December 2024 profile-only wave is spent. The November 2024 backstory validation wave is spent. The sealed June 2025 priors-plus-backstory confirmation was not spent because the pre-registered Arm 1 condition failed.
 
+### Phase 4 matched twins
+
+The Phase 4 fixture compares two versions of the same deterministic demand economy: an LLM-belief fixture and an adaptive-expectations twin. It writes the locked proxy mapping, cards, targets, household states, twin paths, accounting, forecasts, joined errors, scores, manifest, and `phase4_matched_twins_report.md`. Live/replay mode is blocked until real prior-state household inputs and a locked replay cache are supplied.
+
 ### Reproducibility notes
 
-The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The latest full test run passed `136` tests.
+The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The latest full test run passed `139` tests.

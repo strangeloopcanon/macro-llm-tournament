@@ -134,6 +134,14 @@ make postcutoff-behavior-fixture
 
 This exercises the contamination-clean behavior runner without using live data or LLM calls.
 
+Run the zero-cost Phase 4 matched-twin economy fixture:
+
+```bash
+make phase4-matched-twins-fixture
+```
+
+This locks the output-to-proxy mapping, runs the same accounting-constrained demand economy with an LLM-belief fixture and an adaptive-expectations twin, and writes `outputs/phase4_matched_twins_fixture/` with the mapping hash, proxy cards, twin paths, accounting, proxy forecasts, scores, manifest, and `phase4_matched_twins_report.md`. Fixture mode is a readiness gate only: live/replay mode is blocked until real prior-state household inputs and a locked replay cache are supplied.
+
 Run the zero-cost forecast audit fixture:
 
 ```bash
