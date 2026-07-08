@@ -18,6 +18,13 @@ from macro_llm_tournament.phase4_matched_twins import (
     normalized_mapping_payload,
     phase4_scoring_targets,
 )
+from macro_llm_tournament.phase4_v4_diagnostics import (
+    OUTPUT_FILES,
+    RunSpec,
+    build_manifest,
+    scaled_error_contribution,
+    wave_design_condition_number,
+)
 from macro_llm_tournament.empirical_bridge import BRIDGE_SPEC_VERSION, BridgeInput, transform_belief_change
 from macro_llm_tournament.demand_economy import _structural_consumption_policy
 
@@ -91,6 +98,116 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
         self.assertAlmostEqual(row["raw_last_signal"], 3.6)
         self.assertEqual(row["phase4_target_transform"], "diff")
         self.assertGreaterEqual(row["history_scale"], 0.25)
+
+    def test_phase4_v4_diagnostics_decomposes_scaled_error_by_target(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pd.DataFrame(
+                [
+                    {
+                        "target_name": "pce_mom_pct",
+                        "source": "adaptive",
+                        "error": 0.10,
+                        "scaled_error": 0.20,
+                        "history_scale": 0.50,
+                    },
+                    {
+                        "target_name": "pce_mom_pct",
+                        "source": "llm_updater",
+                        "error": 0.20,
+                        "scaled_error": 0.40,
+                        "history_scale": 0.50,
+                    },
+                    {
+                        "target_name": "personal_saving_rate_pct",
+                        "source": "adaptive",
+                        "error": 0.30,
+                        "scaled_error": 0.60,
+                        "history_scale": 0.50,
+                    },
+                    {
+                        "target_name": "personal_saving_rate_pct",
+                        "source": "llm_updater",
+                        "error": 0.10,
+                        "scaled_error": 0.20,
+                        "history_scale": 0.50,
+                    },
+                ]
+            ).to_csv(root / "phase4_proxy_joined_errors.csv", index=False)
+
+            contribution = scaled_error_contribution(RunSpec("fixture", root)).set_index("target_name")
+
+            self.assertGreater(contribution.loc["pce_mom_pct", "delta_scaled_sse_llm_minus_adaptive"], 0.0)
+            self.assertLess(contribution.loc["personal_saving_rate_pct", "delta_scaled_sse_llm_minus_adaptive"], 0.0)
+            self.assertAlmostEqual(float(contribution["abs_delta_scaled_sse_share"].sum()), 1.0)
+
+    def test_phase4_v4_diagnostics_reports_wave_design_condition_number(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "wave_mean_actual_expected_inflation_1y": 3.0,
+                    "wave_mean_actual_expected_real_income_growth": 1.0,
+                    "wave_mean_sce_question_unemployment_higher_prob": 35.0,
+                },
+                {
+                    "wave_mean_actual_expected_inflation_1y": 3.2,
+                    "wave_mean_actual_expected_real_income_growth": 1.2,
+                    "wave_mean_sce_question_unemployment_higher_prob": 36.0,
+                },
+                {
+                    "wave_mean_actual_expected_inflation_1y": 3.4,
+                    "wave_mean_actual_expected_real_income_growth": 1.1,
+                    "wave_mean_sce_question_unemployment_higher_prob": 34.5,
+                },
+            ]
+        )
+
+        self.assertGreater(wave_design_condition_number(frame), 1.0)
+
+    def test_phase4_v4_diagnostics_manifest_hashes_inputs_and_outputs(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            strict_dir = root / "strict"
+            holdlast_dir = root / "holdlast"
+            output_dir = root / "diagnostics"
+            strict_dir.mkdir()
+            holdlast_dir.mkdir()
+            output_dir.mkdir()
+            for directory in [strict_dir, holdlast_dir]:
+                (directory / "manifest.json").write_text("{}", encoding="utf-8")
+                (directory / "phase4_proxy_joined_errors.csv").write_text("source,target_name,error,scaled_error\n", encoding="utf-8")
+            bridge_json = root / "bridge.json"
+            panel_csv = root / "panel.csv"
+            bridge_json.write_text("{}", encoding="utf-8")
+            panel_csv.write_text("spending_wave\n", encoding="utf-8")
+            for name in OUTPUT_FILES:
+                (output_dir / name).write_text(name, encoding="utf-8")
+
+            args = type(
+                "Args",
+                (),
+                {
+                    "strict_dir": strict_dir,
+                    "holdlast_dir": holdlast_dir,
+                    "bridge_json": bridge_json,
+                    "panel_csv": panel_csv,
+                },
+            )()
+
+            manifest = build_manifest(
+                args,
+                output_dir,
+                {
+                    "schema_version": "empirical_bridge_v4",
+                    "bridge_spec_version": "empirical_bridge_v4",
+                    "status": "accepted",
+                    "canonical_payload_sha256": "abc123",
+                },
+            )
+
+            self.assertEqual(manifest["verdict"], "phase4_v4_diagnostics_complete")
+            self.assertEqual(set(manifest["outputs"]), set(OUTPUT_FILES))
+            self.assertIn("sha256", manifest["inputs"]["strict_joined_errors"])
 
     def test_empirical_bridge_constant_beliefs_are_stationary(self):
         profile = _accepted_bridge_profile(

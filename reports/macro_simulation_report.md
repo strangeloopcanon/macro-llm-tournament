@@ -317,9 +317,13 @@ This is the strongest Phase 4 result so far. Relative to the prior state-schedul
 
 The right interpretation is precise: **the measured belief-to-spending bridge fixes most of the simulated economy's over-contraction problem, but the LLM-updater economy still has not beaten the adaptive-expectations twin on the locked scaled score.**
 
+The remaining v4 gap is now decomposed in `outputs/phase4_v4_diagnostics/`. It is not a scoring mystery. In the strict run, the LLM-updater path wins on unscaled RMSE (`0.3635` versus adaptive `0.3751`), but loses on scaled RMSE because the locked metric gives more weight to misses in low-volatility consumption targets. The two biggest strict scaled-SSE penalties are real PCE growth (`+0.3038`) and PCE growth (`+0.2463`); the saving-rate improvement helps (`-0.1805`) but does not offset them. In the five-card hold-last diagnostic, the result is almost a tie for the same reason: a single real-PCE scaled penalty (`+0.6803`) is mostly offset by saving-rate and retail-sales improvements.
+
+The v4 validation instability is also diagnosed. The real-income coefficient blow-up is not a parser bug. It comes from fitting the between-wave coefficient on only three validation spending waves, where expected real-income wave means move from `0.1593` to `0.2945` while real spending-growth means move from `0.4274` to `1.0853`. The validation wave design has condition number `611.5`, and the validation wave-mean correlation between expected real income and real spending growth is effectively `1.0`. That makes the validation coefficient a weak-identification warning, not a stable macro mechanism.
+
 ## What We Can Claim Now
 
-The evidence supports three positive claims:
+The evidence supports six positive claims:
 
 1. **Frontier LLMs contain audited macro belief signal.** GPT-5.5 and GPT-5.4 beat strong empirical baselines on a hidden-target vintage macro tournament, and live recall probes do not find realized-value recall.
 2. **Raw GPT-5.5 contains behavior signal in one out-of-domain windfall family.** It generalizes where tuned rules break, but that result does not transfer to predictable income-loss dynamics.
@@ -328,7 +332,7 @@ The evidence supports three positive claims:
 5. **State-conditioned schedules improve the macro bridge.** They do not win, but they reduce the LLM-updater Phase 4 error relative to the generic schedule executor while preserving accounting.
 6. **A real-data belief-to-spending bridge nearly closes Phase 4.** Empirical bridge v4 passes its locked coefficient/chart/liquidity gates, fixes most of the over-contraction, and brings the LLM-updater path close to the adaptive twin.
 
-The evidence also supports three negative claims:
+The evidence also supports eight negative claims:
 
 1. **Profile-only personas fail on real SCE microdata.**
 2. **Backstory elicitation fails by caricature rather than rescuing heterogeneity.**
@@ -347,12 +351,11 @@ The full claim remains open:
 
 The next phase should not chase richer personas. It should build from the results that survived: prior-conditioned belief updating, schedule-based behavior elicitation, and the real-data spending bridge.
 
-1. Diagnose the remaining v4 Phase 4 gap, especially the target scaling behind `rmse_scaled`: strict v4 has lower unscaled RMSE for the LLM path (`0.3635` vs adaptive `0.3751`) but worse scaled RMSE (`0.6311` vs `0.5692`).
-2. Investigate the unstable validation-wave real-income coefficient before treating v4 as confirmatory. The fit coefficient is `+0.4266`; the validation refit is `+4.2744`, which is too large to ignore.
-3. Build a longer, same-horizon prior-update panel before spending new Phase 4 score surface. The current hold-last run reuses only the banked two-period SCE belief update.
-4. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
-5. Keep the CTC, lottery, UI, and reserved spending-windfall behavior families frozen for mechanism evaluation. Any further behavior promotion needs a new never-scored family.
-6. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
+1. Do not refit the v4 bridge blindly. The next bridge should be pre-registered as a stabilized estimator: longer same-horizon panel if available, or explicit shrinkage/ridge/literature-prior bounds for weak between-wave variation.
+2. Build a longer, same-horizon prior-update panel before spending new Phase 4 score surface. The current hold-last run reuses only the banked two-period SCE belief update.
+3. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
+4. Keep the CTC, lottery, UI, and reserved spending-windfall behavior families frozen for mechanism evaluation. Any further behavior promotion needs a new never-scored family.
+5. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
 
 Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. Point-behavior elicitation is closed; the schedule interface is the live route.
 
@@ -389,4 +392,4 @@ The Phase 4 replay adapter consumes persona-ecology predictions rather than raw 
 
 ### Reproducibility notes
 
-The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full local test run passed `158` tests. The data-asset event stream (downloads, derivations, run manifests, all timestamped) is `data_provenance/data_events.jsonl`.
+The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The Phase 4 v4 diagnostic artifacts are under `outputs/phase4_v4_diagnostics/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full local test run passed `161` tests. The data-asset event stream (downloads, derivations, run manifests, all timestamped) is `data_provenance/data_events.jsonl`.

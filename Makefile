@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -306,6 +306,10 @@ phase4-prior-update-empirical-bridge-v4-holdlast-replay:
 		--scoring-label retrospective \
 		--max-live-calls 0 \
 		--output-dir outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_holdlast_5cards
+
+phase4-v4-diagnostics:
+	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_v4_diagnostics \
+		--output-dir outputs/phase4_v4_diagnostics
 
 macro-performance-fixture: demand-economy-fixture demand-vintage-oos-fixture
 	PYTHONPATH=src python3 -m macro_llm_tournament.macro_performance_gate \

@@ -41,6 +41,7 @@ macro-llm-postcutoff-behavior-gate = "macro_llm_tournament.postcutoff_behavior_g
 macro-llm-forecast-audit = "macro_llm_tournament.forecast_audit:main"
 macro-llm-prepare-spending-survey = "macro_llm_tournament.prepare_spending_survey:main"
 macro-llm-empirical-bridge = "macro_llm_tournament.empirical_bridge:main"
+macro-llm-phase4-v4-diagnostics = "macro_llm_tournament.phase4_v4_diagnostics:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
