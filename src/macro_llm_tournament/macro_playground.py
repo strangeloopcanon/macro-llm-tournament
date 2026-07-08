@@ -383,6 +383,7 @@ def normalize_household_belief_payload(household_states: list[dict[str, Any]], d
         "expected_inflation_next_period",
         "expected_income_growth_next_period",
         "perceived_job_loss_probability",
+        "expected_unemployment_higher_probability_next_period",
         "confidence_index",
         "precautionary_saving_score",
         "attention_weight_prices",

@@ -136,6 +136,12 @@ from macro_llm_tournament.prepare_sce_microdata import (
     convert_sce_microdata,
     normalize_sce_raw_frame,
 )
+from macro_llm_tournament.prepare_spending_survey import (
+    join_spending_to_core_panel,
+    normalize_spending_microdata,
+    verify_reported_spending_chart,
+)
+from macro_llm_tournament.empirical_bridge import constraint_report, weighted_quantile
 import macro_llm_tournament.persona_belief_panel as persona_belief_panel_module
 from macro_llm_tournament.persona_ecology import (
     EcologyCard,
@@ -1490,6 +1496,10 @@ class ForecastTournamentTests(unittest.TestCase):
         self.assertIn("eip_2020_high_gt_low_saving_share", set(scored["target_id"]))
         self.assertTrue(cell_scored["type_id"].astype(str).str.len().gt(0).all())
         self.assertIn("unscored_gap", set(catalog["source_status"]))
+        reserved = catalog[catalog["target_family"].eq("behavior_holdout_spending_windfall_v1")]
+        self.assertFalse(reserved.empty)
+        self.assertFalse(reserved["scored"].any())
+        self.assertTrue(set(reserved["target_id"]).isdisjoint(set(scored["target_id"])))
         self.assertIn("response_variable", scored.columns)
 
     def test_cell_behavior_target_scoring_rewards_inside_interval(self):
@@ -2759,6 +2769,98 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertEqual(manifest["target_fields"], list(SCE_REAL_TARGET_FIELDS))
             self.assertEqual(str(converted.iloc[1]["gender"]), "female")
             self.assertAlmostEqual(float(converted.iloc[1]["actual_expected_real_income_growth"]), -2.0)
+
+    def test_spending_survey_converter_maps_questions_and_join_lag(self):
+        raw_spending = pd.DataFrame(
+            [
+                {"userid": 111, "date": 202404, "qsp1": 1, "qsp2": 5, **{f"qsp7dens_{i}": (100 if i == 4 else 0) for i in range(1, 11)}, "qsp12n": 2, "qsp13new": 1},
+                {"userid": 222, "date": 202404, "qsp1": 2, "qsp2": 3, **{f"qsp7dens_{i}": (100 if i == 7 else 0) for i in range(1, 11)}, "qsp12n": 3, "qsp13new": 2},
+            ]
+        )
+        spending = normalize_spending_microdata(raw_spending)
+        self.assertEqual(spending.loc[spending["userid"].eq("111"), "reported_total_spending_growth_pct"].iloc[0], 5)
+        self.assertEqual(spending.loc[spending["userid"].eq("222"), "reported_total_spending_growth_pct"].iloc[0], -3)
+        self.assertEqual(spending.loc[spending["userid"].eq("111"), "windfall_gain_spend_donate_share"].iloc[0], 100)
+
+        core = pd.DataFrame(
+            [
+                {
+                    "userid": "111",
+                    "core_wave": 202402,
+                    "core_wave_date": pd.Timestamp("2024-02-01"),
+                    "weight": 2.0,
+                    "income_group": "middle",
+                    "liquid_wealth_group": "low",
+                    "age_group": "35_54",
+                    "actual_expected_inflation_1y": 3.0,
+                    "actual_expected_real_income_growth": 1.0,
+                    "sce_question_unemployment_higher_prob": 40.0,
+                },
+                {
+                    "userid": "222",
+                    "core_wave": 202312,
+                    "core_wave_date": pd.Timestamp("2023-12-01"),
+                    "weight": 1.0,
+                    "income_group": "low",
+                    "liquid_wealth_group": "high",
+                    "age_group": "55_plus",
+                    "actual_expected_inflation_1y": 2.5,
+                    "actual_expected_real_income_growth": 0.5,
+                    "sce_question_unemployment_higher_prob": 30.0,
+                },
+            ]
+        )
+        panel, report = join_spending_to_core_panel(spending, core)
+        self.assertEqual(panel.shape[0], 1)
+        self.assertEqual(str(panel.iloc[0]["userid"]), "111")
+        self.assertLessEqual(int(panel.iloc[0]["belief_lag_days"]), 92)
+        self.assertEqual(report["matched_rows"], 1)
+
+    def test_spending_chart_reproduction_uses_weighted_grouped_reported_median(self):
+        spending = pd.DataFrame(
+            {
+                "userid": ["a", "b", "c"],
+                "spending_wave": [202404, 202404, 202404],
+                "reported_total_spending_growth_pct": [1.0, 2.0, 3.0],
+            }
+        )
+        core = pd.DataFrame({"userid": ["a", "b", "c"], "core_wave": [202404, 202404, 202404], "weight": [1.0, 1.0, 2.0]})
+        chart = pd.DataFrame(
+            [
+                {
+                    "date": 202404,
+                    "value": 2.5,
+                    "first_level": "EXPERIENCES",
+                    "second_level": "Change in spending",
+                    "third_level": "",
+                    "chart_title": "Change in Spending",
+                    "subgroup": "Overview",
+                    "detail": "",
+                }
+            ]
+        )
+        check = verify_reported_spending_chart(spending, core, chart, max_abs_error_pp=0.1)
+        self.assertTrue(check.passed)
+
+    def test_empirical_bridge_winsor_bounds_are_fit_only_and_constraints_fail_closed(self):
+        fit_values = pd.Series([0.0, 1.0, 2.0, 100.0])
+        validation_values = pd.Series([-999.0, 999.0])
+        fit_weights = pd.Series([1.0, 1.0, 1.0, 1.0])
+        lower = weighted_quantile(fit_values, fit_weights, 0.02)
+        upper = weighted_quantile(fit_values, fit_weights, 0.98)
+        self.assertGreater(lower, validation_values.min())
+        self.assertLess(upper, validation_values.max())
+
+        report = constraint_report(
+            {
+                "between_coefficients": {
+                    "actual_expected_inflation_1y": 0.31,
+                    "actual_expected_real_income_growth": 0.25,
+                    "sce_question_unemployment_higher_prob": -0.02,
+                }
+            }
+        )
+        self.assertFalse(report["passed"])
 
     def test_persona_variance_score_detects_flattened_within_group_spread(self):
         respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="2026-01-01")

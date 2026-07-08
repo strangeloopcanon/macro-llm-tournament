@@ -17,6 +17,7 @@ import pandas as pd
 from .agent_common import ACCOUNTING_TOLERANCE, OUTPUT_ROOT, WORK_ROOT, bounded_float, cache_key, markdown_table, round_or_none
 from .agent_types import build_household_type_cells
 from .behavior_ecology import POLICY_PROMPT_VERSION, normalize_policy_payload
+from .empirical_bridge import BRIDGE_SPEC_VERSION, BridgeInput, transform_belief_change
 from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
 from .llm_common import LLMUnavailable
 
@@ -28,13 +29,14 @@ DEMAND_BEHAVIOR_POLICY_VERSION = "demand_behavior_policy_schedule_v1"
 DEMAND_STATE_BEHAVIOR_POLICY_VERSION = "demand_behavior_state_policy_schedule_v1"
 BELIEF_MODES = ("fixture", "replay", "live", "raw_replay")
 FEEDBACK_MODES = ("closed_loop", "none")
-BEHAVIOR_POLICY_MODES = ("fixed_kernel", "schedule", "state_schedule")
+BEHAVIOR_POLICY_MODES = ("fixed_kernel", "schedule", "state_schedule", "empirical_bridge")
 MODEL_VARIANTS = ("representative", "adaptive", "llm_belief", "naive_persona")
 LLM_VARIANTS = {"llm_belief", "naive_persona"}
 NEUTRAL_POLICY_RATE = 3.0
 INFLATION_TARGET = 2.0
 STEADY_EMPLOYMENT_RATE = 0.955
 DEFAULT_BEHAVIOR_POLICY_RAW_RECORDS = OUTPUT_ROOT / "behavior_ecology_gpt55_xhigh" / "ecology_raw_records.json"
+DEFAULT_EMPIRICAL_BRIDGE_JSON = WORK_ROOT / "empirical_bridge" / "empirical_bridge_v3.json"
 FULL_LAB_LLM_METRICS = {
     "baseline_no_shock_output_gap_rms",
     "belief_feedback_amplification_ratio",
@@ -516,6 +518,10 @@ def _load_belief_calibration_profile(path: Path) -> dict[str, Any]:
 def _behavior_policy_profile_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.behavior_policy_mode == "fixed_kernel":
         return None
+    if args.behavior_policy_mode == "empirical_bridge":
+        if not DEFAULT_EMPIRICAL_BRIDGE_JSON.exists():
+            raise SystemExit(f"Empirical bridge artifact does not exist: {DEFAULT_EMPIRICAL_BRIDGE_JSON}")
+        return load_empirical_bridge_profile(DEFAULT_EMPIRICAL_BRIDGE_JSON)
     if args.behavior_policy_mode == "state_schedule":
         if not args.behavior_policy_state_profile_json:
             raise SystemExit("--behavior-policy-state-profile-json is required when --behavior-policy-mode state_schedule")
@@ -599,9 +605,39 @@ def load_behavior_policy_profile(raw_records_path: Path) -> dict[str, Any]:
     }
 
 
+def load_empirical_bridge_profile(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Empirical bridge artifact must contain a JSON object")
+    if str(data.get("bridge_spec_version") or data.get("schema_version")) != BRIDGE_SPEC_VERSION:
+        raise ValueError(f"Unsupported empirical bridge schema: {data.get('schema_version')!r}")
+    if str(data.get("status")) != "accepted":
+        raise ValueError(f"Empirical bridge is fail-closed and not accepted: status={data.get('status')!r}")
+    out = dict(data)
+    out["profile_json"] = str(path)
+    out["profile_json_sha256"] = file_sha256(path)
+    return out
+
+
 def behavior_policy_manifest(profile: dict[str, Any] | None, *, mode: str) -> dict[str, Any]:
     if profile is None:
         return {"mode": mode, "schema_version": None}
+    if profile.get("bridge_spec_version") == BRIDGE_SPEC_VERSION or profile.get("schema_version") == BRIDGE_SPEC_VERSION:
+        return {
+            "mode": mode,
+            "schema_version": profile.get("schema_version"),
+            "bridge_spec_version": profile.get("bridge_spec_version"),
+            "profile_json": profile.get("profile_json"),
+            "profile_json_sha256": profile.get("profile_json_sha256"),
+            "empirical_bridge_sha256": profile.get("canonical_payload_sha256"),
+            "status": profile.get("status"),
+            "fit_waves": profile.get("fit_waves"),
+            "validation_waves": profile.get("validation_waves"),
+            "between_coefficients": profile.get("between_coefficients"),
+            "constraints": profile.get("constraints"),
+            "validation_gate": profile.get("validation_gate"),
+            "execution_rule": profile.get("transform_rule"),
+        }
     if profile.get("schema_version") == DEMAND_STATE_BEHAVIOR_POLICY_VERSION:
         return {
             "mode": mode,
@@ -805,6 +841,11 @@ def normalize_demand_households(frame: pd.DataFrame) -> pd.DataFrame:
     out["base_mpc"] = out["base_mpc"].clip(lower=0.02, upper=0.98)
     for column in ["attention_weight_prices", "attention_weight_jobs", "attention_weight_rates"]:
         out[column] = out[column].clip(lower=0.0, upper=1.0)
+    if "unemployment_higher_probability_1y" not in out:
+        out["unemployment_higher_probability_1y"] = out["baseline_job_loss_probability"] / 0.24
+    out["unemployment_higher_probability_1y"] = pd.to_numeric(out["unemployment_higher_probability_1y"], errors="coerce").fillna(
+        out["baseline_job_loss_probability"] / 0.24
+    ).clip(lower=0.0, upper=100.0)
     out["liquidity_group"] = out["liquidity_group"].astype(str).str.lower()
     out["income_group"] = out["income_group"].astype(str).str.lower()
     return out.sort_values("type_id").reset_index(drop=True)
@@ -1177,11 +1218,19 @@ def normalize_belief_payload(household_states: list[dict[str, Any]], data: dict[
             raise LLMUnavailable(f"Unknown demand economy household type_id: {type_id}")
         if type_id in by_type:
             raise LLMUnavailable(f"Duplicate demand economy household type_id: {type_id}")
+        perceived_job_loss = bounded_float(belief, "perceived_job_loss_probability", 0.0, 40.0)
+        raw_unemployment_higher = bounded_float(
+            belief,
+            "expected_unemployment_higher_probability_next_period",
+            0.0,
+            100.0,
+        ) if "expected_unemployment_higher_probability_next_period" in belief else float(np.clip(perceived_job_loss / 0.24, 0.0, 100.0))
         by_type[type_id] = {
             "type_id": type_id,
             "expected_inflation_next_period": bounded_float(belief, "expected_inflation_next_period", -5.0, 15.0),
             "expected_income_growth_next_period": bounded_float(belief, "expected_income_growth_next_period", -12.0, 12.0),
-            "perceived_job_loss_probability": bounded_float(belief, "perceived_job_loss_probability", 0.0, 40.0),
+            "perceived_job_loss_probability": perceived_job_loss,
+            "expected_unemployment_higher_probability_next_period": raw_unemployment_higher,
             "confidence_index": bounded_float(belief, "confidence_index", 0.0, 100.0),
             "precautionary_saving_score": bounded_float(belief, "precautionary_saving_score", 0.0, 10.0),
             "attention_weight_prices": bounded_float(belief, "attention_weight_prices", 0.0, 1.0),
@@ -1228,6 +1277,7 @@ def normalize_naive_persona_payload(household_states: list[dict[str, Any]], data
             "expected_inflation_next_period": float(state["inflation_expectation_1y"]),
             "expected_income_growth_next_period": float(state["income_growth_expectation_1y"]),
             "perceived_job_loss_probability": float(state["job_loss_probability"]),
+            "expected_unemployment_higher_probability_next_period": float(state.get("unemployment_higher_probability_1y", float(state["job_loss_probability"]) / 0.24)),
             "confidence_index": 100.0 * float(direct[type_id]["confidence"]),
             "precautionary_saving_score": float(np.clip(5.0 + direct[type_id]["desired_saving_change_pct"] / 5.0, 0.0, 10.0)),
             "attention_weight_prices": 0.5,
@@ -1805,9 +1855,11 @@ def _initial_household_states(households: pd.DataFrame, *, source: str, variant:
                 "rate_sensitivity": float(row["rate_sensitivity"]),
                 "income_sensitivity": float(row["income_sensitivity"]),
                 "precautionary_sensitivity": float(row["precautionary_sensitivity"]),
-                "baseline_job_loss_probability": float(row["baseline_job_loss_probability"]),
-                "job_loss_probability": float(row["baseline_job_loss_probability"]),
-                "target_buffer_months": float(row["target_buffer_months"]),
+            "baseline_job_loss_probability": float(row["baseline_job_loss_probability"]),
+            "job_loss_probability": float(row["baseline_job_loss_probability"]),
+            "baseline_unemployment_higher_probability": float(row.get("unemployment_higher_probability_1y", float(row["baseline_job_loss_probability"]) / 0.24)),
+            "unemployment_higher_probability_1y": float(row.get("unemployment_higher_probability_1y", float(row["baseline_job_loss_probability"]) / 0.24)),
+            "target_buffer_months": float(row["target_buffer_months"]),
                 "inflation_expectation_1y": float(row["inflation_expectation_1y"]),
                 "income_growth_expectation_1y": float(row["income_growth_expectation_1y"]),
                 "confidence_index": float(row["confidence_index"]),
@@ -1902,6 +1954,8 @@ def _realize_household_period(
             behavior_policy_mode = "direct_action"
             behavior_policy_type_id = ""
             behavior_policy_consumption_drag = 0.0
+            empirical_bridge_annual_growth_deviation_pp = 0.0
+            empirical_bridge_clipped_inputs_json = "{}"
         else:
             policy = _structural_consumption_policy(
                 static,
@@ -1923,6 +1977,8 @@ def _realize_household_period(
             behavior_policy_mode = str(policy["behavior_policy_mode"])
             behavior_policy_type_id = str(policy["behavior_policy_type_id"])
             behavior_policy_consumption_drag = float(policy["behavior_policy_consumption_drag"])
+            empirical_bridge_annual_growth_deviation_pp = float(policy.get("empirical_bridge_annual_growth_deviation_pp", 0.0))
+            empirical_bridge_clipped_inputs_json = json.dumps(policy.get("empirical_bridge_clipped_inputs", {}), sort_keys=True)
         debt_before = float(state["debt"])
         floor_consumption = min(cash_available, float(static["subsistence_floor_share"]) * baseline_consumption)
         max_debt_repayment = max(0.0, min(debt_before, cash_available - floor_consumption))
@@ -1988,6 +2044,7 @@ def _realize_household_period(
                 "expected_inflation_next_period": float(belief["expected_inflation_next_period"]),
                 "expected_income_growth_next_period": float(belief["expected_income_growth_next_period"]),
                 "job_loss_probability": float(belief["perceived_job_loss_probability"]),
+                "unemployment_higher_probability": float(belief.get("expected_unemployment_higher_probability_next_period", float(belief["perceived_job_loss_probability"]) / 0.24)),
                 "confidence_index": float(belief["confidence_index"]),
                 "precautionary_saving_score": float(belief["precautionary_saving_score"]),
                 "real_rate": real_rate,
@@ -1995,6 +2052,8 @@ def _realize_household_period(
                 "behavior_policy_mode": behavior_policy_mode,
                 "behavior_policy_type_id": behavior_policy_type_id,
                 "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
+                "empirical_bridge_annual_growth_deviation_pp": empirical_bridge_annual_growth_deviation_pp,
+                "empirical_bridge_clipped_inputs_json": empirical_bridge_clipped_inputs_json,
                 "budget_residual": budget_residual,
                 "reason_codes_json": json.dumps(belief["reason_codes"], sort_keys=True),
             }
@@ -2075,6 +2134,9 @@ def _structural_consumption_policy(
     expected_income_effect = income_expectation_gap * baseline_consumption * 0.012
     drawdown = 0.0
     buffer_relief_support = 0.030 * max(0.0, float(state.get("transfer_buffer_relief", 0.0)))
+    empirical_bridge_annual_growth_deviation_pp = 0.0
+    empirical_bridge_consumption_delta = 0.0
+    empirical_bridge_clipped_inputs: dict[str, bool] = {}
     state_behavior_match = (
         _match_state_behavior_policy(static, state, behavior_policy_profile) if behavior_policy_profile is not None else None
     )
@@ -2083,7 +2145,46 @@ def _structural_consumption_policy(
         if behavior_policy_profile is not None and state_behavior_match is None
         else None
     )
-    if state_behavior_match is not None and representative_mpc is None:
+    if (
+        behavior_policy_profile is not None
+        and behavior_policy_profile.get("bridge_spec_version") == BRIDGE_SPEC_VERSION
+        and representative_mpc is None
+    ):
+        transfer_allocation = _transfer_windfall_allocation(
+            static,
+            state,
+            belief,
+            target_buffer_months=target_buffer,
+            desired_saving_rate=desired_saving_rate,
+            real_rate=real_rate,
+            representative_mpc=representative_mpc,
+        )
+        previous_input = BridgeInput(
+            inflation_expectation_1y=float(state["inflation_expectation_1y"]),
+            expected_real_income_growth=float(state["income_growth_expectation_1y"]),
+            unemployment_higher_prob=float(state.get("unemployment_higher_probability_1y", float(state["job_loss_probability"]) / 0.24)),
+            income_group=str(state["income_group"]),
+            liquid_wealth_group=str(state["liquidity_group"]),
+        )
+        current_input = BridgeInput(
+            inflation_expectation_1y=expected_inflation,
+            expected_real_income_growth=expected_income,
+            unemployment_higher_prob=float(belief.get("expected_unemployment_higher_probability_next_period", job_loss / 0.24)),
+            income_group=str(state["income_group"]),
+            liquid_wealth_group=str(state["liquidity_group"]),
+        )
+        bridge_result = transform_belief_change(behavior_policy_profile, previous_input, current_input)
+        empirical_bridge_annual_growth_deviation_pp = float(bridge_result.annual_growth_deviation_pp)
+        empirical_bridge_consumption_delta = baseline_consumption * empirical_bridge_annual_growth_deviation_pp / 100.0
+        empirical_bridge_clipped_inputs = bridge_result.clipped
+        behavior_policy_mode = "empirical_bridge"
+        behavior_policy_type_id = ""
+        behavior_policy_consumption_drag = 0.0
+        buffer_drag = 0.0
+        precaution_drag = 0.0
+        rate_drag = 0.0
+        expected_income_effect = 0.0
+    elif state_behavior_match is not None and representative_mpc is None:
         transfer_allocation = _state_schedule_transfer_allocation(static, state, state_behavior_match, transfer)
         behavior_policy_mode = "state_schedule"
         behavior_policy_type_id = str(state_behavior_match["profile_id"])
@@ -2128,6 +2229,7 @@ def _structural_consumption_policy(
         + transfer_consumption_amount
         + income_effect
         + expected_income_effect
+        + empirical_bridge_consumption_delta
         + buffer_relief_support
         + drawdown
         - buffer_drag
@@ -2148,6 +2250,8 @@ def _structural_consumption_policy(
         "behavior_policy_mode": behavior_policy_mode,
         "behavior_policy_type_id": behavior_policy_type_id,
         "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
+        "empirical_bridge_annual_growth_deviation_pp": empirical_bridge_annual_growth_deviation_pp,
+        "empirical_bridge_clipped_inputs": empirical_bridge_clipped_inputs,
     }
 
 
@@ -2575,6 +2679,15 @@ def _next_household_states(
         baseline_consumption = float(static["baseline_consumption_annual"]) / 4.0
         job_loss = float(row["job_loss_probability"])
         job_loss = float(np.clip(0.78 * job_loss + 0.22 * float(static["baseline_job_loss_probability"]) + 0.08 * max(0.0, -output_gap), 0.5, 35.0))
+        unemployment_higher = float(
+            np.clip(
+                0.78 * float(row.get("unemployment_higher_probability", job_loss / 0.24))
+                + 0.22 * float(static.get("unemployment_higher_probability_1y", float(static["baseline_job_loss_probability"]) / 0.24))
+                + 0.08 * max(0.0, -output_gap) / 0.24,
+                0.0,
+                100.0,
+            )
+        )
         rows.append(
             {
                 "schema_version": DEMAND_ECONOMY_VERSION,
@@ -2601,6 +2714,8 @@ def _next_household_states(
                 "precautionary_sensitivity": float(static["precautionary_sensitivity"]),
                 "baseline_job_loss_probability": float(static["baseline_job_loss_probability"]),
                 "job_loss_probability": job_loss,
+                "baseline_unemployment_higher_probability": float(static.get("unemployment_higher_probability_1y", float(static["baseline_job_loss_probability"]) / 0.24)),
+                "unemployment_higher_probability_1y": unemployment_higher,
                 "target_buffer_months": float(static["target_buffer_months"]),
                 "inflation_expectation_1y": float(np.clip(0.72 * float(row["expected_inflation_next_period"]) + 0.28 * float(static["inflation_expectation_1y"]) + 0.10 * inflation_gap, -2.0, 12.0)),
                 "income_growth_expectation_1y": float(np.clip(0.68 * float(row["expected_income_growth_next_period"]) + 0.32 * float(static["income_growth_expectation_1y"]) + 0.012 * output_gap, -8.0, 8.0)),
@@ -2740,6 +2855,9 @@ def _belief_rows(
                 "expected_inflation_next_period": float(belief["expected_inflation_next_period"]),
                 "expected_income_growth_next_period": float(belief["expected_income_growth_next_period"]),
                 "perceived_job_loss_probability": float(belief["perceived_job_loss_probability"]),
+                "expected_unemployment_higher_probability_next_period": float(
+                    belief.get("expected_unemployment_higher_probability_next_period", float(belief["perceived_job_loss_probability"]) / 0.24)
+                ),
                 "confidence_index": float(belief["confidence_index"]),
                 "precautionary_saving_score": float(belief["precautionary_saving_score"]),
                 "attention_weight_prices": float(belief["attention_weight_prices"]),
@@ -2877,6 +2995,7 @@ def _belief_payload_row(
         "expected_inflation_next_period": float(np.clip(expected_inflation, -5.0, 15.0)),
         "expected_income_growth_next_period": float(np.clip(expected_income, -12.0, 12.0)),
         "perceived_job_loss_probability": float(np.clip(job_loss, 0.0, 40.0)),
+        "expected_unemployment_higher_probability_next_period": float(np.clip(job_loss / 0.24, 0.0, 100.0)),
         "confidence_index": float(np.clip(confidence, 0.0, 100.0)),
         "precautionary_saving_score": float(np.clip(precaution, 0.0, 10.0)),
         "attention_weight_prices": float(np.clip(attention_prices, 0.0, 1.0)),

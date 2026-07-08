@@ -47,6 +47,11 @@ DERIVED_DATA_DIRS: dict[str, dict[str, str]] = {
         "source": "derived_in_repo",
         "notes": "Normalized SCE panels produced by prepare_sce_microdata / prepare_persona_holdouts.",
     },
+    "work/empirical_bridge": {
+        "dataset": "empirical_bridge_v3_derived",
+        "source": "derived_in_repo",
+        "notes": "Spending/belief panel, cell targets, validation scores, and locked empirical bridge v3 fit artifacts.",
+    },
 }
 
 PACKAGED_DATA_FILES: dict[str, dict[str, str]] = {

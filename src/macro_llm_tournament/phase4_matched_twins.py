@@ -18,6 +18,7 @@ from .demand_economy import (
     DemandScenario,
     behavior_policy_manifest,
     build_fixture_demand_households,
+    load_empirical_bridge_profile,
     load_behavior_policy_profile,
     load_state_behavior_policy_profile,
     normalize_demand_households,
@@ -106,6 +107,7 @@ def main() -> int:
         mapping_payload = normalized_mapping_payload(mapping)
         mapping_sha = mapping_sha256(mapping_payload)
 
+        behavior_policy_profile = load_phase4_behavior_policy_profile(args)
         frames, data_status = load_proxy_data(
             data_mode=args.data_mode,
             refresh=args.refresh_fred,
@@ -125,7 +127,6 @@ def main() -> int:
 
         ecology_bundle = load_persona_ecology_bundle(args) if args.belief_source == "persona_ecology_replay" else None
         households = load_phase4_households(args, ecology_bundle=ecology_bundle)
-        behavior_policy_profile = load_phase4_behavior_policy_profile(args)
         period_count = max(int(args.period_count), len(cards) + 1, 2)
         cache_dir = output_dir / "fresh_phase4_matched_twins_cache" if args.fresh_cache else WORK_ROOT / "phase4_matched_twins_cache"
         scenarios = [DEFAULT_SCENARIO]
@@ -226,7 +227,9 @@ def main() -> int:
         print(output_dir)
         return 0
     except Exception as exc:
-        manifest.update({"status": "failed", "error": str(exc)})
+        manifest.update({"status": "failed", "error": str(exc), "live_call_count": 0, "cache_hit_count": 0})
+        if args.behavior_policy_mode == "empirical_bridge":
+            manifest.update(empirical_bridge_failure_fields())
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         raise
 
@@ -265,7 +268,27 @@ def load_phase4_behavior_policy_profile(args: argparse.Namespace) -> dict[str, A
         return load_behavior_policy_profile(Path(args.behavior_policy_raw_records_json))
     if args.behavior_policy_mode == "state_schedule":
         return load_state_behavior_policy_profile(Path(args.behavior_policy_state_profile_json))
+    if args.behavior_policy_mode == "empirical_bridge":
+        return load_empirical_bridge_profile(WORK_ROOT / "empirical_bridge" / "empirical_bridge_v3.json")
     return None
+
+
+def empirical_bridge_failure_fields() -> dict[str, Any]:
+    path = WORK_ROOT / "empirical_bridge" / "empirical_bridge_v3.json"
+    if not path.exists():
+        return {"bridge_spec_version": "empirical_bridge_v3", "empirical_bridge_status": "missing"}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"bridge_spec_version": "empirical_bridge_v3", "empirical_bridge_status": "unreadable"}
+    return {
+        "bridge_spec_version": payload.get("bridge_spec_version") or payload.get("schema_version"),
+        "empirical_bridge_sha256": payload.get("canonical_payload_sha256"),
+        "empirical_bridge_status": payload.get("status"),
+        "empirical_bridge_constraints": payload.get("constraints"),
+        "fit_waves": payload.get("fit_waves"),
+        "validation_waves": payload.get("validation_waves"),
+    }
 
 
 def load_phase4_households(args: argparse.Namespace, *, ecology_bundle: dict[str, Any] | None) -> pd.DataFrame:
@@ -446,6 +469,7 @@ def build_households_from_ecology_panel(panel: pd.DataFrame, wide: pd.DataFrame)
                 "income_sensitivity": {"low": 0.82, "middle": 0.58, "high": 0.36}[income_group],
                 "precautionary_sensitivity": 0.34 + (0.28 if liquidity_group == "low" else 0.08) + (0.16 if job_loss_risk_type == "high" else 0.0),
                 "baseline_job_loss_probability": job_loss,
+                "unemployment_higher_probability_1y": prior_unemployment_higher,
                 "target_buffer_months": 1.6 if liquidity_group == "low" else 5.2,
                 "inflation_expectation_1y": prior_inflation,
                 "income_growth_expectation_1y": prior_income,
@@ -557,6 +581,7 @@ def ecology_row_to_demand_belief(row: pd.Series, *, state: dict[str, Any]) -> di
         "expected_inflation_next_period": float(np.clip(inflation, -5.0, 15.0)),
         "expected_income_growth_next_period": float(np.clip(income_growth, -12.0, 12.0)),
         "perceived_job_loss_probability": unemployment_higher_to_job_loss(unemployment_higher),
+        "expected_unemployment_higher_probability_next_period": float(np.clip(unemployment_higher, 0.0, 100.0)),
         "confidence_index": confidence,
         "precautionary_saving_score": float(np.clip(precaution, 0.0, 10.0)),
         "attention_weight_prices": float(np.clip(0.45 + 0.45 * float(row.get("environment_weight", 0.3)), 0.0, 1.0)),

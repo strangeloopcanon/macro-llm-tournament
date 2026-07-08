@@ -18,6 +18,8 @@ from macro_llm_tournament.phase4_matched_twins import (
     normalized_mapping_payload,
     phase4_scoring_targets,
 )
+from macro_llm_tournament.empirical_bridge import BRIDGE_SPEC_VERSION, BridgeInput, transform_belief_change
+from macro_llm_tournament.demand_economy import _structural_consumption_policy
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +91,86 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
         self.assertAlmostEqual(row["raw_last_signal"], 3.6)
         self.assertEqual(row["phase4_target_transform"], "diff")
         self.assertGreaterEqual(row["history_scale"], 0.25)
+
+    def test_empirical_bridge_constant_beliefs_are_stationary(self):
+        profile = _accepted_bridge_profile(
+            {
+                "actual_expected_inflation_1y": 0.10,
+                "actual_expected_real_income_growth": 0.20,
+                "sce_question_unemployment_higher_prob": -0.01,
+            }
+        )
+        belief = BridgeInput(
+            inflation_expectation_1y=3.0,
+            expected_real_income_growth=1.0,
+            unemployment_higher_prob=35.0,
+            income_group="middle",
+            liquid_wealth_group="low",
+        )
+        cumulative = sum(transform_belief_change(profile, belief, belief).annual_growth_deviation_pp for _ in range(12))
+        self.assertLess(abs(cumulative), 0.01)
+
+    def test_empirical_bridge_executor_uses_raw_unemployment_probability_units(self):
+        profile = _accepted_bridge_profile(
+            {
+                "actual_expected_inflation_1y": 0.0,
+                "actual_expected_real_income_growth": 0.0,
+                "sce_question_unemployment_higher_prob": -0.01,
+            }
+        )
+        static = pd.Series(
+            {
+                "baseline_job_loss_probability": 7.2,
+                "unemployment_higher_probability_1y": 30.0,
+                "confidence_index": 55.0,
+                "income_growth_expectation_1y": 1.0,
+                "inflation_expectation_1y": 3.0,
+                "target_buffer_months": 3.0,
+                "base_saving_rate": 0.10,
+                "base_mpc": 0.30,
+                "annual_income": 80000.0,
+                "liquid_assets": 10000.0,
+                "debt": 5000.0,
+                "debt_service_burden": 0.12,
+                "rate_sensitivity": 0.3,
+                "income_sensitivity": 0.5,
+                "precautionary_sensitivity": 0.4,
+            }
+        )
+        state = {
+            "baseline_consumption": 1000.0,
+            "liquid_assets": 10000.0,
+            "job_loss_probability": 7.2,
+            "unemployment_higher_probability_1y": 30.0,
+            "confidence_index": 55.0,
+            "income_growth_expectation_1y": 1.0,
+            "inflation_expectation_1y": 3.0,
+            "labor_income": 20000.0,
+            "debt": 5000.0,
+            "income_group": "middle",
+            "liquidity_group": "low",
+            "job_loss_risk_type": "low",
+        }
+        belief = {
+            "expected_inflation_next_period": 3.0,
+            "expected_income_growth_next_period": 1.0,
+            "perceived_job_loss_probability": 9.6,
+            "expected_unemployment_higher_probability_next_period": 40.0,
+            "confidence_index": 55.0,
+            "precautionary_saving_score": 5.0,
+        }
+        period_state = {"transfer_per_household": 0.0, "policy_rate": 3.0}
+        policy = _structural_consumption_policy(
+            static,
+            state,
+            belief,
+            period_state,
+            representative_mpc=None,
+            behavior_policy_profile=profile,
+        )
+        self.assertEqual(policy["behavior_policy_mode"], "empirical_bridge")
+        self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], -0.10)
+        self.assertAlmostEqual(policy["desired_consumption"], 999.0)
 
     def test_phase4_fixture_cli_writes_locked_mapping_and_scores(self):
         with TemporaryDirectory() as temp_dir:
@@ -459,6 +541,20 @@ def _write_fixture_policy_records(path: Path) -> None:
         },
     ]
     path.write_text(json.dumps(records, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _accepted_bridge_profile(coefficients: dict[str, float]) -> dict[str, object]:
+    return {
+        "schema_version": BRIDGE_SPEC_VERSION,
+        "bridge_spec_version": BRIDGE_SPEC_VERSION,
+        "status": "accepted",
+        "between_coefficients": coefficients,
+        "support": {
+            "actual_expected_inflation_1y": {"min": -5.0, "max": 15.0},
+            "actual_expected_real_income_growth": {"min": -12.0, "max": 12.0},
+            "sce_question_unemployment_higher_prob": {"min": 0.0, "max": 100.0},
+        },
+    }
 
 
 if __name__ == "__main__":
