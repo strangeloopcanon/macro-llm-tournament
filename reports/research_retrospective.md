@@ -124,6 +124,24 @@ The strict one-card Phase 4 replay improves the LLM-updater scaled RMSE from `6.
 
 Status: keep as the current best bridge and a negative macro result. The architecture is closer to the north star, but it still does not beat the adaptive twin.
 
+### 14. Real-Data Empirical Bridge
+
+Question: can the belief-to-spending link be measured from SCE spending and belief microdata instead of hand-written?
+
+Result: yes, with an important revision. v3 was rejected by its own pre-registered checks because the SCE spending outcome was nominal while the coefficient bounds were written in real-consumption terms. v4 fixed the units by deflating expected spending growth with each respondent's inflation expectation. v4 passed the hard gates and nearly closed Phase 4: strict scaled RMSE fell to `0.6311` for the LLM updater versus `0.5692` for adaptive, and hold-last fell to `1.4688` versus `1.4633` for adaptive. It still did not beat the adaptive twin.
+
+Status: keep as the main empirical bridge, with caveat. The v4 validation diagnostic remains weakly identified, especially on real-income variation.
+
+### 15. Stabilized Bridge and Horizon Alignment
+
+Question: was the remaining Phase 4 gap caused by an unstable bridge estimator, or by a mismatch between the belief panel horizon and the FRED scoring horizon?
+
+Result: both mattered, but horizon alignment mattered more. v5 locked a ridge estimator before Phase 4 scoring: FIT-wave leave-one-wave-out CV, alpha grid `0.1` through `300`, and the largest alpha within one standard error of the minimum RMSE. It selected alpha `3.0`, shrank coefficients, and improved the original strict LLM replay from `0.6311` to `0.5970`, but adaptive still won at `0.5688`. The v5 validation diagnostic still failed.
+
+Then the SCE prior-update panel was extended to December 2024 for the 81 respondents with complete October-November-December coverage. That extension spent `81` live GPT-5.5 calls through `codex_cli`. It had useful direction, correlation, and amplitude, but failed the persistence RMSE gate. On the stitched three-period panel, the aligned two-card Phase 4 replay produced the first retrospective end-to-end win: v4 LLM `0.8455` versus adaptive `0.8961`; v5 LLM `0.8529` versus adaptive `0.8975`.
+
+Status: keep as a promising diagnostic, not final validation. The aligned economy can beat adaptive, but the added December belief-update leg is not gate-clearing, so the next real confirmation needs a longer aligned panel that passes its own prior-update gate before scoring.
+
 ## The Lessons
 
 1. LLMs contain audited aggregate macro belief signal.
@@ -132,17 +150,18 @@ Status: keep as the current best bridge and a negative macro result. The archite
 4. Direct action elicitation compresses behavior.
 5. First-person role-play restores dynamics but collapses cross-sectional heterogeneity.
 6. Policy schedules are the best behavior interface so far, and the fresh CTC holdout gives that statement one new-family check.
-7. State-conditioned schedules are the best macro bridge so far, but still lose to adaptive expectations.
+7. State-conditioned schedules improve the macro bridge, but the measured spending bridge improves it more.
 8. Deterministic execution remains non-negotiable: budgets, feasibility, accounting, and aggregation belong in code.
-9. The macro-simulation claim is still open. The current LLM-updater economy does not beat the adaptive twin.
+9. Bridge stabilization helps but does not solve the problem alone.
+10. Horizon alignment is load-bearing. The first aligned retrospective Phase 4 replay beats the adaptive twin, but its added belief-update leg does not clear persistence.
+11. The macro-simulation claim is still open. We have a retrospective end-to-end positive, not a confirmatory one.
 
 ## What Should Happen Next
 
 The next real test needs new evidence, not more reuse of spent holdouts.
 
-1. Diagnose the remaining state-schedule Phase 4 loss by target series and household-state profile.
-2. Build a longer same-horizon SCE prior-update panel.
-3. Improve the bridge from updated beliefs to state-schedule execution on development dynamics only.
+1. Treat v5 as the current stabilized bridge and stop tuning it against Phase 4.
+2. Build a longer same-horizon SCE prior-update panel that clears the prior-update gate.
+3. Run the next Phase 4 comparison as confirmatory only after the panel horizon, belief replay horizon, behavior executor, bridge, and target mapping are all fixed in the manifest.
 4. Freeze CTC, lottery, and UI for mechanism evaluation; any new behavior promotion needs a new family.
 5. Keep the Phase 4 v2 FRED mapping locked until the next newly scoreable month.
-6. Run the next Phase 4 comparison as confirmatory only after the panel horizon, belief replay horizon, behavior executor, and target mapping are all fixed in the manifest.

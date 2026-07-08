@@ -17,7 +17,7 @@ import pandas as pd
 from .agent_common import ACCOUNTING_TOLERANCE, OUTPUT_ROOT, WORK_ROOT, bounded_float, cache_key, markdown_table, round_or_none
 from .agent_types import build_household_type_cells
 from .behavior_ecology import POLICY_PROMPT_VERSION, normalize_policy_payload
-from .empirical_bridge import BRIDGE_SPEC_VERSION, DEFAULT_BRIDGE, BridgeInput, transform_belief_change
+from .empirical_bridge import BRIDGE_SPEC_VERSION, DEFAULT_BRIDGE, SUPPORTED_BRIDGE_SPEC_VERSIONS, BridgeInput, transform_belief_change
 from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
 from .llm_common import LLMUnavailable
 
@@ -610,7 +610,7 @@ def load_empirical_bridge_profile(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Empirical bridge artifact must contain a JSON object")
-    if str(data.get("bridge_spec_version") or data.get("schema_version")) != BRIDGE_SPEC_VERSION:
+    if str(data.get("bridge_spec_version") or data.get("schema_version")) not in SUPPORTED_BRIDGE_SPEC_VERSIONS:
         raise ValueError(f"Unsupported empirical bridge schema: {data.get('schema_version')!r}")
     if str(data.get("status")) != "accepted":
         raise ValueError(f"Empirical bridge is fail-closed and not accepted: status={data.get('status')!r}")
@@ -623,7 +623,7 @@ def load_empirical_bridge_profile(path: Path) -> dict[str, Any]:
 def behavior_policy_manifest(profile: dict[str, Any] | None, *, mode: str) -> dict[str, Any]:
     if profile is None:
         return {"mode": mode, "schema_version": None}
-    if profile.get("bridge_spec_version") == BRIDGE_SPEC_VERSION or profile.get("schema_version") == BRIDGE_SPEC_VERSION:
+    if str(profile.get("bridge_spec_version") or profile.get("schema_version")) in SUPPORTED_BRIDGE_SPEC_VERSIONS:
         return {
             "mode": mode,
             "schema_version": profile.get("schema_version"),
@@ -2152,7 +2152,7 @@ def _structural_consumption_policy(
     )
     if (
         behavior_policy_profile is not None
-        and behavior_policy_profile.get("bridge_spec_version") == BRIDGE_SPEC_VERSION
+        and str(behavior_policy_profile.get("bridge_spec_version")) in SUPPORTED_BRIDGE_SPEC_VERSIONS
         and representative_mpc is None
     ):
         transfer_allocation = _transfer_windfall_allocation(

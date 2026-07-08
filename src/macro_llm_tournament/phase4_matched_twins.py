@@ -90,6 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--behavior-policy-mode", choices=BEHAVIOR_POLICY_MODES, default="fixed_kernel")
     parser.add_argument("--behavior-policy-raw-records-json", default=None)
     parser.add_argument("--behavior-policy-state-profile-json", default=None)
+    parser.add_argument("--empirical-bridge-json", default=None)
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--output-dir", default=None)
@@ -230,7 +231,7 @@ def main() -> int:
     except Exception as exc:
         manifest.update({"status": "failed", "error": str(exc), "live_call_count": 0, "cache_hit_count": 0})
         if args.behavior_policy_mode == "empirical_bridge":
-            manifest.update(empirical_bridge_failure_fields())
+            manifest.update(empirical_bridge_failure_fields(args))
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         raise
 
@@ -270,20 +271,21 @@ def load_phase4_behavior_policy_profile(args: argparse.Namespace) -> dict[str, A
     if args.behavior_policy_mode == "state_schedule":
         return load_state_behavior_policy_profile(Path(args.behavior_policy_state_profile_json))
     if args.behavior_policy_mode == "empirical_bridge":
-        return load_empirical_bridge_profile(DEFAULT_BRIDGE)
+        return load_empirical_bridge_profile(Path(args.empirical_bridge_json) if args.empirical_bridge_json else DEFAULT_BRIDGE)
     return None
 
 
-def empirical_bridge_failure_fields() -> dict[str, Any]:
-    path = DEFAULT_BRIDGE
+def empirical_bridge_failure_fields(args: argparse.Namespace) -> dict[str, Any]:
+    path = Path(args.empirical_bridge_json) if args.empirical_bridge_json else DEFAULT_BRIDGE
     if not path.exists():
-        return {"bridge_spec_version": BRIDGE_SPEC_VERSION, "empirical_bridge_status": "missing"}
+        return {"bridge_spec_version": BRIDGE_SPEC_VERSION, "empirical_bridge_path": str(path), "empirical_bridge_status": "missing"}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {"bridge_spec_version": BRIDGE_SPEC_VERSION, "empirical_bridge_status": "unreadable"}
+        return {"bridge_spec_version": BRIDGE_SPEC_VERSION, "empirical_bridge_path": str(path), "empirical_bridge_status": "unreadable"}
     return {
         "bridge_spec_version": payload.get("bridge_spec_version") or payload.get("schema_version"),
+        "empirical_bridge_path": str(path),
         "empirical_bridge_sha256": payload.get("canonical_payload_sha256"),
         "empirical_bridge_status": payload.get("status"),
         "empirical_bridge_constraints": payload.get("constraints"),

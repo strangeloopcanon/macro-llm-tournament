@@ -3555,6 +3555,66 @@ class ForecastTournamentTests(unittest.TestCase):
             self.assertNotIn("real_person", prompt_cards)
             self.assertEqual(set(panel["respondent_id"]), {"respondent_00001"})
 
+    def test_persona_ecology_csv_fixture_can_preserve_ids_for_panel_extension(self):
+        with TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "extension.csv"
+            pd.DataFrame(
+                [
+                    {
+                        "respondent_id": "respondent_00001",
+                        "period_id": "sce_2024_12",
+                        "weight": 2.0,
+                        "age_group": "35_54",
+                        "income_group": "middle",
+                        "education_group": "college_plus",
+                        "gender": "female",
+                        "region": "northeast",
+                        "employment_status": "employed",
+                        "homeownership": "owner",
+                        "liquid_wealth_group": "middle",
+                        "actual_expected_inflation_1y": 3.2,
+                        "actual_consumption_change_pct": 0.4,
+                    }
+                ]
+            ).to_csv(csv_path, index=False)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "macro_llm_tournament.persona_ecology",
+                    "--ecology-mode",
+                    "fixture",
+                    "--max-live-calls",
+                    "0",
+                    "--models",
+                    "gpt-5.5",
+                    "--respondent-source",
+                    "csv",
+                    "--survey-schema",
+                    "normalized",
+                    "--respondent-csv",
+                    str(csv_path),
+                    "--preserve-csv-respondent-ids",
+                    "--target-fields",
+                    "expected_inflation_1y",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env={"PYTHONPATH": "src"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((Path(temp_dir) / "manifest.json").read_text(encoding="utf-8"))
+            panel = pd.read_csv(Path(temp_dir) / "persona_ecology_panel.csv")
+            self.assertTrue(manifest["preserve_csv_respondent_ids"])
+            self.assertFalse(manifest["respondent_input"]["respondent_ids_anonymized"])
+            self.assertEqual(set(panel["respondent_id"]), {"respondent_00001"})
+
     def test_persona_ecology_cli_records_prior_update_contract_for_reserved_panel(self):
         with TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "sce_panel.csv"

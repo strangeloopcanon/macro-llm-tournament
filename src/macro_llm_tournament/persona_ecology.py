@@ -169,6 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--respondent-source", choices=["fixture", "csv"], default="fixture")
     parser.add_argument("--respondent-csv", default=None)
     parser.add_argument("--survey-schema", choices=SURVEY_SCHEMAS, default="normalized")
+    parser.add_argument("--preserve-csv-respondent-ids", action="store_true")
     parser.add_argument("--respondent-count", type=int, default=60)
     parser.add_argument("--respondent-limit", type=int, default=0)
     parser.add_argument("--respondent-sample-size", type=int, default=0)
@@ -221,7 +222,7 @@ def main() -> int:
         survey_start=args.survey_start,
         target_fields=target_fields,
     )
-    panel = _anonymize_csv_panel_ids(panel) if args.respondent_source == "csv" else panel
+    panel = _anonymize_csv_panel_ids(panel) if args.respondent_source == "csv" and not args.preserve_csv_respondent_ids else panel
     pre_selection_panel = panel.copy()
     period_ids = _parse_period_ids(args.period_ids)
     sample_strata = _parse_sample_strata(args.respondent_sample_strata)
@@ -257,7 +258,7 @@ def main() -> int:
         pre_selection_normalized=pre_selection_panel,
         respondent_limit=args.respondent_limit,
         selection_manifest=selection_manifest,
-        anonymized=args.respondent_source == "csv",
+        anonymized=args.respondent_source == "csv" and not args.preserve_csv_respondent_ids,
     )
     primary_update_source = f"llm_{args.provider}_{models[0]}".replace("/", "_")
     manifest: dict[str, Any] = {
@@ -280,6 +281,7 @@ def main() -> int:
         "respondent_sample_size": int(args.respondent_sample_size),
         "respondent_sample_seed": int(args.respondent_sample_seed),
         "respondent_sample_strata": list(sample_strata),
+        "preserve_csv_respondent_ids": bool(args.preserve_csv_respondent_ids),
         "period_ids_filter": list(period_ids),
         "require_complete_periods": bool(args.require_complete_periods),
         "panel_row_count": int(panel.shape[0]),

@@ -18,8 +18,13 @@ DEFAULT_COVERAGE = PROJECT_ROOT / "work" / "empirical_bridge" / "spending_belief
 DEFAULT_BRIDGE = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v4.json"
 DEFAULT_CELL_TARGETS = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v4_cell_targets.csv"
 DEFAULT_VALIDATION_SCORES = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v4_validation_scores.csv"
+DEFAULT_STABILIZED_BRIDGE = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v5_stabilized.json"
+DEFAULT_STABILIZED_CELL_TARGETS = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v5_stabilized_cell_targets.csv"
+DEFAULT_STABILIZED_VALIDATION_SCORES = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v5_stabilized_validation_scores.csv"
 
 BRIDGE_SPEC_VERSION = "empirical_bridge_v4"
+STABILIZED_BRIDGE_SPEC_VERSION = "empirical_bridge_v5_stabilized"
+SUPPORTED_BRIDGE_SPEC_VERSIONS = (BRIDGE_SPEC_VERSION, STABILIZED_BRIDGE_SPEC_VERSION)
 REGRESSORS = (
     "actual_expected_inflation_1y",
     "actual_expected_real_income_growth",
@@ -36,6 +41,8 @@ BETWEEN_BOUNDS_PER_PP = {
 NOMINAL_OUTPUT_COLUMN = "expected_total_spending_growth_pct"
 OUTPUT_COLUMN = "expected_real_total_spending_growth_pct"
 CHART_REPRO_MAX_ABS_ERROR_TOLERANCE_PP = 0.35
+RIDGE_ALPHA_GRID = (0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0, 300.0)
+BRIDGE_ESTIMATORS = ("ols", "ridge_cv")
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-json", type=Path, default=DEFAULT_BRIDGE)
     parser.add_argument("--cell-targets-csv", type=Path, default=DEFAULT_CELL_TARGETS)
     parser.add_argument("--validation-scores-csv", type=Path, default=DEFAULT_VALIDATION_SCORES)
+    parser.add_argument("--estimator", choices=BRIDGE_ESTIMATORS, default="ols")
+    parser.add_argument("--bridge-spec-version", default=BRIDGE_SPEC_VERSION, choices=SUPPORTED_BRIDGE_SPEC_VERSIONS)
     parser.add_argument("--validate", action="store_true", help="Score validation using an already locked fit artifact.")
     return parser.parse_args()
 
@@ -83,6 +92,8 @@ def main() -> int:
         output_json=args.output_json,
         cell_targets_csv=args.cell_targets_csv,
         validation_scores_csv=args.validation_scores_csv,
+        estimator=args.estimator,
+        bridge_spec_version=args.bridge_spec_version,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -95,7 +106,15 @@ def fit_empirical_bridge(
     output_json: Path,
     cell_targets_csv: Path,
     validation_scores_csv: Path,
+    estimator: str = "ols",
+    bridge_spec_version: str = BRIDGE_SPEC_VERSION,
 ) -> dict[str, Any]:
+    if bridge_spec_version not in SUPPORTED_BRIDGE_SPEC_VERSIONS:
+        raise ValueError(f"Unsupported empirical bridge spec version: {bridge_spec_version}")
+    if estimator not in BRIDGE_ESTIMATORS:
+        raise ValueError(f"Unsupported empirical bridge estimator: {estimator}")
+    if bridge_spec_version == STABILIZED_BRIDGE_SPEC_VERSION and estimator != "ridge_cv":
+        raise ValueError("empirical_bridge_v5_stabilized must use estimator=ridge_cv")
     panel = load_panel(panel_csv)
     fit_frame = panel[panel["spending_wave"].isin(FIT_WAVES)].copy()
     if fit_frame.empty:
@@ -105,22 +124,37 @@ def fit_empirical_bridge(
         "upper": weighted_quantile(fit_frame[OUTPUT_COLUMN], fit_frame["weight"], 0.98),
     }
     fit_frame["outcome_winsorized"] = fit_frame[OUTPUT_COLUMN].clip(winsor_bounds["lower"], winsor_bounds["upper"])
-    fit_model = fit_mundlak_model(fit_frame)
+    ridge_selection = select_ridge_alpha_by_fit_cv(fit_frame, winsor_bounds) if estimator == "ridge_cv" else None
+    fit_model = fit_mundlak_model(
+        fit_frame,
+        estimator=estimator,
+        ridge_alpha=None if ridge_selection is None else float(ridge_selection["selected_alpha"]),
+        schema_version=bridge_spec_version,
+    )
     fit_scores = score_split(panel, fit_model, list(FIT_WAVES), split_name="fit", winsor_bounds=winsor_bounds)
     internal_scores = score_split(panel, fit_model, list(INTERNAL_CHECK_WAVES), split_name="internal_check", winsor_bounds=winsor_bounds)
     validation_scores = score_split(panel, fit_model, list(VALIDATION_WAVES), split_name="validation", winsor_bounds=winsor_bounds)
-    validation_refit = refit_between_for_split(panel, list(VALIDATION_WAVES), winsor_bounds=winsor_bounds)
+    validation_refit = refit_between_for_split(
+        panel,
+        list(VALIDATION_WAVES),
+        winsor_bounds=winsor_bounds,
+        estimator=estimator,
+        ridge_alpha=None if ridge_selection is None else float(ridge_selection["selected_alpha"]),
+        schema_version=bridge_spec_version,
+    )
     constraints = constraint_report(fit_model)
     validation_gate = validation_gate_report(fit_model, validation_refit, fit_scores, validation_scores)
     liquidity_gradient = liquidity_gradient_report(fit_model)
     chart_quality = bridge_chart_quality_report(coverage_json)
     accepted = bool(constraints["passed"] and liquidity_gradient["passed"] and chart_quality["passed"])
     artifact: dict[str, Any] = {
-        "schema_version": BRIDGE_SPEC_VERSION,
-        "bridge_spec_version": BRIDGE_SPEC_VERSION,
+        "schema_version": bridge_spec_version,
+        "bridge_spec_version": bridge_spec_version,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "status": "accepted" if accepted else "rejected",
         "rejection_reason": None if accepted else "constraint_or_liquidity_gradient_failed",
+        "estimator": estimator,
+        "ridge_selection": ridge_selection,
         "panel_csv": str(panel_csv),
         "panel_csv_sha256": file_sha256(panel_csv),
         "fit_waves": list(FIT_WAVES),
@@ -164,10 +198,11 @@ def fit_empirical_bridge(
     pd.DataFrame(validation_scores["rows"]).to_csv(validation_scores_csv, index=False)
     if not accepted:
         write_blocker(
-            "Empirical Bridge v4 fit was rejected by the locked fail-closed checks. "
+            f"{bridge_spec_version} fit was rejected by the locked fail-closed checks. "
             f"Constraint report: {json.dumps(constraints, sort_keys=True)}. "
             f"Liquidity-gradient report: {json.dumps(liquidity_gradient, sort_keys=True)}. "
-            f"Chart-quality report: {json.dumps(chart_quality, sort_keys=True)}."
+            f"Chart-quality report: {json.dumps(chart_quality, sort_keys=True)}.",
+            bridge_spec_version=bridge_spec_version,
         )
     return {
         "output_json": str(output_json),
@@ -208,36 +243,30 @@ def real_growth_from_nominal(nominal_growth_pct: pd.Series, inflation_expectatio
     return result.where(denominator.gt(0.0))
 
 
-def fit_mundlak_model(frame: pd.DataFrame) -> dict[str, Any]:
+def fit_mundlak_model(
+    frame: pd.DataFrame,
+    *,
+    estimator: str = "ols",
+    ridge_alpha: float | None = None,
+    schema_version: str = BRIDGE_SPEC_VERSION,
+) -> dict[str, Any]:
     frame = frame.copy()
-    wave_means = weighted_wave_means(frame)
-    frame = frame.merge(wave_means, on="spending_wave", how="left")
-    cells = sorted(
-        f"{liquid}__{income}"
-        for liquid, income in frame[["liquid_wealth_group", "income_group"]].drop_duplicates().astype(str).itertuples(index=False, name=None)
-    )
-    rows: list[dict[str, float]] = []
-    for _, row in frame.iterrows():
-        cell = f"{row['liquid_wealth_group']}__{row['income_group']}"
-        design: dict[str, float] = {"intercept": 1.0}
-        for regressor in REGRESSORS:
-            design[f"between_{regressor}"] = float(row[f"wave_mean_{regressor}"])
-            within = float(row[regressor]) - float(row[f"wave_mean_{regressor}"])
-            for candidate in cells:
-                design[f"within_{regressor}__{candidate}"] = within if candidate == cell else 0.0
-        for column in dummy_columns(frame, "income_group"):
-            design[column] = 1.0 if str(row["income_group"]) == column.split("__", 1)[1] else 0.0
-        for column in dummy_columns(frame, "liquid_wealth_group"):
-            design[column] = 1.0 if str(row["liquid_wealth_group"]) == column.split("__", 1)[1] else 0.0
-        for column in dummy_columns(frame, "age_group"):
-            design[column] = 1.0 if str(row["age_group"]) == column.split("__", 1)[1] else 0.0
-        rows.append(design)
-    design_frame = pd.DataFrame(rows).fillna(0.0)
+    if estimator not in BRIDGE_ESTIMATORS:
+        raise ValueError(f"Unsupported empirical bridge estimator: {estimator}")
+    design_frame, frame, cells = build_mundlak_design(frame)
     y = frame["outcome_winsorized"].astype(float).to_numpy()
     weights = frame["weight"].astype(float).to_numpy()
-    sqrt_w = np.sqrt(weights)
     x = design_frame.to_numpy(dtype=float)
-    beta, residuals, rank, singular = np.linalg.lstsq(x * sqrt_w[:, None], y * sqrt_w, rcond=None)
+    if estimator == "ridge_cv":
+        beta, solver_diagnostics = solve_weighted_ridge(
+            x,
+            y,
+            weights,
+            list(design_frame.columns),
+            alpha=float(ridge_alpha if ridge_alpha is not None else RIDGE_ALPHA_GRID[-1]),
+        )
+    else:
+        beta, solver_diagnostics = solve_weighted_ols(x, y, weights)
     coefficients = {name: float(value) for name, value in zip(design_frame.columns, beta)}
     predictions = x @ beta
     residual = y - predictions
@@ -263,7 +292,9 @@ def fit_mundlak_model(frame: pd.DataFrame) -> dict[str, Any]:
         for regressor in REGRESSORS
     }
     return {
-        "schema_version": BRIDGE_SPEC_VERSION,
+        "schema_version": schema_version,
+        "estimator": estimator,
+        "ridge_alpha": None if estimator != "ridge_cv" else float(ridge_alpha if ridge_alpha is not None else RIDGE_ALPHA_GRID[-1]),
         "coefficients": coefficients,
         "between_coefficients": between,
         "within_cell_coefficients": within,
@@ -273,10 +304,11 @@ def fit_mundlak_model(frame: pd.DataFrame) -> dict[str, Any]:
         "design_columns": list(design_frame.columns),
         "diagnostics": {
             "n": int(frame.shape[0]),
-            "rank": int(rank),
+            "rank": solver_diagnostics["rank"],
             "weighted_rmse": weighted_rmse,
-            "singular_values_min": float(np.min(singular)) if len(singular) else None,
-            "singular_values_max": float(np.max(singular)) if len(singular) else None,
+            "singular_values_min": solver_diagnostics["singular_values_min"],
+            "singular_values_max": solver_diagnostics["singular_values_max"],
+            "ridge_alpha": solver_diagnostics.get("ridge_alpha"),
             "between_vs_within_gap": {
                 regressor: {
                     cell: float(between[regressor] - slope)
@@ -285,6 +317,129 @@ def fit_mundlak_model(frame: pd.DataFrame) -> dict[str, Any]:
                 for regressor in REGRESSORS
             },
         },
+    }
+
+
+def build_mundlak_design(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    frame = frame.copy()
+    wave_means = weighted_wave_means(frame)
+    frame = frame.merge(wave_means, on="spending_wave", how="left")
+    cells = sorted(
+        f"{liquid}__{income}"
+        for liquid, income in frame[["liquid_wealth_group", "income_group"]].drop_duplicates().astype(str).itertuples(index=False, name=None)
+    )
+    cell_labels = frame["liquid_wealth_group"].astype(str) + "__" + frame["income_group"].astype(str)
+    columns: dict[str, np.ndarray] = {"intercept": np.ones(frame.shape[0], dtype=float)}
+    for regressor in REGRESSORS:
+        wave_column = f"wave_mean_{regressor}"
+        columns[f"between_{regressor}"] = frame[wave_column].astype(float).to_numpy()
+        within = frame[regressor].astype(float).to_numpy() - frame[wave_column].astype(float).to_numpy()
+        for cell in cells:
+            columns[f"within_{regressor}__{cell}"] = np.where(cell_labels.eq(cell).to_numpy(), within, 0.0)
+    for column in dummy_columns(frame, "income_group"):
+        label = column.split("__", 1)[1]
+        columns[column] = frame["income_group"].astype(str).eq(label).astype(float).to_numpy()
+    for column in dummy_columns(frame, "liquid_wealth_group"):
+        label = column.split("__", 1)[1]
+        columns[column] = frame["liquid_wealth_group"].astype(str).eq(label).astype(float).to_numpy()
+    for column in dummy_columns(frame, "age_group"):
+        label = column.split("__", 1)[1]
+        columns[column] = frame["age_group"].astype(str).eq(label).astype(float).to_numpy()
+    return pd.DataFrame(columns), frame, cells
+
+
+def solve_weighted_ols(x: np.ndarray, y: np.ndarray, weights: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    sqrt_w = np.sqrt(weights)
+    beta, _residuals, rank, singular = np.linalg.lstsq(x * sqrt_w[:, None], y * sqrt_w, rcond=None)
+    return beta, {
+        "rank": int(rank),
+        "singular_values_min": float(np.min(singular)) if len(singular) else None,
+        "singular_values_max": float(np.max(singular)) if len(singular) else None,
+        "ridge_alpha": None,
+    }
+
+
+def solve_weighted_ridge(
+    x: np.ndarray,
+    y: np.ndarray,
+    weights: np.ndarray,
+    columns: list[str],
+    *,
+    alpha: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    x_work = x.copy()
+    means = np.zeros(x_work.shape[1], dtype=float)
+    scales = np.ones(x_work.shape[1], dtype=float)
+    for index, name in enumerate(columns):
+        if name == "intercept":
+            continue
+        mean = float(np.average(x_work[:, index], weights=weights))
+        variance = float(np.average(np.square(x_work[:, index] - mean), weights=weights))
+        scale = float(np.sqrt(max(variance, 0.0)))
+        means[index] = mean
+        scales[index] = scale if scale > 1e-12 else 1.0
+        x_work[:, index] = (x_work[:, index] - means[index]) / scales[index]
+    sqrt_w = np.sqrt(weights)
+    weighted_x = x_work * sqrt_w[:, None]
+    weighted_y = y * sqrt_w
+    penalty = np.eye(x_work.shape[1], dtype=float)
+    penalty[0, 0] = 0.0
+    beta_std = np.linalg.solve(weighted_x.T @ weighted_x + float(alpha) * penalty, weighted_x.T @ weighted_y)
+    beta = beta_std / scales
+    beta[0] = beta_std[0] - sum(beta_std[index] * means[index] / scales[index] for index in range(1, beta_std.shape[0]))
+    singular = np.linalg.svd(weighted_x, compute_uv=False)
+    return beta, {
+        "rank": int(np.linalg.matrix_rank(weighted_x)),
+        "singular_values_min": float(np.min(singular)) if len(singular) else None,
+        "singular_values_max": float(np.max(singular)) if len(singular) else None,
+        "ridge_alpha": float(alpha),
+    }
+
+
+def select_ridge_alpha_by_fit_cv(fit_frame: pd.DataFrame, winsor_bounds: dict[str, float]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    waves = [int(value) for value in FIT_WAVES]
+    for alpha in RIDGE_ALPHA_GRID:
+        fold_errors = []
+        for wave in waves:
+            train = fit_frame[fit_frame["spending_wave"].astype(int).ne(wave)].copy()
+            holdout = fit_frame[fit_frame["spending_wave"].astype(int).eq(wave)].copy()
+            if train.empty or holdout.empty:
+                continue
+            model = fit_mundlak_model(
+                train,
+                estimator="ridge_cv",
+                ridge_alpha=float(alpha),
+                schema_version=STABILIZED_BRIDGE_SPEC_VERSION,
+            )
+            score = score_split(holdout, model, [wave], split_name="fit_leave_one_wave_out", winsor_bounds=winsor_bounds)
+            value = score["summary"].get("weighted_rmse")
+            if value is not None and np.isfinite(float(value)):
+                fold_errors.append(float(value))
+        if not fold_errors:
+            continue
+        rows.append(
+            {
+                "alpha": float(alpha),
+                "fold_count": int(len(fold_errors)),
+                "mean_weighted_rmse": float(np.mean(fold_errors)),
+                "se_weighted_rmse": float(np.std(fold_errors, ddof=1) / np.sqrt(len(fold_errors))) if len(fold_errors) > 1 else 0.0,
+            }
+        )
+    if not rows:
+        raise ValueError("Ridge alpha selection produced no valid FIT-wave folds.")
+    best = min(rows, key=lambda row: row["mean_weighted_rmse"])
+    threshold = float(best["mean_weighted_rmse"] + best["se_weighted_rmse"])
+    eligible = [row for row in rows if row["mean_weighted_rmse"] <= threshold]
+    selected = max(eligible, key=lambda row: row["alpha"])
+    return {
+        "selection_rule": "largest_alpha_within_one_standard_error_of_min_leave_one_fit_wave_out_rmse",
+        "alpha_grid": [float(value) for value in RIDGE_ALPHA_GRID],
+        "selected_alpha": float(selected["alpha"]),
+        "min_alpha": float(best["alpha"]),
+        "min_mean_weighted_rmse": float(best["mean_weighted_rmse"]),
+        "one_se_threshold": threshold,
+        "rows": rows,
     }
 
 
@@ -383,13 +538,21 @@ def predict_from_artifact(frame: pd.DataFrame, artifact: dict[str, Any]) -> np.n
     return out
 
 
-def refit_between_for_split(panel: pd.DataFrame, waves: list[int], *, winsor_bounds: dict[str, float]) -> dict[str, Any]:
+def refit_between_for_split(
+    panel: pd.DataFrame,
+    waves: list[int],
+    *,
+    winsor_bounds: dict[str, float],
+    estimator: str = "ols",
+    ridge_alpha: float | None = None,
+    schema_version: str = BRIDGE_SPEC_VERSION,
+) -> dict[str, Any]:
     frame = panel[panel["spending_wave"].isin(waves)].copy()
     if frame.empty:
         return {"between_coefficients": {regressor: None for regressor in REGRESSORS}}
     frame["outcome_winsorized"] = frame[OUTPUT_COLUMN].clip(winsor_bounds["lower"], winsor_bounds["upper"])
     try:
-        return fit_mundlak_model(frame)
+        return fit_mundlak_model(frame, estimator=estimator, ridge_alpha=ridge_alpha, schema_version=schema_version)
     except np.linalg.LinAlgError:
         return {"between_coefficients": {regressor: None for regressor in REGRESSORS}}
 
@@ -532,7 +695,7 @@ def build_cell_targets(panel: pd.DataFrame, artifact: dict[str, Any], winsor_bou
             weights = group["weight"].astype(float)
             frames.append(
                 {
-                    "schema_version": BRIDGE_SPEC_VERSION,
+                    "schema_version": str(artifact.get("schema_version") or artifact.get("bridge_spec_version") or BRIDGE_SPEC_VERSION),
                     "selection_surface": split,
                     "liquid_wealth_group": str(liquid),
                     "income_group": str(income),
@@ -604,10 +767,10 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_blocker(message: str) -> None:
-    path = PROJECT_ROOT / "work" / "codex_briefs" / f"{BRIDGE_SPEC_VERSION}_blockers.md"
+def write_blocker(message: str, *, bridge_spec_version: str = BRIDGE_SPEC_VERSION) -> None:
+    path = PROJECT_ROOT / "work" / "codex_briefs" / f"{bridge_spec_version}_blockers.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    title = BRIDGE_SPEC_VERSION.replace("_", " ").title()
+    title = bridge_spec_version.replace("_", " ").title()
     previous = path.read_text(encoding="utf-8") if path.exists() else f"# {title} Blockers\n\n"
     entry = f"## {datetime.now(timezone.utc).isoformat()}\n\n{message}\n\n"
     path.write_text(previous + entry, encoding="utf-8")

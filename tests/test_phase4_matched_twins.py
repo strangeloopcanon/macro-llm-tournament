@@ -25,7 +25,12 @@ from macro_llm_tournament.phase4_v4_diagnostics import (
     scaled_error_contribution,
     wave_design_condition_number,
 )
-from macro_llm_tournament.empirical_bridge import BRIDGE_SPEC_VERSION, BridgeInput, transform_belief_change
+from macro_llm_tournament.empirical_bridge import (
+    BRIDGE_SPEC_VERSION,
+    STABILIZED_BRIDGE_SPEC_VERSION,
+    BridgeInput,
+    transform_belief_change,
+)
 from macro_llm_tournament.demand_economy import _structural_consumption_policy
 
 
@@ -289,6 +294,73 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
         self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], -0.10)
         self.assertAlmostEqual(policy["empirical_bridge_period_growth_deviation_pp"], -0.025)
         self.assertAlmostEqual(policy["desired_consumption"], 999.75)
+
+    def test_empirical_bridge_executor_accepts_stabilized_bridge_schema(self):
+        profile = _accepted_bridge_profile(
+            {
+                "actual_expected_inflation_1y": 0.12,
+                "actual_expected_real_income_growth": 0.00,
+                "sce_question_unemployment_higher_prob": 0.00,
+            }
+        )
+        profile["schema_version"] = STABILIZED_BRIDGE_SPEC_VERSION
+        profile["bridge_spec_version"] = STABILIZED_BRIDGE_SPEC_VERSION
+        static = pd.Series(
+            {
+                "baseline_job_loss_probability": 7.2,
+                "unemployment_higher_probability_1y": 30.0,
+                "confidence_index": 55.0,
+                "income_growth_expectation_1y": 1.0,
+                "inflation_expectation_1y": 3.0,
+                "target_buffer_months": 3.0,
+                "base_saving_rate": 0.10,
+                "base_mpc": 0.30,
+                "annual_income": 80000.0,
+                "liquid_assets": 10000.0,
+                "debt": 5000.0,
+                "debt_service_burden": 0.12,
+                "rate_sensitivity": 0.3,
+                "income_sensitivity": 0.5,
+                "precautionary_sensitivity": 0.4,
+            }
+        )
+        state = {
+            "baseline_consumption": 1000.0,
+            "liquid_assets": 10000.0,
+            "job_loss_probability": 7.2,
+            "unemployment_higher_probability_1y": 30.0,
+            "confidence_index": 55.0,
+            "income_growth_expectation_1y": 1.0,
+            "inflation_expectation_1y": 3.0,
+            "labor_income": 20000.0,
+            "debt": 5000.0,
+            "income_group": "middle",
+            "liquidity_group": "low",
+            "job_loss_risk_type": "low",
+        }
+        belief = {
+            "expected_inflation_next_period": 4.0,
+            "expected_income_growth_next_period": 1.0,
+            "perceived_job_loss_probability": 7.2,
+            "expected_unemployment_higher_probability_next_period": 30.0,
+            "confidence_index": 55.0,
+            "precautionary_saving_score": 5.0,
+        }
+        period_state = {"transfer_per_household": 0.0, "policy_rate": 3.0}
+
+        policy = _structural_consumption_policy(
+            static,
+            state,
+            belief,
+            period_state,
+            representative_mpc=None,
+            behavior_policy_profile=profile,
+        )
+
+        self.assertEqual(policy["behavior_policy_mode"], "empirical_bridge")
+        self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], 0.12)
+        self.assertAlmostEqual(policy["empirical_bridge_period_growth_deviation_pp"], 0.03)
+        self.assertAlmostEqual(policy["desired_consumption"], 1000.3)
 
     def test_phase4_fixture_cli_writes_locked_mapping_and_scores(self):
         with TemporaryDirectory() as temp_dir:
