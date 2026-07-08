@@ -78,6 +78,8 @@ class BehaviorEcologyTests(unittest.TestCase):
 
             self.assertEqual(manifest["live_call_count"], 0)
             self.assertEqual(manifest["policy_raw_records_json"], str(policy_records))
+            self.assertIn("Confirmatory behavior-holdout replay", manifest["claim_scope"])
+            self.assertIn("behavior_holdout_ctc_v1", manifest["claim_scope"])
             self.assertEqual({BEHAVIOR_CTC_HOLDOUT_SPLIT}, set(scores["evaluation_split"].astype(str)))
             self.assertIn("policy_codex_cli_gpt-5.5", set(actions["source"].astype(str)))
 

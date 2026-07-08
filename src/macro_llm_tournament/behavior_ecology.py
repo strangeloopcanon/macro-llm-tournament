@@ -94,6 +94,11 @@ CLAIM_SCOPE = (
     "grounding or policy-schedule elicitation restores cross-scenario differentiation that cell-level "
     "point elicitation compresses."
 )
+CTC_HOLDOUT_CLAIM_SCOPE = (
+    "Confirmatory behavior-holdout replay. The CTC family was not used to select the policy-schedule "
+    "mechanism; this run evaluates already-banked policy schedules against the fresh behavior_holdout_ctc_v1 "
+    "target family with zero new policy calls. The CTC family is spent after this one-shot score."
+)
 
 
 def sample_households(type_cells: pd.DataFrame, *, households_per_cell: int, seed: int) -> pd.DataFrame:
@@ -627,6 +632,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def behavior_ecology_claim_scope(scenarios: Iterable[BehaviorScenario], *, policy_raw_records_path: Path | None) -> str:
+    scenario_ids = {scenario.scenario_id for scenario in scenarios}
+    if scenario_ids == {"ctc_2021_monthly_child_credit_style"} and policy_raw_records_path is not None:
+        return CTC_HOLDOUT_CLAIM_SCOPE
+    return CLAIM_SCOPE
+
+
 def main() -> int:
     args = parse_args()
     arms = [arm.strip() for arm in args.arms.split(",") if arm.strip()]
@@ -643,6 +655,7 @@ def main() -> int:
     scenario_filter = {s.strip() for s in args.scenario_ids.split(",")} if args.scenario_ids else None
     scenarios = [s for s in BEHAVIOR_SCENARIOS if scenario_filter is None or s.scenario_id in scenario_filter]
 
+    claim_scope = behavior_ecology_claim_scope(scenarios, policy_raw_records_path=policy_raw_records_path)
     manifest: dict[str, Any] = {
         "schema_version": BEHAVIOR_ECOLOGY_VERSION,
         "timestamp_utc": timestamp,
@@ -659,7 +672,7 @@ def main() -> int:
         "policy_raw_records_json": str(policy_raw_records_path) if policy_raw_records_path else None,
         "policy_raw_records_sha256": hashlib.sha256(policy_raw_records_path.read_bytes()).hexdigest() if policy_raw_records_path else None,
         "preregistered_metrics": PREREGISTERED_METRICS,
-        "claim_scope": CLAIM_SCOPE,
+        "claim_scope": claim_scope,
         "status": "running",
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
