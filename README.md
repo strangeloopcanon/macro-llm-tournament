@@ -2,7 +2,7 @@
 
 Research code for running as-of macro forecast tournaments against public Survey of Professional Forecasters data and simple statistical controls.
 
-The repository contains the reusable harness, plus one current handoff report at [`reports/macro_simulation_report.md`](reports/macro_simulation_report.md). Generated run reports, model outputs, caches, and research notes are local artifacts and are not part of the public source tree.
+Start with [`CURRENT.md`](CURRENT.md) for the current runnable surface. The repository contains the reusable harness, plus one current handoff report at [`reports/macro_simulation_report.md`](reports/macro_simulation_report.md). Generated run reports, model outputs, caches, and research notes are local artifacts and are not part of the public source tree.
 
 ## How the simulated economy works
 
