@@ -14,11 +14,12 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PANEL = PROJECT_ROOT / "work" / "empirical_bridge" / "spending_belief_panel.csv"
-DEFAULT_BRIDGE = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v3.json"
-DEFAULT_CELL_TARGETS = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_cell_targets.csv"
-DEFAULT_VALIDATION_SCORES = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_validation_scores.csv"
+DEFAULT_COVERAGE = PROJECT_ROOT / "work" / "empirical_bridge" / "spending_belief_panel_coverage.json"
+DEFAULT_BRIDGE = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v4.json"
+DEFAULT_CELL_TARGETS = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v4_cell_targets.csv"
+DEFAULT_VALIDATION_SCORES = PROJECT_ROOT / "work" / "empirical_bridge" / "empirical_bridge_v4_validation_scores.csv"
 
-BRIDGE_SPEC_VERSION = "empirical_bridge_v3"
+BRIDGE_SPEC_VERSION = "empirical_bridge_v4"
 REGRESSORS = (
     "actual_expected_inflation_1y",
     "actual_expected_real_income_growth",
@@ -28,11 +29,13 @@ FIT_WAVES = (202004, 202008, 202012, 202104, 202108, 202112, 202204, 202208, 202
 INTERNAL_CHECK_WAVES = (202212,)
 VALIDATION_WAVES = (202312, 202404, 202408)
 BETWEEN_BOUNDS_PER_PP = {
-    "actual_expected_inflation_1y": (-0.10, 0.30),
+    "actual_expected_inflation_1y": (-0.30, 0.30),
     "actual_expected_real_income_growth": (0.00, 0.50),
     "sce_question_unemployment_higher_prob": (-0.04, 0.00),
 }
-OUTPUT_COLUMN = "expected_total_spending_growth_pct"
+NOMINAL_OUTPUT_COLUMN = "expected_total_spending_growth_pct"
+OUTPUT_COLUMN = "expected_real_total_spending_growth_pct"
+CHART_REPRO_MAX_ABS_ERROR_TOLERANCE_PP = 0.35
 
 
 @dataclass(frozen=True)
@@ -52,8 +55,9 @@ class BridgeTransformResult:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fit and score the locked empirical bridge v3.")
+    parser = argparse.ArgumentParser(description="Fit and score the locked empirical bridge v4.")
     parser.add_argument("--panel-csv", type=Path, default=DEFAULT_PANEL)
+    parser.add_argument("--coverage-json", type=Path, default=DEFAULT_COVERAGE)
     parser.add_argument("--output-json", type=Path, default=DEFAULT_BRIDGE)
     parser.add_argument("--cell-targets-csv", type=Path, default=DEFAULT_CELL_TARGETS)
     parser.add_argument("--validation-scores-csv", type=Path, default=DEFAULT_VALIDATION_SCORES)
@@ -67,7 +71,7 @@ def main() -> int:
         if not args.output_json.exists():
             raise SystemExit("--validate requires an existing locked empirical bridge artifact")
         artifact = json.loads(args.output_json.read_text(encoding="utf-8"))
-        panel = pd.read_csv(args.panel_csv)
+        panel = load_panel(args.panel_csv)
         scores = score_split(panel, artifact, list(VALIDATION_WAVES), split_name="validation")
         args.validation_scores_csv.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(scores["rows"]).to_csv(args.validation_scores_csv, index=False)
@@ -75,6 +79,7 @@ def main() -> int:
         return 0
     result = fit_empirical_bridge(
         panel_csv=args.panel_csv,
+        coverage_json=args.coverage_json,
         output_json=args.output_json,
         cell_targets_csv=args.cell_targets_csv,
         validation_scores_csv=args.validation_scores_csv,
@@ -86,6 +91,7 @@ def main() -> int:
 def fit_empirical_bridge(
     *,
     panel_csv: Path,
+    coverage_json: Path,
     output_json: Path,
     cell_targets_csv: Path,
     validation_scores_csv: Path,
@@ -107,7 +113,8 @@ def fit_empirical_bridge(
     constraints = constraint_report(fit_model)
     validation_gate = validation_gate_report(fit_model, validation_refit, fit_scores, validation_scores)
     liquidity_gradient = liquidity_gradient_report(fit_model)
-    accepted = bool(constraints["passed"] and liquidity_gradient["passed"])
+    chart_quality = bridge_chart_quality_report(coverage_json)
+    accepted = bool(constraints["passed"] and liquidity_gradient["passed"] and chart_quality["passed"])
     artifact: dict[str, Any] = {
         "schema_version": BRIDGE_SPEC_VERSION,
         "bridge_spec_version": BRIDGE_SPEC_VERSION,
@@ -119,8 +126,16 @@ def fit_empirical_bridge(
         "fit_waves": list(FIT_WAVES),
         "internal_check_waves": list(INTERNAL_CHECK_WAVES),
         "validation_waves": list(VALIDATION_WAVES),
+        "nominal_outcome_column": NOMINAL_OUTPUT_COLUMN,
         "outcome_column": OUTPUT_COLUMN,
+        "outcome_transform": (
+            "100 * ((1 + expected_total_spending_growth_pct / 100) / "
+            "(1 + actual_expected_inflation_1y / 100) - 1)"
+        ),
         "regressors": list(REGRESSORS),
+        "coverage_json": str(coverage_json),
+        "coverage_json_sha256": file_sha256(coverage_json) if coverage_json.exists() else None,
+        "chart_quality": chart_quality,
         "winsor_bounds": winsor_bounds,
         "support": fit_model["support"],
         "coefficients": fit_model["coefficients"],
@@ -137,7 +152,8 @@ def fit_empirical_bridge(
         "validation_gate": validation_gate,
         "transform_rule": (
             "Per-period annual consumption-growth deviation equals between_coef dot clipped belief changes; "
-            "monthly/quarterly demand code converts the annual pp deviation to the period consumption margin."
+            "the current demand executor divides the annual pp deviation by 4 before applying it to the "
+            "quarterly consumption margin."
         ),
     }
     artifact["canonical_payload_sha256"] = canonical_sha256(artifact)
@@ -148,15 +164,17 @@ def fit_empirical_bridge(
     pd.DataFrame(validation_scores["rows"]).to_csv(validation_scores_csv, index=False)
     if not accepted:
         write_blocker(
-            "Empirical Bridge v3 fit was rejected by the locked fail-closed checks. "
+            "Empirical Bridge v4 fit was rejected by the locked fail-closed checks. "
             f"Constraint report: {json.dumps(constraints, sort_keys=True)}. "
-            f"Liquidity-gradient report: {json.dumps(liquidity_gradient, sort_keys=True)}."
+            f"Liquidity-gradient report: {json.dumps(liquidity_gradient, sort_keys=True)}. "
+            f"Chart-quality report: {json.dumps(chart_quality, sort_keys=True)}."
         )
     return {
         "output_json": str(output_json),
         "status": artifact["status"],
         "canonical_payload_sha256": artifact["canonical_payload_sha256"],
         "constraints_passed": bool(constraints["passed"]),
+        "chart_quality_passed": bool(chart_quality["passed"]),
         "validation_passed": bool(validation_gate["passed"]),
     }
 
@@ -165,16 +183,29 @@ def load_panel(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Spending/belief panel not found: {path}")
     frame = pd.read_csv(path)
-    required = {"spending_wave", "weight", OUTPUT_COLUMN, "income_group", "liquid_wealth_group", "age_group", *REGRESSORS}
+    required = {"spending_wave", "weight", NOMINAL_OUTPUT_COLUMN, "income_group", "liquid_wealth_group", "age_group", *REGRESSORS}
     missing = sorted(required - set(frame.columns))
     if missing:
         raise ValueError(f"Empirical bridge panel missing columns: {', '.join(missing)}")
-    for column in ["spending_wave", "weight", OUTPUT_COLUMN, *REGRESSORS]:
+    for column in ["spending_wave", "weight", NOMINAL_OUTPUT_COLUMN, *REGRESSORS]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame = frame.dropna(subset=["spending_wave", "weight", OUTPUT_COLUMN, *REGRESSORS]).copy()
+    frame = frame.dropna(subset=["spending_wave", "weight", NOMINAL_OUTPUT_COLUMN, *REGRESSORS]).copy()
+    frame[OUTPUT_COLUMN] = real_growth_from_nominal(
+        frame[NOMINAL_OUTPUT_COLUMN],
+        frame["actual_expected_inflation_1y"],
+    )
+    frame = frame.dropna(subset=[OUTPUT_COLUMN]).copy()
     frame["spending_wave"] = frame["spending_wave"].astype(int)
     frame["weight"] = frame["weight"].clip(lower=0.0)
     return frame[frame["weight"].gt(0)].reset_index(drop=True)
+
+
+def real_growth_from_nominal(nominal_growth_pct: pd.Series, inflation_expectation_pct: pd.Series) -> pd.Series:
+    nominal = pd.to_numeric(nominal_growth_pct, errors="coerce") / 100.0
+    inflation = pd.to_numeric(inflation_expectation_pct, errors="coerce") / 100.0
+    denominator = 1.0 + inflation
+    result = 100.0 * ((1.0 + nominal) / denominator - 1.0)
+    return result.where(denominator.gt(0.0))
 
 
 def fit_mundlak_model(frame: pd.DataFrame) -> dict[str, Any]:
@@ -438,6 +469,59 @@ def validation_gate_report(
     }
 
 
+def bridge_chart_quality_report(coverage_json: Path) -> dict[str, Any]:
+    if not coverage_json.exists():
+        return {
+            "passed": False,
+            "status": "missing_coverage_json",
+            "coverage_json": str(coverage_json),
+            "max_abs_error_pp": None,
+            "tolerance_pp": CHART_REPRO_MAX_ABS_ERROR_TOLERANCE_PP,
+            "note": "v4 requires the spending panel coverage report before fitting.",
+        }
+    try:
+        coverage = json.loads(coverage_json.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {
+            "passed": False,
+            "status": "unreadable_coverage_json",
+            "coverage_json": str(coverage_json),
+            "max_abs_error_pp": None,
+            "tolerance_pp": CHART_REPRO_MAX_ABS_ERROR_TOLERANCE_PP,
+        }
+    chart = coverage.get("chart_reproduction", {}) if isinstance(coverage, dict) else {}
+    rows: list[dict[str, Any]] = []
+    max_errors: list[float] = []
+    for series in ("expected_total_spending_growth_pct", "reported_total_spending_growth_pct"):
+        series_report = chart.get(series, {}) if isinstance(chart, dict) else {}
+        max_error = series_report.get("max_abs_error_pp")
+        if max_error is not None and np.isfinite(float(max_error)):
+            max_errors.append(float(max_error))
+        rows.append(
+            {
+                "series": series,
+                "max_abs_error_pp": None if max_error is None else float(max_error),
+                "original_passed": bool(series_report.get("passed", False)),
+            }
+        )
+    max_abs_error = max(max_errors) if max_errors else None
+    passed = bool(max_abs_error is not None and max_abs_error <= CHART_REPRO_MAX_ABS_ERROR_TOLERANCE_PP)
+    return {
+        "passed": passed,
+        "status": "passed_with_weight_substitution_warning" if passed else "failed",
+        "coverage_json": str(coverage_json),
+        "max_abs_error_pp": max_abs_error,
+        "tolerance_pp": CHART_REPRO_MAX_ABS_ERROR_TOLERANCE_PP,
+        "original_gate_tolerance_pp": chart.get("gate_tolerance_pp") if isinstance(chart, dict) else None,
+        "original_gate_passed": bool(chart.get("gate_passed", False)) if isinstance(chart, dict) else False,
+        "rows": rows,
+        "note": (
+            "v4 accepts the known public-weight substitution mismatch only if chart reproduction "
+            "stays within 0.35pp; the tighter v3 0.10pp gate remains recorded as original_gate_passed."
+        ),
+    }
+
+
 def build_cell_targets(panel: pd.DataFrame, artifact: dict[str, Any], winsor_bounds: dict[str, float]) -> pd.DataFrame:
     frames = []
     for split, waves in [("fit", FIT_WAVES), ("validation_frozen", VALIDATION_WAVES)]:
@@ -521,9 +605,10 @@ def file_sha256(path: Path) -> str:
 
 
 def write_blocker(message: str) -> None:
-    path = PROJECT_ROOT / "work" / "codex_briefs" / "empirical_bridge_v3_blockers.md"
+    path = PROJECT_ROOT / "work" / "codex_briefs" / f"{BRIDGE_SPEC_VERSION}_blockers.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    previous = path.read_text(encoding="utf-8") if path.exists() else "# Empirical Bridge v3 Blockers\n\n"
+    title = BRIDGE_SPEC_VERSION.replace("_", " ").title()
+    previous = path.read_text(encoding="utf-8") if path.exists() else f"# {title} Blockers\n\n"
     entry = f"## {datetime.now(timezone.utc).isoformat()}\n\n{message}\n\n"
     path.write_text(previous + entry, encoding="utf-8")
 

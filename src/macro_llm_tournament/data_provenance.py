@@ -48,9 +48,9 @@ DERIVED_DATA_DIRS: dict[str, dict[str, str]] = {
         "notes": "Normalized SCE panels produced by prepare_sce_microdata / prepare_persona_holdouts.",
     },
     "work/empirical_bridge": {
-        "dataset": "empirical_bridge_v3_derived",
+        "dataset": "empirical_bridge_derived",
         "source": "derived_in_repo",
-        "notes": "Spending/belief panel, cell targets, validation scores, and locked empirical bridge v3 fit artifacts.",
+        "notes": "Spending/belief panel, cell targets, validation scores, and locked empirical bridge fit artifacts.",
     },
 }
 

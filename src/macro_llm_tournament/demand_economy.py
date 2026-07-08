@@ -17,7 +17,7 @@ import pandas as pd
 from .agent_common import ACCOUNTING_TOLERANCE, OUTPUT_ROOT, WORK_ROOT, bounded_float, cache_key, markdown_table, round_or_none
 from .agent_types import build_household_type_cells
 from .behavior_ecology import POLICY_PROMPT_VERSION, normalize_policy_payload
-from .empirical_bridge import BRIDGE_SPEC_VERSION, BridgeInput, transform_belief_change
+from .empirical_bridge import BRIDGE_SPEC_VERSION, DEFAULT_BRIDGE, BridgeInput, transform_belief_change
 from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
 from .llm_common import LLMUnavailable
 
@@ -36,7 +36,8 @@ NEUTRAL_POLICY_RATE = 3.0
 INFLATION_TARGET = 2.0
 STEADY_EMPLOYMENT_RATE = 0.955
 DEFAULT_BEHAVIOR_POLICY_RAW_RECORDS = OUTPUT_ROOT / "behavior_ecology_gpt55_xhigh" / "ecology_raw_records.json"
-DEFAULT_EMPIRICAL_BRIDGE_JSON = WORK_ROOT / "empirical_bridge" / "empirical_bridge_v3.json"
+DEFAULT_EMPIRICAL_BRIDGE_JSON = DEFAULT_BRIDGE
+EMPIRICAL_BRIDGE_PERIODS_PER_YEAR = 4.0
 FULL_LAB_LLM_METRICS = {
     "baseline_no_shock_output_gap_rms",
     "belief_feedback_amplification_ratio",
@@ -1955,6 +1956,7 @@ def _realize_household_period(
             behavior_policy_type_id = ""
             behavior_policy_consumption_drag = 0.0
             empirical_bridge_annual_growth_deviation_pp = 0.0
+            empirical_bridge_period_growth_deviation_pp = 0.0
             empirical_bridge_clipped_inputs_json = "{}"
         else:
             policy = _structural_consumption_policy(
@@ -1978,6 +1980,7 @@ def _realize_household_period(
             behavior_policy_type_id = str(policy["behavior_policy_type_id"])
             behavior_policy_consumption_drag = float(policy["behavior_policy_consumption_drag"])
             empirical_bridge_annual_growth_deviation_pp = float(policy.get("empirical_bridge_annual_growth_deviation_pp", 0.0))
+            empirical_bridge_period_growth_deviation_pp = float(policy.get("empirical_bridge_period_growth_deviation_pp", 0.0))
             empirical_bridge_clipped_inputs_json = json.dumps(policy.get("empirical_bridge_clipped_inputs", {}), sort_keys=True)
         debt_before = float(state["debt"])
         floor_consumption = min(cash_available, float(static["subsistence_floor_share"]) * baseline_consumption)
@@ -2053,6 +2056,7 @@ def _realize_household_period(
                 "behavior_policy_type_id": behavior_policy_type_id,
                 "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
                 "empirical_bridge_annual_growth_deviation_pp": empirical_bridge_annual_growth_deviation_pp,
+                "empirical_bridge_period_growth_deviation_pp": empirical_bridge_period_growth_deviation_pp,
                 "empirical_bridge_clipped_inputs_json": empirical_bridge_clipped_inputs_json,
                 "budget_residual": budget_residual,
                 "reason_codes_json": json.dumps(belief["reason_codes"], sort_keys=True),
@@ -2135,6 +2139,7 @@ def _structural_consumption_policy(
     drawdown = 0.0
     buffer_relief_support = 0.030 * max(0.0, float(state.get("transfer_buffer_relief", 0.0)))
     empirical_bridge_annual_growth_deviation_pp = 0.0
+    empirical_bridge_period_growth_deviation_pp = 0.0
     empirical_bridge_consumption_delta = 0.0
     empirical_bridge_clipped_inputs: dict[str, bool] = {}
     state_behavior_match = (
@@ -2175,7 +2180,8 @@ def _structural_consumption_policy(
         )
         bridge_result = transform_belief_change(behavior_policy_profile, previous_input, current_input)
         empirical_bridge_annual_growth_deviation_pp = float(bridge_result.annual_growth_deviation_pp)
-        empirical_bridge_consumption_delta = baseline_consumption * empirical_bridge_annual_growth_deviation_pp / 100.0
+        empirical_bridge_period_growth_deviation_pp = empirical_bridge_annual_growth_deviation_pp / EMPIRICAL_BRIDGE_PERIODS_PER_YEAR
+        empirical_bridge_consumption_delta = baseline_consumption * empirical_bridge_period_growth_deviation_pp / 100.0
         empirical_bridge_clipped_inputs = bridge_result.clipped
         behavior_policy_mode = "empirical_bridge"
         behavior_policy_type_id = ""
@@ -2251,6 +2257,7 @@ def _structural_consumption_policy(
         "behavior_policy_type_id": behavior_policy_type_id,
         "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
         "empirical_bridge_annual_growth_deviation_pp": empirical_bridge_annual_growth_deviation_pp,
+        "empirical_bridge_period_growth_deviation_pp": empirical_bridge_period_growth_deviation_pp,
         "empirical_bridge_clipped_inputs": empirical_bridge_clipped_inputs,
     }
 

@@ -268,6 +268,45 @@ phase4-prior-update-state-schedule-replay:
 		--max-live-calls 0 \
 		--output-dir outputs/phase4_matched_twins_state_schedule_codex_replay_fred_onecard
 
+empirical-bridge-v4-fit:
+	PYTHONPATH=src python3 -m macro_llm_tournament.empirical_bridge \
+		--panel-csv work/empirical_bridge/spending_belief_panel.csv \
+		--coverage-json work/empirical_bridge/spending_belief_panel_coverage.json \
+		--output-json work/empirical_bridge/empirical_bridge_v4.json \
+		--cell-targets-csv work/empirical_bridge/empirical_bridge_v4_cell_targets.csv \
+		--validation-scores-csv work/empirical_bridge/empirical_bridge_v4_validation_scores.csv
+
+phase4-prior-update-empirical-bridge-v4-replay:
+	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
+		--mode replay \
+		--belief-source persona_ecology_replay \
+		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
+		--data-mode fred \
+		--asof-start 2025-12-15 \
+		--asof-end 2025-12-15 \
+		--history-months 18 \
+		--period-count 2 \
+		--behavior-policy-mode empirical_bridge \
+		--scoring-label retrospective \
+		--max-live-calls 0 \
+		--output-dir outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_onecard
+
+phase4-prior-update-empirical-bridge-v4-holdlast-replay:
+	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
+		--mode replay \
+		--belief-source persona_ecology_replay \
+		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
+		--data-mode fred \
+		--asof-start 2025-12-15 \
+		--asof-end 2026-04-15 \
+		--history-months 18 \
+		--period-count 6 \
+		--ecology-period-policy hold_last \
+		--behavior-policy-mode empirical_bridge \
+		--scoring-label retrospective \
+		--max-live-calls 0 \
+		--output-dir outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_holdlast_5cards
+
 macro-performance-fixture: demand-economy-fixture demand-vintage-oos-fixture
 	PYTHONPATH=src python3 -m macro_llm_tournament.macro_performance_gate \
 		--mode fixture \

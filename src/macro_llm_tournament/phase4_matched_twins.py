@@ -24,6 +24,7 @@ from .demand_economy import (
     normalize_demand_households,
     run_demand_economy,
 )
+from .empirical_bridge import BRIDGE_SPEC_VERSION, DEFAULT_BRIDGE
 from .postcutoff_behavior_gate import (
     TARGET_SPECS,
     build_postcutoff_behavior_cards,
@@ -269,18 +270,18 @@ def load_phase4_behavior_policy_profile(args: argparse.Namespace) -> dict[str, A
     if args.behavior_policy_mode == "state_schedule":
         return load_state_behavior_policy_profile(Path(args.behavior_policy_state_profile_json))
     if args.behavior_policy_mode == "empirical_bridge":
-        return load_empirical_bridge_profile(WORK_ROOT / "empirical_bridge" / "empirical_bridge_v3.json")
+        return load_empirical_bridge_profile(DEFAULT_BRIDGE)
     return None
 
 
 def empirical_bridge_failure_fields() -> dict[str, Any]:
-    path = WORK_ROOT / "empirical_bridge" / "empirical_bridge_v3.json"
+    path = DEFAULT_BRIDGE
     if not path.exists():
-        return {"bridge_spec_version": "empirical_bridge_v3", "empirical_bridge_status": "missing"}
+        return {"bridge_spec_version": BRIDGE_SPEC_VERSION, "empirical_bridge_status": "missing"}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {"bridge_spec_version": "empirical_bridge_v3", "empirical_bridge_status": "unreadable"}
+        return {"bridge_spec_version": BRIDGE_SPEC_VERSION, "empirical_bridge_status": "unreadable"}
     return {
         "bridge_spec_version": payload.get("bridge_spec_version") or payload.get("schema_version"),
         "empirical_bridge_sha256": payload.get("canonical_payload_sha256"),
@@ -1041,6 +1042,14 @@ def phase4_behavior_policy_description(manifest: dict[str, Any]) -> str:
             "each respondent-derived household to the nearest policy profile, interpolates those functions, enforces "
             "budgets, and aggregates. The matched-twin comparison therefore tests whether prior-conditioned LLM belief "
             "updates add value once behavior is executed through the most natural policy-function bridge currently in the repo."
+        )
+    if policy.get("mode") == "empirical_bridge":
+        return (
+            "Both twins use the same empirically estimated SCE spending-belief bridge. The bridge maps household belief "
+            "changes into a real consumption-growth margin using the accepted v4 Mundlak coefficients; the executor divides "
+            "the annual deviation by four for the quarterly demand period, then deterministic code enforces budgets, "
+            "saving/debt closure, accounting, and aggregation. The matched-twin comparison therefore isolates the "
+            "belief-updater channel while using the measured belief-to-spending bridge."
         )
     return (
         "Both twins use the fixed deterministic demand kernel. This is the older behavior layer and remains available "

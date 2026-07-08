@@ -4,11 +4,11 @@
 
 The project started with a broad question: can LLM agents simulate the macroeconomy well enough to produce useful forecasts and counterfactuals?
 
-The answer is now narrower, cleaner, and more useful. Frontier LLMs are good macro belief engines. They forecast hidden macro outcomes better than strong statistical baselines, survive direct recall audits, and update beliefs in the right direction when given a person's prior beliefs. They are not, at least in the current evidence, reliable generators of individual household heterogeneity from demographics or backstories. The best behavior interface so far is not first-person role-play or one-off allocation guesses; it is an LLM-authored policy schedule that deterministic code executes against household state. Even so, the project has not yet shown a validated LLM-based simulated economy.
+The answer is now narrower, cleaner, and more useful. Frontier LLMs are good macro belief engines. They forecast hidden macro outcomes better than strong statistical baselines, survive direct recall audits, and update beliefs in the right direction when given a person's prior beliefs. They are not, at least in the current evidence, reliable generators of individual household heterogeneity from demographics or backstories. The best behavior interfaces are measured or scheduled functions that deterministic code executes against household state. The newest real-data bridge gets the Phase 4 economy very close to the adaptive-expectations twin, but it still does not clear the locked scaled-RMSE win condition.
 
 The short version:
 
-**LLMs are belief updaters and policy-function authors, not reliable household simulacra. Individual heterogeneity has to come from data; once it is supplied, the model can partly update beliefs and state conditional behavior rules.**
+**LLMs are belief updaters and policy-function authors, not reliable household simulacra. Individual heterogeneity has to come from data; once it is supplied, the model can partly update beliefs, and measured code has to translate those beliefs into feasible actions.**
 
 That is not the original maximal claim, but it is a real result. It says where LLMs add signal, where they fail, and what an honest macro-agent architecture should look like next.
 
@@ -25,8 +25,9 @@ That is not the original maximal claim, but it is a real result. It says where L
 | Can prior-conditioned agents update beliefs? | Yes, modestly. | On repeated October-November 2024 SCE respondents, GPT-5.5 clears the locked prior-update gate: update correlation `0.3578`, direction accuracy `0.5769`, amplitude ratio `0.3234`, and RMSE improvement versus persistence `0.0437`. |
 | Does the policy-schedule behavior layer generalize to a fresh behavior family? | Directionally yes. | The new CTC holdout (`behavior_holdout_ctc_v1`) scores already-banked GPT-5.5 policy schedules with zero new calls. Policy schedules beat the liquidity rule overall: range RMSE `0.0097` versus `0.0207`, though they miss part of the income-gradient shape. |
 | Does the state-conditioned policy layer rescue the Phase 4 economy? | No, but it improves the bridge. | The live Codex state-policy profile improves the LLM-updater economy versus the generic schedule executor: strict scaled RMSE `5.0843` versus `6.5296`; five-card hold-last RMSE `3.2132` versus `3.8132`. Adaptive still wins both runs. |
-| Can the belief-to-spending bridge be estimated from real microdata? | Not yet under the locked spec. | Empirical bridge v3 (Mundlak fit on joined SCE spending + belief microdata) was rejected by its own pre-registered fail-closed bounds: the between-wave inflation coefficient of `+1.22` sits far outside the `[-0.10, +0.30]` band, exposing a nominal-versus-real outcome mismatch in the spec. Zero Phase 4 surface spent. |
-| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and Phase 4 now runs exploratory matched-twin replays under fixed-kernel, generic policy-schedule, and state-conditioned schedule executors. The LLM-updater economy still loses to the adaptive-expectations twin on the current FRED proxy passes. |
+| Can the belief-to-spending bridge be estimated from real microdata? | Yes, with caveats. | Empirical bridge v4 deflates expected spending growth by each respondent's inflation expectation, passes the locked coefficient/chart/liquidity gates, and is accepted. The validation diagnostic still fails because the validation-wave real-income coefficient is unstable. |
+| Does the real-data bridge rescue the Phase 4 economy? | Almost, but not on the locked metric. | v4 cuts strict LLM-updater scaled RMSE from `5.0843` to `0.6311` and hold-last from `3.2132` to `1.4688`. Adaptive still edges it on scaled RMSE: `0.5692` strict and `1.4633` hold-last. |
+| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works, and Phase 4 now runs exploratory matched-twin replays under fixed-kernel, schedule, state-schedule, and empirical-bridge executors. The best LLM-updater replay is now very close to adaptive, but it has not beaten it on the locked scaled score. |
 
 ## Finding 1: The Aggregate Belief Engine Works
 
@@ -282,7 +283,39 @@ The fit ran once and was rejected. Two locked gates fired:
 
 The rejection is informative rather than embarrassing. The SCE outcome variable is *nominal* expected spending growth, so a coefficient near one on expected inflation is largely mechanical price pass-through: households expecting higher prices expect to spend more dollars. The bound was written in real-consumption terms. The data exposed a nominal-versus-real units mismatch in the spec, not a household planning to consume 1.2% more real goods per point of expected inflation.
 
-The fail-closed machinery then did its job downstream: both Phase 4 matched-twin replays refused to score with a rejected bridge (`status: failed`, error `Empirical bridge is fail-closed and not accepted`), zero live calls were spent, and the blockers are logged with timestamps in `work/codex_briefs/empirical_bridge_v3_blockers.md`. No Phase 4 score surface was consumed. Any bridge v4 must be a new pre-registered spec revision — most likely deflating the outcome to real spending growth or restating the bounds in nominal terms — not a quiet re-fit.
+The fail-closed machinery then did its job downstream: both Phase 4 matched-twin replays refused to score with a rejected bridge (`status: failed`, error `Empirical bridge is fail-closed and not accepted`), zero live calls were spent, and the blockers are logged with timestamps in `work/codex_briefs/empirical_bridge_v3_blockers.md`. No Phase 4 score surface was consumed.
+
+### Empirical bridge v4: accepted, and nearly closes Phase 4
+
+v4 is the proper spec revision rather than a quiet refit. The locked v4 spec (`reports/empirical_bridge_v4_spec.md`) changes the fitted outcome to respondent-level real expected spending growth:
+
+```text
+100 * ((1 + expected_total_spending_growth_pct / 100)
+       / (1 + actual_expected_inflation_1y / 100) - 1)
+```
+
+The same joined SCE spending-belief panel, FIT waves, internal-check wave, and validation waves are used. The chart-quality gate is still recorded, but v4 treats the known public-weight substitution mismatch as acceptable only if max chart error stays below `0.35`pp; the observed max is `0.3006`pp. The v4 fit is accepted. Its between-wave coefficients are:
+
+| Belief regressor | Coefficient | Locked bound | Status |
+| --- | ---: | ---: | --- |
+| Expected inflation | `+0.1880` | `[-0.30, +0.30]` | pass |
+| Expected real income growth | `+0.4266` | `[0.00, +0.50]` | pass |
+| Unemployment-higher probability | `-0.0158` per pp (`-0.1580` per 10pp) | `[-0.40, 0.00]` per 10pp | pass |
+
+The validation diagnostic is mixed. Cell RMSE generalizes (`1.29x` fit, inside the `1.5x` diagnostic band), and inflation/unemployment coefficient signs and magnitudes are stable. The real-income coefficient is not stable in the validation refit (`10.02x` the FIT coefficient), so this remains an exploratory bridge rather than a confirmatory macro result.
+
+One implementation detail matters. The fitted SCE outcome is annual expected real spending growth, while the demand economy uses quarterly household income and consumption states. A Codex CLI red-team pass caught that the executor was initially applying the annual coefficient as a one-period shock. The executor now divides the annual bridge deviation by `4` before applying it to the quarterly consumption margin, and both annual and per-period deviations are emitted in the household-decision audit.
+
+Phase 4 then ran two zero-live-call v4 replays:
+
+| Run | Adaptive scaled RMSE | LLM-updater scaled RMSE | Result |
+| --- | ---: | ---: | --- |
+| Strict one-card retrospective | `0.5692` | `0.6311` | LLM path improves massively but adaptive still wins. |
+| Five-card hold-last retrospective | `1.4633` | `1.4688` | Essentially tied, but adaptive still wins on the locked metric. |
+
+This is the strongest Phase 4 result so far. Relative to the prior state-schedule bridge, v4 cuts the LLM-updater strict scaled RMSE from `5.0843` to `0.6311`, and the hold-last scaled RMSE from `3.2132` to `1.4688`. The adaptive twin improves too, from `1.3471` to `0.5692` strict and from `1.7290` to `1.4633` hold-last. Accounting passes in both v4 replays, with max residuals at numerical tolerance (`7.28e-12` strict, `2.91e-11` hold-last).
+
+The right interpretation is precise: **the measured belief-to-spending bridge fixes most of the simulated economy's over-contraction problem, but the LLM-updater economy still has not beaten the adaptive-expectations twin on the locked scaled score.**
 
 ## What We Can Claim Now
 
@@ -293,6 +326,7 @@ The evidence supports three positive claims:
 3. **Prior-conditioned agents can partly update real household beliefs.** The model is useful when it operates on supplied respondent state.
 4. **Policy-schedule elicitation is the best behavior interface found so far.** It is the first LLM-derived behavior source to beat the liquidity rule on the selection split, it survives one fresh CTC behavior family, and it is now executable inside the demand economy.
 5. **State-conditioned schedules improve the macro bridge.** They do not win, but they reduce the LLM-updater Phase 4 error relative to the generic schedule executor while preserving accounting.
+6. **A real-data belief-to-spending bridge nearly closes Phase 4.** Empirical bridge v4 passes its locked coefficient/chart/liquidity gates, fixes most of the over-contraction, and brings the LLM-updater path close to the adaptive twin.
 
 The evidence also supports three negative claims:
 
@@ -303,6 +337,7 @@ The evidence also supports three negative claims:
 5. **The first Phase 4 policy-schedule replay also does not beat adaptive expectations.**
 6. **The first Phase 4 state-schedule replay still does not beat adaptive expectations.**
 7. **The first empirically estimated belief-to-spending bridge (v3) was rejected by its own pre-registered fail-closed bounds**, exposing a nominal-versus-real mismatch between the SCE spending outcome and the real-consumption bounds; no Phase 4 surface was spent on it.
+8. **Empirical bridge v4 still does not beat adaptive expectations on the locked scaled metric.** It wins or nearly wins on some unscaled summaries, but the pre-declared scaled RMSE remains the score that counts.
 
 The full claim remains open:
 
@@ -310,15 +345,14 @@ The full claim remains open:
 
 ## Recommended Next Work
 
-The next phase should not chase richer personas. It should build from the results that survived: prior-conditioned belief updating, schedule-based behavior elicitation, and state-conditioned execution.
+The next phase should not chase richer personas. It should build from the results that survived: prior-conditioned belief updating, schedule-based behavior elicitation, and the real-data spending bridge.
 
-1. Pre-register empirical bridge v4 with a real (inflation-deflated) spending-growth outcome or nominal-consistent coefficient bounds, then re-fit once on the same locked splits. The joined spending-belief panel, provenance log, and reserved `behavior_holdout_spending_windfall_v1` family are already in place.
-2. Diagnose the remaining Phase 4 loss under `state_schedule`: which mapped series and which household-state profiles produce the consumption/saving miss?
-3. Build a longer, same-horizon prior-update panel before spending more Phase 4 score surface.
-4. Improve the state-policy bridge on development dynamics only. The current version reduces but does not remove over-contraction; the next version should be judged before any new FRED month is scored.
+1. Diagnose the remaining v4 Phase 4 gap, especially the target scaling behind `rmse_scaled`: strict v4 has lower unscaled RMSE for the LLM path (`0.3635` vs adaptive `0.3751`) but worse scaled RMSE (`0.6311` vs `0.5692`).
+2. Investigate the unstable validation-wave real-income coefficient before treating v4 as confirmatory. The fit coefficient is `+0.4266`; the validation refit is `+4.2744`, which is too large to ignore.
+3. Build a longer, same-horizon prior-update panel before spending new Phase 4 score surface. The current hold-last run reuses only the banked two-period SCE belief update.
+4. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
 5. Keep the CTC, lottery, UI, and reserved spending-windfall behavior families frozen for mechanism evaluation. Any further behavior promotion needs a new never-scored family.
-6. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement, and run the next matched-twin comparison only when panel, replay, and scoring horizons align.
-7. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
+6. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
 
 Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. Point-behavior elicitation is closed; the schedule interface is the live route.
 
@@ -351,8 +385,8 @@ The December 2024 profile-only wave is spent. The November 2024 backstory valida
 
 The Phase 4 fixture compares two versions of the same deterministic demand economy: an LLM-belief fixture and an adaptive-expectations twin. It writes the locked proxy mapping, cards, targets, household states, twin paths, accounting, forecasts, joined errors, scores, manifest, and `phase4_matched_twins_report.md`.
 
-The Phase 4 replay adapter consumes persona-ecology predictions rather than raw prompt payloads. It joins on the normalized CSV outputs, not prompt-facing relative IDs; derives household states from demographics, weights, and prior beliefs; and excludes `actual_*` labels from the demand-economy input. The strict fixed-kernel Codex replay artifact is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard/`. The fixed-kernel extrapolating ablation is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_holdlast_5cards/`. The strict policy-schedule replay artifact is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_onecard/`. The policy-schedule extrapolating ablation is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_holdlast_5cards/`. The state-conditioned policy profile is `outputs/state_policy_schedules_live_gpt55_sce_prior_update/`. The strict state-schedule replay artifact is `outputs/phase4_matched_twins_state_schedule_codex_replay_fred_onecard/`. The state-schedule extrapolating ablation is `outputs/phase4_matched_twins_state_schedule_codex_replay_fred_holdlast_5cards/`. The rejected empirical-bridge attempts (`outputs/phase4_matched_twins_empirical_bridge_codex_replay_fred_onecard/` and `_holdlast_5cards/`) contain only fail-closed manifests, by design; the locked bridge artifact with its rejected constraint report is `work/empirical_bridge/empirical_bridge_v3.json`. All current replay artifacts use mapping schema v2 and `scoring_label: retrospective`; the first confirmatory v2 score is reserved for the next newly scoreable data month.
+The Phase 4 replay adapter consumes persona-ecology predictions rather than raw prompt payloads. It joins on the normalized CSV outputs, not prompt-facing relative IDs; derives household states from demographics, weights, and prior beliefs; and excludes `actual_*` labels from the demand-economy input. The strict fixed-kernel Codex replay artifact is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard/`. The fixed-kernel extrapolating ablation is `outputs/phase4_matched_twins_prior_update_codex_replay_fred_holdlast_5cards/`. The strict policy-schedule replay artifact is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_onecard/`. The policy-schedule extrapolating ablation is `outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_holdlast_5cards/`. The state-conditioned policy profile is `outputs/state_policy_schedules_live_gpt55_sce_prior_update/`. The strict state-schedule replay artifact is `outputs/phase4_matched_twins_state_schedule_codex_replay_fred_onecard/`. The state-schedule extrapolating ablation is `outputs/phase4_matched_twins_state_schedule_codex_replay_fred_holdlast_5cards/`. The rejected empirical-bridge v3 attempts (`outputs/phase4_matched_twins_empirical_bridge_codex_replay_fred_onecard/` and `_holdlast_5cards/`) contain only fail-closed manifests, by design; the rejected v3 bridge artifact is `work/empirical_bridge/empirical_bridge_v3.json`. The accepted v4 bridge artifact is `work/empirical_bridge/empirical_bridge_v4.json`; its strict replay is `outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_onecard/`, and its hold-last replay is `outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_holdlast_5cards/`. All current replay artifacts use mapping schema v2 and `scoring_label: retrospective`; the first confirmatory v2 score is reserved for the next newly scoreable data month.
 
 ### Reproducibility notes
 
-The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full local test run passed `157` tests. The data-asset event stream (downloads, derivations, run manifests, all timestamped) is `data_provenance/data_events.jsonl`.
+The canonical report in the repository is `reports/macro_simulation_report.md`, with the sendable copy exported to `Downloads/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full local test run passed `158` tests. The data-asset event stream (downloads, derivations, run manifests, all timestamped) is `data_provenance/data_events.jsonl`.

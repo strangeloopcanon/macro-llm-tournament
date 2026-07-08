@@ -170,7 +170,8 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
         )
         self.assertEqual(policy["behavior_policy_mode"], "empirical_bridge")
         self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], -0.10)
-        self.assertAlmostEqual(policy["desired_consumption"], 999.0)
+        self.assertAlmostEqual(policy["empirical_bridge_period_growth_deviation_pp"], -0.025)
+        self.assertAlmostEqual(policy["desired_consumption"], 999.75)
 
     def test_phase4_fixture_cli_writes_locked_mapping_and_scores(self):
         with TemporaryDirectory() as temp_dir:

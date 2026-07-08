@@ -141,7 +141,7 @@ from macro_llm_tournament.prepare_spending_survey import (
     normalize_spending_microdata,
     verify_reported_spending_chart,
 )
-from macro_llm_tournament.empirical_bridge import constraint_report, weighted_quantile
+from macro_llm_tournament.empirical_bridge import real_growth_from_nominal, constraint_report, weighted_quantile
 import macro_llm_tournament.persona_belief_panel as persona_belief_panel_module
 from macro_llm_tournament.persona_ecology import (
     EcologyCard,
@@ -2861,6 +2861,14 @@ class ForecastTournamentTests(unittest.TestCase):
             }
         )
         self.assertFalse(report["passed"])
+
+    def test_empirical_bridge_v4_deflates_nominal_spending_outcome(self):
+        real = real_growth_from_nominal(
+            pd.Series([5.0, 2.0]),
+            pd.Series([3.0, 2.0]),
+        )
+        self.assertAlmostEqual(float(real.iloc[0]), 100.0 * (1.05 / 1.03 - 1.0))
+        self.assertAlmostEqual(float(real.iloc[1]), 0.0)
 
     def test_persona_variance_score_detects_flattened_within_group_spread(self):
         respondents = build_fixture_respondent_panel(respondent_count=54, survey_date="2026-01-01")
