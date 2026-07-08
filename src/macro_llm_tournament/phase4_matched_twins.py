@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,6 +17,7 @@ from .demand_economy import (
     DemandEconomyClient,
     DemandScenario,
     behavior_policy_manifest,
+    build_hybrid_behavior_policy_profile,
     build_fixture_demand_households,
     load_empirical_bridge_profile,
     load_behavior_policy_profile,
@@ -91,6 +92,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--behavior-policy-raw-records-json", default=None)
     parser.add_argument("--behavior-policy-state-profile-json", default=None)
     parser.add_argument("--empirical-bridge-json", default=None)
+    parser.add_argument("--hybrid-state-weight", type=float, default=1.0)
+    parser.add_argument("--belief-gain-global", type=float, default=1.0)
+    parser.add_argument("--belief-gain-inflation", type=float, default=1.0)
+    parser.add_argument("--belief-gain-income", type=float, default=1.0)
+    parser.add_argument("--belief-gain-unemployment", type=float, default=1.0)
+    parser.add_argument("--feedback-gain-multiplier", type=float, default=1.0)
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument("--output-dir", default=None)
@@ -131,7 +138,7 @@ def main() -> int:
         households = load_phase4_households(args, ecology_bundle=ecology_bundle)
         period_count = max(int(args.period_count), len(cards) + 1, 2)
         cache_dir = output_dir / "fresh_phase4_matched_twins_cache" if args.fresh_cache else WORK_ROOT / "phase4_matched_twins_cache"
-        scenarios = [DEFAULT_SCENARIO]
+        scenarios = [phase4_scenario_with_feedback_multiplier(float(args.feedback_gain_multiplier))]
         twins = build_phase4_clients(args, cache_dir=cache_dir, ecology_bundle=ecology_bundle, period_count=period_count)
 
         all_initial: list[pd.DataFrame] = []
@@ -209,7 +216,11 @@ def main() -> int:
                 "mapping_sha256": mapping_sha,
                 "mapping_spec_version": PHASE4_VERSION,
                 "data_status": data_status,
-                "persona_ecology_input": ecology_input_manifest(ecology_bundle, period_count=period_count),
+                "persona_ecology_input": ecology_input_manifest(
+                    ecology_bundle,
+                    period_count=period_count,
+                    belief_transform=belief_transform_from_args(args),
+                ),
                 "card_count": int(len(cards)),
                 "target_rows": int(scoring_targets.shape[0]),
                 "scoreable_target_rows": int(scoring_targets["target_available"].sum()) if not scoring_targets.empty else 0,
@@ -253,6 +264,19 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--behavior-policy-state-profile-json is required when --behavior-policy-mode state_schedule")
         if not Path(args.behavior_policy_state_profile_json).exists():
             raise ValueError(f"--behavior-policy-state-profile-json does not exist: {args.behavior_policy_state_profile_json}")
+    if args.behavior_policy_mode == "empirical_bridge_state_schedule":
+        if not args.behavior_policy_state_profile_json:
+            raise ValueError("--behavior-policy-state-profile-json is required when --behavior-policy-mode empirical_bridge_state_schedule")
+        if not Path(args.behavior_policy_state_profile_json).exists():
+            raise ValueError(f"--behavior-policy-state-profile-json does not exist: {args.behavior_policy_state_profile_json}")
+        if args.empirical_bridge_json and not Path(args.empirical_bridge_json).exists():
+            raise ValueError(f"--empirical-bridge-json does not exist: {args.empirical_bridge_json}")
+        if not 0.0 <= float(args.hybrid_state_weight) <= 1.0:
+            raise ValueError("--hybrid-state-weight must be between 0 and 1")
+    for name in ["belief_gain_global", "belief_gain_inflation", "belief_gain_income", "belief_gain_unemployment", "feedback_gain_multiplier"]:
+        value = float(getattr(args, name))
+        if value <= 0.0:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.belief_source == "persona_ecology_replay":
         if not args.persona_ecology_dir:
             raise ValueError("--persona-ecology-dir is required with --belief-source persona_ecology_replay")
@@ -272,7 +296,17 @@ def load_phase4_behavior_policy_profile(args: argparse.Namespace) -> dict[str, A
         return load_state_behavior_policy_profile(Path(args.behavior_policy_state_profile_json))
     if args.behavior_policy_mode == "empirical_bridge":
         return load_empirical_bridge_profile(Path(args.empirical_bridge_json) if args.empirical_bridge_json else DEFAULT_BRIDGE)
+    if args.behavior_policy_mode == "empirical_bridge_state_schedule":
+        return build_hybrid_behavior_policy_profile(
+            load_empirical_bridge_profile(Path(args.empirical_bridge_json) if args.empirical_bridge_json else DEFAULT_BRIDGE),
+            load_state_behavior_policy_profile(Path(args.behavior_policy_state_profile_json)),
+            state_weight=float(args.hybrid_state_weight),
+        )
     return None
+
+
+def phase4_scenario_with_feedback_multiplier(multiplier: float) -> DemandScenario:
+    return replace(DEFAULT_SCENARIO, feedback_gain=float(DEFAULT_SCENARIO.feedback_gain) * float(multiplier))
 
 
 def empirical_bridge_failure_fields(args: argparse.Namespace) -> dict[str, Any]:
@@ -317,13 +351,27 @@ def build_phase4_clients(
         if ecology_bundle is None:
             raise ValueError("persona ecology replay source was requested but no ecology bundle was loaded")
         return [
-            PersonaEcologyReplayDemandClient(ecology_bundle, period_count=period_count, period_policy=args.ecology_period_policy),
+            PersonaEcologyReplayDemandClient(
+                ecology_bundle,
+                period_count=period_count,
+                period_policy=args.ecology_period_policy,
+                belief_transform=belief_transform_from_args(args),
+            ),
             DemandEconomyClient(args.provider, "adaptive", cache_dir, mode="fixture", variant="adaptive", max_live_calls=0),
         ]
     return [
         DemandEconomyClient(args.provider, args.model, cache_dir, mode=args.mode, variant="llm_belief", max_live_calls=args.max_live_calls),
         DemandEconomyClient(args.provider, "adaptive", cache_dir, mode="fixture", variant="adaptive", max_live_calls=0),
     ]
+
+
+def belief_transform_from_args(args: argparse.Namespace) -> dict[str, float]:
+    return {
+        "global": float(args.belief_gain_global),
+        "expected_inflation_1y": float(args.belief_gain_inflation),
+        "expected_real_income_growth": float(args.belief_gain_income),
+        "expected_unemployment_higher_prob": float(args.belief_gain_unemployment),
+    }
 
 
 def load_persona_ecology_bundle(args: argparse.Namespace) -> dict[str, Any]:
@@ -490,10 +538,18 @@ def build_households_from_ecology_panel(panel: pd.DataFrame, wide: pd.DataFrame)
 class PersonaEcologyReplayDemandClient:
     variant = "llm_belief"
 
-    def __init__(self, ecology_bundle: dict[str, Any], *, period_count: int, period_policy: str):
+    def __init__(
+        self,
+        ecology_bundle: dict[str, Any],
+        *,
+        period_count: int,
+        period_policy: str,
+        belief_transform: dict[str, float] | None = None,
+    ):
         self.ecology_bundle = ecology_bundle
         self.period_count = int(period_count)
         self.period_policy = period_policy
+        self.belief_transform = normalize_belief_transform(belief_transform)
         self.raw_records: list[dict[str, Any]] = []
         self._wide_by_key = {
             (str(row["respondent_id"]), int(row["period_index"])): row
@@ -538,7 +594,7 @@ class PersonaEcologyReplayDemandClient:
             row = self._wide_by_key.get((type_id, ecology_period))
             if row is None:
                 raise ValueError(f"Persona ecology replay missing respondent={type_id}, period_index={ecology_period}")
-            belief = ecology_row_to_demand_belief(row, state=state)
+            belief = ecology_row_to_demand_belief(row, state=state, belief_transform=self.belief_transform)
             beliefs[type_id] = belief
         payload = {
             "prompt_version": PHASE4_VERSION,
@@ -557,6 +613,7 @@ class PersonaEcologyReplayDemandClient:
                 "cache_hit": True,
                 "cache_path": str(self.ecology_bundle["root"] / "persona_ecology_predictions.csv"),
                 "ecology_period_index": ecology_period,
+                "belief_transform": self.belief_transform,
                 "payload": payload,
             }
         )
@@ -570,10 +627,37 @@ class PersonaEcologyReplayDemandClient:
         raise ValueError(f"Persona ecology replay has no period_index={requested_period}")
 
 
-def ecology_row_to_demand_belief(row: pd.Series, *, state: dict[str, Any]) -> dict[str, Any]:
-    inflation = float(row["prediction_expected_inflation_1y"])
-    unemployment_higher = float(row["prediction_expected_unemployment_higher_prob"])
-    income_growth = float(row["prediction_expected_real_income_growth"])
+def normalize_belief_transform(transform: dict[str, float] | None) -> dict[str, float]:
+    values = {
+        "global": 1.0,
+        "expected_inflation_1y": 1.0,
+        "expected_real_income_growth": 1.0,
+        "expected_unemployment_higher_prob": 1.0,
+    }
+    if transform:
+        for key in values:
+            values[key] = float(transform.get(key, values[key]))
+    return values
+
+
+def transformed_ecology_prediction(row: pd.Series, target_name: str, transform: dict[str, float]) -> float:
+    prediction = float(row[f"prediction_{target_name}"])
+    prior_key = f"prior_prediction_{target_name}"
+    prior = float(row[prior_key]) if prior_key in row and pd.notna(row[prior_key]) else prediction
+    gain = float(transform.get("global", 1.0)) * float(transform.get(target_name, 1.0))
+    return float(prior + gain * (prediction - prior))
+
+
+def ecology_row_to_demand_belief(
+    row: pd.Series,
+    *,
+    state: dict[str, Any],
+    belief_transform: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    transform = normalize_belief_transform(belief_transform)
+    inflation = transformed_ecology_prediction(row, "expected_inflation_1y", transform)
+    unemployment_higher = transformed_ecology_prediction(row, "expected_unemployment_higher_prob", transform)
+    income_growth = transformed_ecology_prediction(row, "expected_real_income_growth", transform)
     uncertainty = float(row.get("uncertainty", 0.6))
     confidence = confidence_from_priors(unemployment_higher, income_growth, inflation, str(state.get("income_group", "middle")))
     confidence = float(np.clip(confidence + 8.0 * (float(row.get("confidence", 0.6)) - 0.6), 0.0, 100.0))
@@ -590,7 +674,16 @@ def ecology_row_to_demand_belief(row: pd.Series, *, state: dict[str, Any]) -> di
         "attention_weight_prices": float(np.clip(0.45 + 0.45 * float(row.get("environment_weight", 0.3)), 0.0, 1.0)),
         "attention_weight_jobs": float(np.clip(0.35 + 0.35 * float(row.get("prior_weight", 0.4)) + 0.20 * float(row.get("aggregate_feedback_weight", 0.1)), 0.0, 1.0)),
         "attention_weight_rates": float(np.clip(0.35 + 0.40 * float(row.get("environment_weight", 0.3)), 0.0, 1.0)),
-        "reason_codes": ["sce_prior_update_replay", f"ecology_period_{int(row['period_index'])}"],
+        "reason_codes": [
+            "sce_prior_update_replay",
+            f"ecology_period_{int(row['period_index'])}",
+            (
+                f"belief_gain_g{transform['global']:.2f}"
+                f"_pi{transform['expected_inflation_1y']:.2f}"
+                f"_inc{transform['expected_real_income_growth']:.2f}"
+                f"_unemp{transform['expected_unemployment_higher_prob']:.2f}"
+            ),
+        ],
         "causal_path": ["real respondent prior", "codex_cli belief update", "deterministic demand policy"],
     }
 
@@ -645,7 +738,12 @@ def confidence_from_priors(unemployment_higher: float, income_growth: float, inf
     return float(np.clip(63.0 + income_adjustment - 0.36 * float(unemployment_higher) + 1.2 * float(income_growth) - 0.45 * max(0.0, float(inflation) - 2.0), 0.0, 100.0))
 
 
-def ecology_input_manifest(ecology_bundle: dict[str, Any] | None, *, period_count: int) -> dict[str, Any] | None:
+def ecology_input_manifest(
+    ecology_bundle: dict[str, Any] | None,
+    *,
+    period_count: int,
+    belief_transform: dict[str, float] | None = None,
+) -> dict[str, Any] | None:
     if ecology_bundle is None:
         return None
     manifest = ecology_bundle["manifest"]
@@ -660,6 +758,7 @@ def ecology_input_manifest(ecology_bundle: dict[str, Any] | None, *, period_coun
         "upstream_feedback_mode": manifest.get("feedback_mode"),
         "upstream_date_mode": manifest.get("date_mode"),
         "requested_phase4_period_count": int(period_count),
+        "belief_transform": normalize_belief_transform(belief_transform),
         "coverage": ecology_bundle["coverage"],
         "manifest_sha256": ecology_bundle["manifest_sha256"],
         "panel_sha256": ecology_bundle["panel_sha256"],
@@ -1053,6 +1152,13 @@ def phase4_behavior_policy_description(manifest: dict[str, Any]) -> str:
             "saving/debt closure, accounting, and aggregation. The matched-twin comparison therefore isolates the "
             "belief-updater channel while using the measured belief-to-spending bridge."
         )
+    if policy.get("mode") == "empirical_bridge_state_schedule":
+        return (
+            "Both twins use the same hybrid behavior executor. The empirical bridge supplies baseline consumption-growth "
+            "movement from belief changes, while the state-conditioned schedule supplies transfer allocation and shock "
+            f"response with state weight `{policy.get('state_weight')}`. The executor records both profile hashes, enforces "
+            "budgets, and keeps the belief-updater channel isolated."
+        )
     return (
         "Both twins use the fixed deterministic demand kernel. This is the older behavior layer and remains available "
         "as the baseline executor for direct comparison with schedule-mode runs."
@@ -1125,6 +1231,11 @@ def base_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "feedback_mode": args.feedback_mode,
         "behavior_policy_mode": args.behavior_policy_mode,
         "behavior_policy_raw_records_json": args.behavior_policy_raw_records_json,
+        "behavior_policy_state_profile_json": args.behavior_policy_state_profile_json,
+        "empirical_bridge_json": args.empirical_bridge_json,
+        "hybrid_state_weight": float(args.hybrid_state_weight),
+        "belief_transform": belief_transform_from_args(args),
+        "feedback_gain_multiplier": float(args.feedback_gain_multiplier),
         "fresh_cache": bool(args.fresh_cache),
         "max_live_calls": int(args.max_live_calls),
         "status": "running",

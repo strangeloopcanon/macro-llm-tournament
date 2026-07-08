@@ -86,6 +86,7 @@ Design decisions baked into the diagram: the LLM never chooses actions (that was
 - `src/macro_llm_tournament/demand_vintage_oos.py` builds date-free vintage demand cards, hidden targets, baseline forecasts, leakage audits, and OOS score summaries.
 - `src/macro_llm_tournament/belief_calibration.py` fits validation-only belief-dynamics calibration, scores the locked transform on held-out vintage cards, and emits a bounded behavior-economy calibration profile.
 - `src/macro_llm_tournament/macro_playground.py` wraps the demand kernel in a branchable scenario sandbox with bounded household, firm, policy/narrative, and critic actor payloads.
+- `src/macro_llm_tournament/macro_tournament.py` runs retrospective full-economy candidate tournaments and replays the promoted incumbent without spending fresh score surfaces.
 - `src/macro_llm_tournament/macro_performance_gate.py` scores the macro lab and vintage OOS artifacts against an executable target catalog without promoting fixture runs to empirical validity.
 - `src/macro_llm_tournament/macro_validity.py` builds the external-validity bridge scorecard for micro behavior, IRF shape, and vintage-data readiness.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.

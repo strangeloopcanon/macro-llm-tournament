@@ -27,9 +27,10 @@ DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v4"
 NAIVE_PERSONA_PROMPT_VERSION = "hank_lite_naive_persona_direct_consumption_v1"
 DEMAND_BEHAVIOR_POLICY_VERSION = "demand_behavior_policy_schedule_v1"
 DEMAND_STATE_BEHAVIOR_POLICY_VERSION = "demand_behavior_state_policy_schedule_v1"
+DEMAND_HYBRID_BEHAVIOR_POLICY_VERSION = "demand_empirical_bridge_state_schedule_hybrid_v1"
 BELIEF_MODES = ("fixture", "replay", "live", "raw_replay")
 FEEDBACK_MODES = ("closed_loop", "none")
-BEHAVIOR_POLICY_MODES = ("fixed_kernel", "schedule", "state_schedule", "empirical_bridge")
+BEHAVIOR_POLICY_MODES = ("fixed_kernel", "schedule", "state_schedule", "empirical_bridge", "empirical_bridge_state_schedule")
 MODEL_VARIANTS = ("representative", "adaptive", "llm_belief", "naive_persona")
 LLM_VARIANTS = {"llm_belief", "naive_persona"}
 NEUTRAL_POLICY_RATE = 3.0
@@ -102,6 +103,13 @@ def parse_args() -> argparse.Namespace:
         "--behavior-policy-state-profile-json",
         default=None,
         help="State-conditioned policy profile JSON from state_policy_schedules.",
+    )
+    parser.add_argument("--empirical-bridge-json", default=None, help="Accepted empirical bridge artifact.")
+    parser.add_argument(
+        "--hybrid-state-weight",
+        type=float,
+        default=1.0,
+        help="Weight on state-schedule shock/transfer response in empirical_bridge_state_schedule mode.",
     )
     parser.add_argument("--variants", default="representative,adaptive,llm_belief,naive_persona")
     parser.add_argument(
@@ -520,16 +528,27 @@ def _behavior_policy_profile_from_args(args: argparse.Namespace) -> dict[str, An
     if args.behavior_policy_mode == "fixed_kernel":
         return None
     if args.behavior_policy_mode == "empirical_bridge":
-        if not DEFAULT_EMPIRICAL_BRIDGE_JSON.exists():
-            raise SystemExit(f"Empirical bridge artifact does not exist: {DEFAULT_EMPIRICAL_BRIDGE_JSON}")
-        return load_empirical_bridge_profile(DEFAULT_EMPIRICAL_BRIDGE_JSON)
-    if args.behavior_policy_mode == "state_schedule":
+        path = Path(args.empirical_bridge_json) if args.empirical_bridge_json else DEFAULT_EMPIRICAL_BRIDGE_JSON
+        if not path.exists():
+            raise SystemExit(f"Empirical bridge artifact does not exist: {path}")
+        return load_empirical_bridge_profile(path)
+    if args.behavior_policy_mode in {"state_schedule", "empirical_bridge_state_schedule"}:
         if not args.behavior_policy_state_profile_json:
-            raise SystemExit("--behavior-policy-state-profile-json is required when --behavior-policy-mode state_schedule")
+            raise SystemExit(f"--behavior-policy-state-profile-json is required when --behavior-policy-mode {args.behavior_policy_mode}")
         path = Path(args.behavior_policy_state_profile_json)
         if not path.exists():
             raise SystemExit(f"--behavior-policy-state-profile-json does not exist: {path}")
-        return load_state_behavior_policy_profile(path)
+        state_profile = load_state_behavior_policy_profile(path)
+        if args.behavior_policy_mode == "state_schedule":
+            return state_profile
+        bridge_path = Path(args.empirical_bridge_json) if args.empirical_bridge_json else DEFAULT_EMPIRICAL_BRIDGE_JSON
+        if not bridge_path.exists():
+            raise SystemExit(f"Empirical bridge artifact does not exist: {bridge_path}")
+        return build_hybrid_behavior_policy_profile(
+            load_empirical_bridge_profile(bridge_path),
+            state_profile,
+            state_weight=float(args.hybrid_state_weight),
+        )
     path = Path(args.behavior_policy_raw_records_json) if args.behavior_policy_raw_records_json else DEFAULT_BEHAVIOR_POLICY_RAW_RECORDS
     if not path.exists():
         raise SystemExit(f"--behavior-policy-raw-records-json does not exist: {path}")
@@ -623,9 +642,47 @@ def load_empirical_bridge_profile(path: Path) -> dict[str, Any]:
     return out
 
 
+def build_hybrid_behavior_policy_profile(
+    empirical_bridge_profile: dict[str, Any],
+    state_schedule_profile: dict[str, Any],
+    *,
+    state_weight: float,
+) -> dict[str, Any]:
+    if str(empirical_bridge_profile.get("bridge_spec_version") or empirical_bridge_profile.get("schema_version")) not in SUPPORTED_BRIDGE_SPEC_VERSIONS:
+        raise ValueError("Hybrid behavior policy requires an accepted empirical bridge profile")
+    if str(state_schedule_profile.get("schema_version")) != DEMAND_STATE_BEHAVIOR_POLICY_VERSION:
+        raise ValueError("Hybrid behavior policy requires a state-schedule profile")
+    weight = float(np.clip(float(state_weight), 0.0, 1.0))
+    return {
+        "schema_version": DEMAND_HYBRID_BEHAVIOR_POLICY_VERSION,
+        "state_weight": weight,
+        "empirical_bridge_profile": empirical_bridge_profile,
+        "state_schedule_profile": state_schedule_profile,
+        "execution_rule": (
+            "The empirical bridge supplies baseline consumption growth from belief changes. "
+            "The state-schedule policy supplies transfer allocation and shock drag, scaled by state_weight."
+        ),
+    }
+
+
 def behavior_policy_manifest(profile: dict[str, Any] | None, *, mode: str) -> dict[str, Any]:
     if profile is None:
         return {"mode": mode, "schema_version": None}
+    if profile.get("schema_version") == DEMAND_HYBRID_BEHAVIOR_POLICY_VERSION:
+        bridge = profile.get("empirical_bridge_profile", {})
+        state = profile.get("state_schedule_profile", {})
+        return {
+            "mode": mode,
+            "schema_version": profile.get("schema_version"),
+            "state_weight": profile.get("state_weight"),
+            "bridge_spec_version": bridge.get("bridge_spec_version"),
+            "empirical_bridge_sha256": bridge.get("canonical_payload_sha256"),
+            "empirical_bridge_json": bridge.get("profile_json"),
+            "state_schedule_json": state.get("profile_json"),
+            "state_schedule_sha256": state.get("profile_json_sha256"),
+            "state_schedule_policy_count": len(state.get("state_policies", {})),
+            "execution_rule": profile.get("execution_rule"),
+        }
     if str(profile.get("bridge_spec_version") or profile.get("schema_version")) in SUPPORTED_BRIDGE_SPEC_VERSIONS:
         return {
             "mode": mode,
@@ -2145,17 +2202,80 @@ def _structural_consumption_policy(
     empirical_bridge_period_growth_deviation_pp = 0.0
     empirical_bridge_consumption_delta = 0.0
     empirical_bridge_clipped_inputs: dict[str, bool] = {}
+    hybrid_profile = (
+        behavior_policy_profile
+        if behavior_policy_profile is not None
+        and str(behavior_policy_profile.get("schema_version")) == DEMAND_HYBRID_BEHAVIOR_POLICY_VERSION
+        else None
+    )
+    state_profile = hybrid_profile.get("state_schedule_profile") if hybrid_profile is not None else behavior_policy_profile
+    bridge_profile = hybrid_profile.get("empirical_bridge_profile") if hybrid_profile is not None else behavior_policy_profile
     state_behavior_match = (
-        _match_state_behavior_policy(static, state, behavior_policy_profile) if behavior_policy_profile is not None else None
+        _match_state_behavior_policy(static, state, state_profile) if state_profile is not None else None
     )
     behavior_match = (
         _match_behavior_policy(static, state, behavior_policy_profile)
-        if behavior_policy_profile is not None and state_behavior_match is None
+        if behavior_policy_profile is not None and state_behavior_match is None and hybrid_profile is None
         else None
     )
-    if (
-        behavior_policy_profile is not None
-        and str(behavior_policy_profile.get("bridge_spec_version") or behavior_policy_profile.get("schema_version"))
+    if hybrid_profile is not None and representative_mpc is None:
+        fallback_transfer = _transfer_windfall_allocation(
+            static,
+            state,
+            belief,
+            target_buffer_months=target_buffer,
+            desired_saving_rate=desired_saving_rate,
+            real_rate=real_rate,
+            representative_mpc=representative_mpc,
+        )
+        state_transfer = (
+            _state_schedule_transfer_allocation(static, state, state_behavior_match, transfer)
+            if state_behavior_match is not None
+            else fallback_transfer
+        )
+        state_weight = float(np.clip(float(hybrid_profile.get("state_weight", 1.0)), 0.0, 1.0))
+        transfer_allocation = _blend_transfer_allocations(fallback_transfer, state_transfer, state_weight)
+        previous_input = BridgeInput(
+            inflation_expectation_1y=float(state["inflation_expectation_1y"]),
+            expected_real_income_growth=float(state["income_growth_expectation_1y"]),
+            unemployment_higher_prob=float(state.get("unemployment_higher_probability_1y", float(state["job_loss_probability"]) / 0.24)),
+            income_group=str(state["income_group"]),
+            liquid_wealth_group=str(state["liquidity_group"]),
+        )
+        current_input = BridgeInput(
+            inflation_expectation_1y=expected_inflation,
+            expected_real_income_growth=expected_income,
+            unemployment_higher_prob=float(belief.get("expected_unemployment_higher_probability_next_period", job_loss / 0.24)),
+            income_group=str(state["income_group"]),
+            liquid_wealth_group=str(state["liquidity_group"]),
+        )
+        bridge_result = transform_belief_change(bridge_profile, previous_input, current_input)
+        empirical_bridge_annual_growth_deviation_pp = float(bridge_result.annual_growth_deviation_pp)
+        empirical_bridge_period_growth_deviation_pp = empirical_bridge_annual_growth_deviation_pp / EMPIRICAL_BRIDGE_PERIODS_PER_YEAR
+        empirical_bridge_consumption_delta = baseline_consumption * empirical_bridge_period_growth_deviation_pp / 100.0
+        empirical_bridge_clipped_inputs = bridge_result.clipped
+        behavior_policy_mode = "empirical_bridge_state_schedule"
+        behavior_policy_type_id = str(state_behavior_match["profile_id"]) if state_behavior_match is not None else ""
+        behavior_policy_consumption_drag = (
+            state_weight
+            * _state_schedule_consumption_drag(
+                static,
+                state,
+                belief,
+                period_state,
+                state_behavior_match,
+                baseline_consumption,
+            )
+            if state_behavior_match is not None
+            else 0.0
+        )
+        buffer_drag = 0.0
+        precaution_drag = 0.0
+        rate_drag = 0.0
+        expected_income_effect = 0.0
+    elif (
+        bridge_profile is not None
+        and str(bridge_profile.get("bridge_spec_version") or bridge_profile.get("schema_version"))
         in SUPPORTED_BRIDGE_SPEC_VERSIONS
         and representative_mpc is None
     ):
@@ -2182,7 +2302,7 @@ def _structural_consumption_policy(
             income_group=str(state["income_group"]),
             liquid_wealth_group=str(state["liquidity_group"]),
         )
-        bridge_result = transform_belief_change(behavior_policy_profile, previous_input, current_input)
+        bridge_result = transform_belief_change(bridge_profile, previous_input, current_input)
         empirical_bridge_annual_growth_deviation_pp = float(bridge_result.annual_growth_deviation_pp)
         empirical_bridge_period_growth_deviation_pp = empirical_bridge_annual_growth_deviation_pp / EMPIRICAL_BRIDGE_PERIODS_PER_YEAR
         empirical_bridge_consumption_delta = baseline_consumption * empirical_bridge_period_growth_deviation_pp / 100.0
@@ -2451,6 +2571,22 @@ def _schedule_transfer_allocation(static: pd.Series, state: dict[str, Any], matc
         "consumption_share": float(np.clip(consumption_share, 0.0, 1.0)),
         "debt_repayment_share": float(np.clip(debt_share, 0.0, 1.0)),
         "liquid_saving_share": float(np.clip(max(0.0, 1.0 - consumption_share - debt_share), 0.0, 1.0)),
+    }
+
+
+def _blend_transfer_allocations(left: dict[str, float], right: dict[str, float], right_weight: float) -> dict[str, float]:
+    weight = float(np.clip(float(right_weight), 0.0, 1.0))
+    out = {
+        key: (1.0 - weight) * float(left.get(key, 0.0)) + weight * float(right.get(key, 0.0))
+        for key in ("consumption_share", "debt_repayment_share", "liquid_saving_share")
+    }
+    total = sum(max(0.0, value) for value in out.values())
+    if total <= 0.0:
+        return {"consumption_share": 0.0, "debt_repayment_share": 0.0, "liquid_saving_share": 0.0}
+    return {
+        "consumption_share": float(np.clip(max(0.0, out["consumption_share"]) / total, 0.0, 1.0)),
+        "debt_repayment_share": float(np.clip(max(0.0, out["debt_repayment_share"]) / total, 0.0, 1.0)),
+        "liquid_saving_share": float(np.clip(max(0.0, out["liquid_saving_share"]) / total, 0.0, 1.0)),
     }
 
 

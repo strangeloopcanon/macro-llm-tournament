@@ -1,0 +1,162 @@
+{
+  "incumbent": {
+    "behavior_mechanism": "empirical_bridge_v5_stabilized",
+    "belief_gain_global": 1.0,
+    "belief_gain_income": 1.0,
+    "belief_gain_inflation": 1.0,
+    "belief_gain_unemployment": 1.0,
+    "candidate_id": "cand_0b1796192102",
+    "disqualification_reason": null,
+    "disqualified": false,
+    "empirical_bridge_clipped_inputs": 0,
+    "feedback_gain_multiplier": 1.0,
+    "feedback_mode": "closed_loop",
+    "hybrid_state_weight": null,
+    "is_incumbent": true,
+    "llm_minus_adaptive_rmse_scaled": -0.008259078888555,
+    "max_accounting_abs_residual": 1.4551915228366852e-11,
+    "mean_adaptive_rmse_scaled": 0.7331969145372248,
+    "mean_llm_direction_accuracy": 0.9444444444444444,
+    "mean_llm_rmse_scaled": 0.7249378356486698,
+    "simplicity_score": 1.1,
+    "surface_count": 2
+  },
+  "incumbent_scores": [
+    {
+      "direction_accuracy": 0.6,
+      "n": 5,
+      "rmse_scaled": 0.5688443816629892,
+      "source": "adaptive",
+      "surface_id": "original_onecard_retrospective",
+      "target_name": "ALL"
+    },
+    {
+      "direction_accuracy": 1.0,
+      "n": 5,
+      "rmse_scaled": 0.5970202252300912,
+      "source": "llm_codex_cli_gpt-5.5__phase4_prior_replay",
+      "surface_id": "original_onecard_retrospective",
+      "target_name": "ALL"
+    },
+    {
+      "direction_accuracy": 0.8888888888888888,
+      "n": 9,
+      "rmse_scaled": 0.8528554460672482,
+      "source": "llm_codex_cli_gpt-5.5__phase4_prior_replay",
+      "surface_id": "aligned_octnovdec_twocard_retrospective",
+      "target_name": "ALL"
+    },
+    {
+      "direction_accuracy": 0.6666666666666666,
+      "n": 9,
+      "rmse_scaled": 0.8975494474114605,
+      "source": "adaptive",
+      "surface_id": "aligned_octnovdec_twocard_retrospective",
+      "target_name": "ALL"
+    }
+  ],
+  "schema_version": "macro_tournament_development_v1_evidence",
+  "source_files": {
+    "macro_tournament_accounting.csv": {
+      "bytes": 944950,
+      "path": "outputs/macro_tournament_development_v1/macro_tournament_accounting.csv",
+      "sha256": "a73720b1e67a444988d744caff324a125a0bdcf1f8432e8ad4ba3b8e2eedfe03"
+    },
+    "macro_tournament_candidates.csv": {
+      "bytes": 1074406,
+      "path": "outputs/macro_tournament_development_v1/macro_tournament_candidates.csv",
+      "sha256": "97319f76d92016f2deb1d5d2ac8c9f9a5b02d70f3f019310b4bf86d00800d4a9"
+    },
+    "macro_tournament_report.md": {
+      "bytes": 123076,
+      "path": "outputs/macro_tournament_development_v1/macro_tournament_report.md",
+      "sha256": "e5e3c83227eb11e0cabdcfc1d376c274dd5a12566648829b73228a9f67e65eb0"
+    },
+    "macro_tournament_scores.csv": {
+      "bytes": 227747375,
+      "path": "outputs/macro_tournament_development_v1/macro_tournament_scores.csv",
+      "sha256": "635ef5d1ee99541e9698b9d56d13ad8d26447a346742de5e96685d47a2434588"
+    },
+    "manifest.json": {
+      "bytes": 1761,
+      "path": "outputs/macro_tournament_development_v1/manifest.json",
+      "sha256": "7e1a7a083db44c1ce743cc98cadd78359cfca6e810867fd4335d5e8194a13d"
+    },
+    "winner_manifest.json": {
+      "bytes": 765,
+      "path": "outputs/macro_tournament_development_v1/winner_manifest.json",
+      "sha256": "b42419d66bc2cf2dfe1482d8609379d6c3ac00d693d846d86d9ee75b61a72c3b"
+    }
+  },
+  "summary": {
+    "candidate_count": 5670,
+    "claim_scope": "exploratory_development_search_only",
+    "disqualified_candidates": 0,
+    "improvement_over_incumbent": 0.004162538041010411,
+    "incumbent_candidate_id": "cand_0b1796192102",
+    "incumbent_mean_llm_rmse_scaled": 0.7249378356486698,
+    "max_accounting_abs_residual": 1.4551915228366852e-11,
+    "scoring_label": "retrospective",
+    "surface_count": 2,
+    "winner_candidate_id": "cand_1623eb882b6a",
+    "winner_llm_minus_adaptive_rmse_scaled": -0.012452275017759362,
+    "winner_mean_adaptive_rmse_scaled": 0.7332275726254187,
+    "winner_mean_llm_rmse_scaled": 0.7207752976076593
+  },
+  "winner": {
+    "behavior_mechanism": "empirical_bridge_v5_stabilized",
+    "belief_gain_global": 1.5,
+    "belief_gain_income": 0.75,
+    "belief_gain_inflation": 1.25,
+    "belief_gain_unemployment": 1.25,
+    "candidate_id": "cand_1623eb882b6a",
+    "disqualification_reason": "",
+    "disqualified": false,
+    "empirical_bridge_clipped_inputs": 0,
+    "feedback_gain_multiplier": 1.5,
+    "feedback_mode": "closed_loop",
+    "hybrid_state_weight": null,
+    "is_incumbent": false,
+    "llm_minus_adaptive_rmse_scaled": -0.012452275017759362,
+    "max_accounting_abs_residual": 1.4551915228366852e-11,
+    "mean_adaptive_rmse_scaled": 0.7332275726254187,
+    "mean_llm_direction_accuracy": 0.9444444444444444,
+    "mean_llm_rmse_scaled": 0.7207752976076593,
+    "simplicity_score": 2.85,
+    "surface_count": 2
+  },
+  "winner_scores": [
+    {
+      "direction_accuracy": 0.6,
+      "n": 5,
+      "rmse_scaled": 0.568844996998316,
+      "source": "adaptive",
+      "surface_id": "original_onecard_retrospective",
+      "target_name": "ALL"
+    },
+    {
+      "direction_accuracy": 1.0,
+      "n": 5,
+      "rmse_scaled": 0.5984413409601531,
+      "source": "llm_codex_cli_gpt-5.5__phase4_prior_replay",
+      "surface_id": "original_onecard_retrospective",
+      "target_name": "ALL"
+    },
+    {
+      "direction_accuracy": 0.8888888888888888,
+      "n": 9,
+      "rmse_scaled": 0.8431092542551657,
+      "source": "llm_codex_cli_gpt-5.5__phase4_prior_replay",
+      "surface_id": "aligned_octnovdec_twocard_retrospective",
+      "target_name": "ALL"
+    },
+    {
+      "direction_accuracy": 0.6666666666666666,
+      "n": 9,
+      "rmse_scaled": 0.8976101482525215,
+      "source": "adaptive",
+      "surface_id": "aligned_octnovdec_twocard_retrospective",
+      "target_name": "ALL"
+    }
+  ]
+}

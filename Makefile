@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay macro-tournament-dev macro-incumbent-v1 phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -381,6 +381,20 @@ phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay:
 		--scoring-label retrospective \
 		--max-live-calls 0 \
 		--output-dir outputs/phase4_matched_twins_empirical_bridge_v5_stabilized_codex_replay_fred_2card_aligned_octnovdec
+
+macro-tournament-dev:
+	PYTHONPATH=src python3 -m macro_llm_tournament.macro_tournament \
+		--spec configs/macro_tournament/development_v1.json \
+		--mode replay \
+		--max-live-calls 0 \
+		--output-dir outputs/macro_tournament_development_v1
+
+macro-incumbent-v1:
+	PYTHONPATH=src python3 -m macro_llm_tournament.macro_tournament \
+		--spec configs/macro_tournament/incumbent_v1.json \
+		--mode replay \
+		--max-live-calls 0 \
+		--output-dir outputs/macro_incumbent_v1
 
 phase4-v4-diagnostics:
 	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_v4_diagnostics \

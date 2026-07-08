@@ -13,6 +13,7 @@ from macro_llm_tournament.behavior_ecology import fixture_policy_payload
 from macro_llm_tournament.phase4_matched_twins import (
     OutputMappingSpec,
     default_output_mapping,
+    ecology_row_to_demand_belief,
     mapping_sha256,
     mapped_period_value,
     normalized_mapping_payload,
@@ -40,6 +41,7 @@ from macro_llm_tournament.empirical_bridge import (
     transform_belief_change,
 )
 from macro_llm_tournament.demand_economy import _structural_consumption_policy, load_empirical_bridge_profile
+from macro_llm_tournament.demand_economy import build_hybrid_behavior_policy_profile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -111,6 +113,41 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
         self.assertAlmostEqual(row["raw_last_signal"], 3.6)
         self.assertEqual(row["phase4_target_transform"], "diff")
         self.assertGreaterEqual(row["history_scale"], 0.25)
+
+    def test_phase4_belief_gains_transform_prior_update_not_levels(self):
+        row = pd.Series(
+            {
+                "prediction_expected_inflation_1y": 5.0,
+                "prior_prediction_expected_inflation_1y": 3.0,
+                "prediction_expected_unemployment_higher_prob": 44.0,
+                "prior_prediction_expected_unemployment_higher_prob": 40.0,
+                "prediction_expected_real_income_growth": 0.0,
+                "prior_prediction_expected_real_income_growth": 1.0,
+                "uncertainty": 0.5,
+                "confidence": 0.7,
+                "environment_weight": 0.3,
+                "prior_weight": 0.5,
+                "aggregate_feedback_weight": 0.1,
+                "period_index": 1,
+            }
+        )
+        state = {"type_id": "respondent_a", "income_group": "middle", "liquidity_group": "low"}
+
+        belief = ecology_row_to_demand_belief(
+            row,
+            state=state,
+            belief_transform={
+                "global": 0.5,
+                "expected_inflation_1y": 1.0,
+                "expected_unemployment_higher_prob": 1.25,
+                "expected_real_income_growth": 0.75,
+            },
+        )
+
+        self.assertAlmostEqual(belief["expected_inflation_next_period"], 4.0)
+        self.assertAlmostEqual(belief["expected_unemployment_higher_probability_next_period"], 42.5)
+        self.assertAlmostEqual(belief["expected_income_growth_next_period"], 0.625)
+        self.assertIn("belief_gain_g0.50", " ".join(belief["reason_codes"]))
 
     def test_phase4_v4_diagnostics_decomposes_scaled_error_by_target(self):
         with TemporaryDirectory() as temp_dir:
@@ -259,6 +296,7 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
                 "base_saving_rate": 0.10,
                 "base_mpc": 0.30,
                 "annual_income": 80000.0,
+                "baseline_consumption_annual": 48000.0,
                 "liquid_assets": 10000.0,
                 "debt": 5000.0,
                 "debt_service_burden": 0.12,
@@ -324,6 +362,7 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
                 "base_saving_rate": 0.10,
                 "base_mpc": 0.30,
                 "annual_income": 80000.0,
+                "baseline_consumption_annual": 48000.0,
                 "liquid_assets": 10000.0,
                 "debt": 5000.0,
                 "debt_service_burden": 0.12,
@@ -397,6 +436,7 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
                 "base_saving_rate": 0.10,
                 "base_mpc": 0.30,
                 "annual_income": 80000.0,
+                "baseline_consumption_annual": 48000.0,
                 "liquid_assets": 10000.0,
                 "debt": 5000.0,
                 "debt_service_burden": 0.12,
@@ -438,6 +478,82 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
 
         self.assertEqual(policy["behavior_policy_mode"], "empirical_bridge")
         self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], 0.12)
+
+    def test_hybrid_bridge_state_schedule_uses_bridge_for_growth_and_schedule_for_shocks(self):
+        bridge = _accepted_bridge_profile(
+            {
+                "actual_expected_inflation_1y": 0.40,
+                "actual_expected_real_income_growth": 0.00,
+                "sce_question_unemployment_higher_prob": 0.00,
+            }
+        )
+        state_profile = _state_schedule_profile()
+        hybrid = build_hybrid_behavior_policy_profile(bridge, state_profile, state_weight=0.5)
+        static = pd.Series(
+            {
+                "baseline_job_loss_probability": 7.2,
+                "unemployment_higher_probability_1y": 30.0,
+                "confidence_index": 55.0,
+                "income_growth_expectation_1y": 1.0,
+                "inflation_expectation_1y": 3.0,
+                "target_buffer_months": 3.0,
+                "base_saving_rate": 0.10,
+                "base_mpc": 0.30,
+                "annual_income": 80000.0,
+                "baseline_consumption_annual": 48000.0,
+                "liquid_assets": 10000.0,
+                "debt": 5000.0,
+                "debt_service_burden": 0.12,
+                "rate_sensitivity": 0.3,
+                "income_sensitivity": 0.5,
+                "precautionary_sensitivity": 0.4,
+            }
+        )
+        state = {
+            "baseline_consumption": 1000.0,
+            "liquid_assets": 10000.0,
+            "job_loss_probability": 7.2,
+            "unemployment_higher_probability_1y": 30.0,
+            "confidence_index": 55.0,
+            "income_growth_expectation_1y": 1.0,
+            "inflation_expectation_1y": 3.0,
+            "labor_income": 20000.0,
+            "debt": 5000.0,
+            "income_group": "middle",
+            "liquidity_group": "low",
+            "job_loss_risk_type": "low",
+            "age_bucket": "prime",
+        }
+        belief = {
+            "expected_inflation_next_period": 4.0,
+            "expected_income_growth_next_period": 1.0,
+            "perceived_job_loss_probability": 12.2,
+            "expected_unemployment_higher_probability_next_period": 30.0,
+            "confidence_index": 50.0,
+            "precautionary_saving_score": 6.0,
+        }
+        period_state = {"transfer_per_household": 1000.0, "policy_rate": 3.0}
+
+        policy = _structural_consumption_policy(
+            static,
+            state,
+            belief,
+            period_state,
+            representative_mpc=None,
+            behavior_policy_profile=hybrid,
+        )
+
+        self.assertEqual(policy["behavior_policy_mode"], "empirical_bridge_state_schedule")
+        self.assertEqual(policy["behavior_policy_type_id"], "profile_1")
+        self.assertGreater(policy["behavior_policy_consumption_drag"], 0.0)
+        self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], 0.40)
+        expected = (
+            1000.0
+            + policy["transfer_consumption_amount"]
+            + 1000.0 * policy["empirical_bridge_period_growth_deviation_pp"] / 100.0
+            - policy["behavior_policy_consumption_drag"]
+        )
+        self.assertAlmostEqual(policy["desired_consumption"], expected)
 
     def test_empirical_bridge_rejects_schema_estimator_drift(self):
         kwargs = {
@@ -853,6 +969,47 @@ def _accepted_bridge_profile(coefficients: dict[str, float]) -> dict[str, object
             "actual_expected_inflation_1y": {"min": -5.0, "max": 15.0},
             "actual_expected_real_income_growth": {"min": -12.0, "max": 12.0},
             "sce_question_unemployment_higher_prob": {"min": 0.0, "max": 100.0},
+        },
+    }
+
+
+def _state_schedule_profile() -> dict[str, object]:
+    return {
+        "schema_version": "demand_behavior_state_policy_schedule_v1",
+        "profile_rows": [
+            {
+                "profile_id": "profile_1",
+                "annual_income": 80000.0,
+                "liquid_buffer_months": 1.5,
+                "debt_to_income": 0.06,
+                "job_loss_risk_type": "low",
+                "age_bucket": "prime",
+            }
+        ],
+        "state_policies": {
+            "profile_1": {
+                "transfer_schedule": [
+                    {"ratio": 0.01, "total_spending_share": 0.60, "debt_repayment_share": 0.20, "liquid_saving_share": 0.20},
+                    {"ratio": 0.20, "total_spending_share": 0.50, "debt_repayment_share": 0.25, "liquid_saving_share": 0.25},
+                ],
+                "job_risk_schedule": [
+                    {"job_loss_probability_gap_pp": 0.0, "consumption_cut_share": 0.00},
+                    {"job_loss_probability_gap_pp": 10.0, "consumption_cut_share": 0.10},
+                ],
+                "inflation_schedule": [
+                    {"inflation_expectation_gap_pp": 0.0, "consumption_cut_share": 0.00},
+                    {"inflation_expectation_gap_pp": 5.0, "consumption_cut_share": 0.04},
+                ],
+                "confidence_schedule": [
+                    {"confidence_drop_points": 0.0, "consumption_cut_share": 0.00},
+                    {"confidence_drop_points": 20.0, "consumption_cut_share": 0.08},
+                ],
+                "real_rate_schedule": [
+                    {"real_rate_gap_pp": 0.0, "consumption_cut_share": 0.00},
+                    {"real_rate_gap_pp": 5.0, "consumption_cut_share": 0.03},
+                ],
+                "max_consumption_cut_share": 0.25,
+            }
         },
     }
 
