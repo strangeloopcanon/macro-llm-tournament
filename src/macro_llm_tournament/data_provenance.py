@@ -132,7 +132,7 @@ def _iter_derived_events(recorded_at: str) -> Iterator[dict[str, Any]]:
         directory = PROJECT_ROOT / rel_dir
         if not directory.exists():
             continue
-        for path in sorted(directory.glob("*.csv")):
+        for path in sorted(list(directory.glob("*.csv")) + list(directory.glob("*.json"))):
             yield _file_event(
                 path,
                 event_type="derived_dataset",
@@ -203,8 +203,8 @@ def _iter_run_events(recorded_at: str) -> Iterator[dict[str, Any]]:
             "dataset": manifest_path.parent.name,
             "source": str(manifest.get("schema_version") or "run_manifest"),
             "path": str(manifest_path.relative_to(PROJECT_ROOT)),
-            "bytes": None,
-            "sha256": None,
+            "bytes": manifest_path.stat().st_size,
+            "sha256": _sha256(manifest_path),
             "url": None,
             "notes": json.dumps(
                 {

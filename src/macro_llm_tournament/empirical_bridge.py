@@ -76,6 +76,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    resolve_output_paths_for_spec(args)
     if args.validate:
         if not args.output_json.exists():
             raise SystemExit("--validate requires an existing locked empirical bridge artifact")
@@ -99,6 +100,16 @@ def main() -> int:
     return 0
 
 
+def resolve_output_paths_for_spec(args: argparse.Namespace) -> None:
+    if args.bridge_spec_version == STABILIZED_BRIDGE_SPEC_VERSION:
+        if args.output_json == DEFAULT_BRIDGE:
+            args.output_json = DEFAULT_STABILIZED_BRIDGE
+        if args.cell_targets_csv == DEFAULT_CELL_TARGETS:
+            args.cell_targets_csv = DEFAULT_STABILIZED_CELL_TARGETS
+        if args.validation_scores_csv == DEFAULT_VALIDATION_SCORES:
+            args.validation_scores_csv = DEFAULT_STABILIZED_VALIDATION_SCORES
+
+
 def fit_empirical_bridge(
     *,
     panel_csv: Path,
@@ -113,6 +124,8 @@ def fit_empirical_bridge(
         raise ValueError(f"Unsupported empirical bridge spec version: {bridge_spec_version}")
     if estimator not in BRIDGE_ESTIMATORS:
         raise ValueError(f"Unsupported empirical bridge estimator: {estimator}")
+    if bridge_spec_version == BRIDGE_SPEC_VERSION and estimator != "ols":
+        raise ValueError("empirical_bridge_v4 must use estimator=ols")
     if bridge_spec_version == STABILIZED_BRIDGE_SPEC_VERSION and estimator != "ridge_cv":
         raise ValueError("empirical_bridge_v5_stabilized must use estimator=ridge_cv")
     panel = load_panel(panel_csv)

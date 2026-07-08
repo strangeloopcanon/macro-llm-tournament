@@ -1,0 +1,410 @@
+{
+  "aligned_phase4_replays": {
+    "v4": {
+      "all_score_rows": [
+        {
+          "bias": "-0.25284211850658916",
+          "direction_accuracy": "0.8888888888888888",
+          "mae": "0.3694824640573153",
+          "mae_scaled": "0.71019361338766",
+          "mean_prediction": "-0.010705037444927838",
+          "mean_target": "0.24213708106166132",
+          "n": "9",
+          "rmse": "0.4624705103451338",
+          "rmse_scaled": "0.8454811657641002",
+          "source": "llm_codex_cli_gpt-5.5__phase4_prior_replay",
+          "target_name": "ALL"
+        },
+        {
+          "bias": "-0.2416346339623714",
+          "direction_accuracy": "0.6666666666666666",
+          "mae": "0.3814282750345275",
+          "mae_scaled": "0.7066447503859234",
+          "mean_prediction": "0.000502447099289939",
+          "mean_target": "0.24213708106166132",
+          "n": "9",
+          "rmse": "0.5043062160553277",
+          "rmse_scaled": "0.8961159882889066",
+          "source": "adaptive",
+          "target_name": "ALL"
+        }
+      ],
+      "manifest": {
+        "behavior_policy": {
+          "between_coefficients": {
+            "actual_expected_inflation_1y": 0.18802354109724975,
+            "actual_expected_real_income_growth": 0.4266381398415874,
+            "sce_question_unemployment_higher_prob": -0.015801075669246874
+          },
+          "bridge_spec_version": "empirical_bridge_v4",
+          "constraints": {
+            "passed": true,
+            "rows": [
+              {
+                "bound_lower": -0.3,
+                "bound_upper": 0.3,
+                "coefficient_per_pp": 0.18802354109724975,
+                "passed": true,
+                "regressor": "actual_expected_inflation_1y",
+                "reported_coefficient": 0.18802354109724975
+              },
+              {
+                "bound_lower": 0.0,
+                "bound_upper": 0.5,
+                "coefficient_per_pp": 0.4266381398415874,
+                "passed": true,
+                "regressor": "actual_expected_real_income_growth",
+                "reported_coefficient": 0.4266381398415874
+              },
+              {
+                "bound_lower": -0.4,
+                "bound_upper": 0.0,
+                "coefficient_per_pp": -0.015801075669246874,
+                "passed": true,
+                "regressor": "sce_question_unemployment_higher_prob",
+                "reported_coefficient": -0.15801075669246875
+              }
+            ]
+          },
+          "empirical_bridge_sha256": "3effe4aac56e7b689e34b1438a274fccbb05c06cf50cc4c7afac46a9e873718f",
+          "execution_rule": "Per-period annual consumption-growth deviation equals between_coef dot clipped belief changes; the current demand executor divides the annual pp deviation by 4 before applying it to the quarterly consumption margin.",
+          "fit_waves": [
+            202004,
+            202008,
+            202012,
+            202104,
+            202108,
+            202112,
+            202204,
+            202208,
+            202304,
+            202308
+          ],
+          "mode": "empirical_bridge",
+          "profile_json": "work/empirical_bridge/empirical_bridge_v4.json",
+          "profile_json_sha256": "e3816045f1f0b576a156809559d8330de5e27e2243a5681f324ec3999922ec82",
+          "schema_version": "empirical_bridge_v4",
+          "status": "accepted",
+          "validation_gate": {
+            "between_sign_magnitude_rows": [
+              {
+                "fit_between": 0.18802354109724975,
+                "magnitude_ratio": 0.6405574595269111,
+                "passed": true,
+                "regressor": "actual_expected_inflation_1y",
+                "validation_between": 0.12043988181650807
+              },
+              {
+                "fit_between": 0.4266381398415874,
+                "magnitude_ratio": 10.018897543274466,
+                "passed": false,
+                "regressor": "actual_expected_real_income_growth",
+                "validation_between": 4.274443811126068
+              },
+              {
+                "fit_between": -0.015801075669246874,
+                "magnitude_ratio": 1.1880357309504617,
+                "passed": true,
+                "regressor": "sce_question_unemployment_higher_prob",
+                "validation_between": -0.018772242482517267
+              }
+            ],
+            "cell_rmse_passed": true,
+            "cell_rmse_ratio": 1.2905707699192965,
+            "passed": false
+          },
+          "validation_waves": [
+            202312,
+            202404,
+            202408
+          ]
+        },
+        "cache_hit_count": 162,
+        "live_call_count": 0,
+        "scoring_label": "retrospective",
+        "status": "ok",
+        "verdict": "phase4_matched_twin_replay_scored",
+        "winner_source": "llm_codex_cli_gpt-5.5__phase4_prior_replay"
+      }
+    },
+    "v5": {
+      "all_score_rows": [
+        {
+          "bias": "-0.2458815135173134",
+          "direction_accuracy": "0.8888888888888888",
+          "mae": "0.3677541102736075",
+          "mae_scaled": "0.6967139571302172",
+          "mean_prediction": "-0.0037444324556520727",
+          "mean_target": "0.24213708106166132",
+          "n": "9",
+          "rmse": "0.4748773994819937",
+          "rmse_scaled": "0.8528554460672482",
+          "source": "llm_codex_cli_gpt-5.5__phase4_prior_replay",
+          "target_name": "ALL"
+        },
+        {
+          "bias": "-0.24193117506079428",
+          "direction_accuracy": "0.6666666666666666",
+          "mae": "0.38172561306517605",
+          "mae_scaled": "0.7078502811626569",
+          "mean_prediction": "0.00020590600086705594",
+          "mean_target": "0.24213708106166132",
+          "n": "9",
+          "rmse": "0.5045341625659338",
+          "rmse_scaled": "0.8975494474114605",
+          "source": "adaptive",
+          "target_name": "ALL"
+        }
+      ],
+      "manifest": {
+        "behavior_policy": {
+          "between_coefficients": {
+            "actual_expected_inflation_1y": 0.07808409722351486,
+            "actual_expected_real_income_growth": 0.21007644062310682,
+            "sce_question_unemployment_higher_prob": -0.017325117217887338
+          },
+          "bridge_spec_version": "empirical_bridge_v5_stabilized",
+          "constraints": {
+            "passed": true,
+            "rows": [
+              {
+                "bound_lower": -0.3,
+                "bound_upper": 0.3,
+                "coefficient_per_pp": 0.07808409722351486,
+                "passed": true,
+                "regressor": "actual_expected_inflation_1y",
+                "reported_coefficient": 0.07808409722351486
+              },
+              {
+                "bound_lower": 0.0,
+                "bound_upper": 0.5,
+                "coefficient_per_pp": 0.21007644062310682,
+                "passed": true,
+                "regressor": "actual_expected_real_income_growth",
+                "reported_coefficient": 0.21007644062310682
+              },
+              {
+                "bound_lower": -0.4,
+                "bound_upper": 0.0,
+                "coefficient_per_pp": -0.017325117217887338,
+                "passed": true,
+                "regressor": "sce_question_unemployment_higher_prob",
+                "reported_coefficient": -0.17325117217887337
+              }
+            ]
+          },
+          "empirical_bridge_sha256": "193c8bb8cbb212ec2a5bc8b136d4c100e0065bc03d3cc1c9e9c62c39ce2615df",
+          "execution_rule": "Per-period annual consumption-growth deviation equals between_coef dot clipped belief changes; the current demand executor divides the annual pp deviation by 4 before applying it to the quarterly consumption margin.",
+          "fit_waves": [
+            202004,
+            202008,
+            202012,
+            202104,
+            202108,
+            202112,
+            202204,
+            202208,
+            202304,
+            202308
+          ],
+          "mode": "empirical_bridge",
+          "profile_json": "work/empirical_bridge/empirical_bridge_v5_stabilized.json",
+          "profile_json_sha256": "c96e9d9168fff8dfdc1118c932097152b91cd82f3968e538a343a2b9eda37b2f",
+          "schema_version": "empirical_bridge_v5_stabilized",
+          "status": "accepted",
+          "validation_gate": {
+            "between_sign_magnitude_rows": [
+              {
+                "fit_between": 0.07808409722351486,
+                "magnitude_ratio": 0.39257244473295494,
+                "passed": false,
+                "regressor": "actual_expected_inflation_1y",
+                "validation_between": -0.030653664941800968
+              },
+              {
+                "fit_between": 0.21007644062310682,
+                "magnitude_ratio": 8.166295512310572,
+                "passed": false,
+                "regressor": "actual_expected_real_income_growth",
+                "validation_between": 1.7155462943026558
+              },
+              {
+                "fit_between": -0.017325117217887338,
+                "magnitude_ratio": 11.283070427761473,
+                "passed": false,
+                "regressor": "sce_question_unemployment_higher_prob",
+                "validation_between": 0.19548051773864575
+              }
+            ],
+            "cell_rmse_passed": false,
+            "cell_rmse_ratio": 1.5851771273980557,
+            "passed": false
+          },
+          "validation_waves": [
+            202312,
+            202404,
+            202408
+          ]
+        },
+        "cache_hit_count": 162,
+        "live_call_count": 0,
+        "scoring_label": "retrospective",
+        "status": "ok",
+        "verdict": "phase4_matched_twin_replay_scored",
+        "winner_source": "llm_codex_cli_gpt-5.5__phase4_prior_replay"
+      }
+    }
+  },
+  "claim_scope": "tracked compact evidence for the retrospective v5 stabilization and aligned Phase 4 result; raw work/ and outputs/ artifacts remain gitignored",
+  "combined_oct_nov_dec_panel": {
+    "models": [
+      "gpt-5.5"
+    ],
+    "panel_row_count": 243,
+    "period_count": 3,
+    "prediction_row_count": 729,
+    "prior_update_evidence": {
+      "evidence_verdict": "combined_octnov_clears_dec_extension_not_cleared",
+      "note": "Phase 4 diagnostic input only: Oct-Nov bank cleared the prior-update gate; Dec extension had useful direction/correlation/amplitude but failed RMSE improvement vs persistence."
+    },
+    "provider": "codex_cli",
+    "respondent_count": 81,
+    "source_artifacts": {
+      "dec_extension": {
+        "manifest_sha256": "1c5b43e3beebe9dfeca80ead9e4ed87c84bc7de64a639e4ee3fc0b4c7655ed0a",
+        "panel_sha256": "50ec5a95b0a4cb6b3f6fc17bdd95aa6c7a1c1312b06cc1a3d7d48a332b131a89",
+        "path": "outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_dec2024_extension",
+        "predictions_sha256": "11ed43b80d8612b557bf748932d73cb26ae3beb566480fbc6801766b208a8c44"
+      },
+      "oct_nov_bank": {
+        "manifest_sha256": "207ab800c8bb71a8c47c735050d3131f59c6e428037958181f42c2e332f3b00e",
+        "panel_sha256": "015d87963b3d2511168e00eb8eddc382e87f088410b254af68b2061888556247",
+        "path": "outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100",
+        "predictions_sha256": "e1ace0bfcdedb5d57d6a738c720c457752dc04aea1505fdcfb7e540893aca725"
+      }
+    },
+    "status": "ok"
+  },
+  "december_2024_prior_update_extension": {
+    "cache_hit_count": 0,
+    "live_call_count": 81,
+    "models": [
+      "gpt-5.5"
+    ],
+    "period_count": 1,
+    "preserve_csv_respondent_ids": true,
+    "primary_update_source": "llm_codex_cli_gpt-5.5",
+    "prior_update_evidence": {
+      "amplitude_clear": true,
+      "correlation_clear": true,
+      "decision_tree_branch": "correlation_direction_amplitude_or_persistence_gain_weak",
+      "direction_clear": true,
+      "evidence_verdict": "prior_update_gate_not_cleared",
+      "persistence_clear": false,
+      "primary_source_mean_direction_accuracy": 0.6036510647560083,
+      "primary_source_mean_rmse_improvement_vs_persistence": -0.008367601213532194,
+      "primary_source_mean_update_correlation": 0.35944433348673616,
+      "primary_source_median_update_amplitude_ratio": 0.6369328782585922,
+      "primary_update_source": "llm_codex_cli_gpt-5.5",
+      "thresholds": {
+        "primary_source_mean_delta_correlation_min": 0.1,
+        "primary_source_mean_direction_accuracy_min": 0.55,
+        "primary_source_mean_rmse_improvement_vs_persistence_min": 0.02,
+        "primary_source_median_update_amplitude_ratio_max": 2.0,
+        "primary_source_median_update_amplitude_ratio_min": 0.25
+      }
+    },
+    "provider": "codex_cli",
+    "required_call_count": 81,
+    "respondent_count": 81,
+    "status": "ok"
+  },
+  "empirical_bridge_v5_stabilized": {
+    "between_coefficients": {
+      "actual_expected_inflation_1y": 0.07808409722351486,
+      "actual_expected_real_income_growth": 0.21007644062310682,
+      "sce_question_unemployment_higher_prob": -0.017325117217887338
+    },
+    "bridge_spec_version": "empirical_bridge_v5_stabilized",
+    "canonical_payload_sha256": "193c8bb8cbb212ec2a5bc8b136d4c100e0065bc03d3cc1c9e9c62c39ce2615df",
+    "estimator": "ridge_cv",
+    "min_alpha": 0.3,
+    "schema_version": "empirical_bridge_v5_stabilized",
+    "selected_alpha": 3.0,
+    "selection_rule": "largest_alpha_within_one_standard_error_of_min_leave_one_fit_wave_out_rmse",
+    "status": "accepted",
+    "validation_gate": {
+      "between_sign_magnitude_rows": [
+        {
+          "fit_between": 0.07808409722351486,
+          "magnitude_ratio": 0.39257244473295494,
+          "passed": false,
+          "regressor": "actual_expected_inflation_1y",
+          "validation_between": -0.030653664941800968
+        },
+        {
+          "fit_between": 0.21007644062310682,
+          "magnitude_ratio": 8.166295512310572,
+          "passed": false,
+          "regressor": "actual_expected_real_income_growth",
+          "validation_between": 1.7155462943026558
+        },
+        {
+          "fit_between": -0.017325117217887338,
+          "magnitude_ratio": 11.283070427761473,
+          "passed": false,
+          "regressor": "sce_question_unemployment_higher_prob",
+          "validation_between": 0.19548051773864575
+        }
+      ],
+      "cell_rmse_passed": false,
+      "cell_rmse_ratio": 1.5851771273980557,
+      "passed": false
+    }
+  },
+  "generated_at_utc": "2026-07-08T07:31:53.392761+00:00",
+  "interpretation_guardrails": [
+    "The aligned Phase 4 win is retrospective, not confirmatory.",
+    "The December prior-update extension does not clear the persistence-improvement gate.",
+    "The v5 bridge is accepted by hard gates but fails its validation diagnostic."
+  ],
+  "schema_version": "phase4_v5_alignment_evidence_v1",
+  "source_control_note": "This tracked bundle pins ignored work/ and outputs/ artifacts by path and SHA-256; it is intentionally not self-referential to the final commit hash.",
+  "source_files": [
+    {
+      "bytes": 11367,
+      "path": "work/empirical_bridge/empirical_bridge_v5_stabilized.json",
+      "sha256": "c96e9d9168fff8dfdc1118c932097152b91cd82f3968e538a343a2b9eda37b2f"
+    },
+    {
+      "bytes": 15124,
+      "path": "outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_dec2024_extension/manifest.json",
+      "sha256": "1c5b43e3beebe9dfeca80ead9e4ed87c84bc7de64a639e4ee3fc0b4c7655ed0a"
+    },
+    {
+      "bytes": 3830,
+      "path": "outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_octnovdec_combined/manifest.json",
+      "sha256": "b017fca100db1bfa59d6c244f7f17d76a4a9aa19c6294f4714b55f5e62913b38"
+    },
+    {
+      "bytes": 7577,
+      "path": "outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_2card_aligned_octnovdec/manifest.json",
+      "sha256": "82534d71b640f0eed8ff3b961e0362c0983e38a4b3a1b926c42099d913d617e4"
+    },
+    {
+      "bytes": 2356,
+      "path": "outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_2card_aligned_octnovdec/phase4_proxy_scores.csv",
+      "sha256": "e0ad68dcef003bb9b8ab42aaf933379c1afb5de810c8eecc2168fbe87c523177"
+    },
+    {
+      "bytes": 7618,
+      "path": "outputs/phase4_matched_twins_empirical_bridge_v5_stabilized_codex_replay_fred_2card_aligned_octnovdec/manifest.json",
+      "sha256": "20be8285c1d5b2c51383e5234bfee136ac10e6eee96c43696d4acb72587b5585"
+    },
+    {
+      "bytes": 2346,
+      "path": "outputs/phase4_matched_twins_empirical_bridge_v5_stabilized_codex_replay_fred_2card_aligned_octnovdec/phase4_proxy_scores.csv",
+      "sha256": "9ec3f056c2649514cd8d2a4523dde14bc2b520feea440f1ca63f95303f671cf3"
+    }
+  ]
+}

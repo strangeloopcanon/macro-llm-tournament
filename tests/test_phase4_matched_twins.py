@@ -27,11 +27,19 @@ from macro_llm_tournament.phase4_v4_diagnostics import (
 )
 from macro_llm_tournament.empirical_bridge import (
     BRIDGE_SPEC_VERSION,
+    DEFAULT_BRIDGE,
+    DEFAULT_CELL_TARGETS,
+    DEFAULT_STABILIZED_BRIDGE,
+    DEFAULT_STABILIZED_CELL_TARGETS,
+    DEFAULT_STABILIZED_VALIDATION_SCORES,
+    DEFAULT_VALIDATION_SCORES,
     STABILIZED_BRIDGE_SPEC_VERSION,
     BridgeInput,
+    fit_empirical_bridge,
+    resolve_output_paths_for_spec,
     transform_belief_change,
 )
-from macro_llm_tournament.demand_economy import _structural_consumption_policy
+from macro_llm_tournament.demand_economy import _structural_consumption_policy, load_empirical_bridge_profile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -361,6 +369,108 @@ class Phase4MatchedTwinsTests(unittest.TestCase):
         self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], 0.12)
         self.assertAlmostEqual(policy["empirical_bridge_period_growth_deviation_pp"], 0.03)
         self.assertAlmostEqual(policy["desired_consumption"], 1000.3)
+
+    def test_empirical_bridge_executor_normalizes_schema_only_profile(self):
+        profile = _accepted_bridge_profile(
+            {
+                "actual_expected_inflation_1y": 0.12,
+                "actual_expected_real_income_growth": 0.00,
+                "sce_question_unemployment_higher_prob": 0.00,
+            }
+        )
+        profile["schema_version"] = STABILIZED_BRIDGE_SPEC_VERSION
+        del profile["bridge_spec_version"]
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bridge.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            loaded = load_empirical_bridge_profile(path)
+
+        self.assertEqual(loaded["bridge_spec_version"], STABILIZED_BRIDGE_SPEC_VERSION)
+        static = pd.Series(
+            {
+                "baseline_job_loss_probability": 7.2,
+                "unemployment_higher_probability_1y": 30.0,
+                "confidence_index": 55.0,
+                "income_growth_expectation_1y": 1.0,
+                "inflation_expectation_1y": 3.0,
+                "target_buffer_months": 3.0,
+                "base_saving_rate": 0.10,
+                "base_mpc": 0.30,
+                "annual_income": 80000.0,
+                "liquid_assets": 10000.0,
+                "debt": 5000.0,
+                "debt_service_burden": 0.12,
+                "rate_sensitivity": 0.3,
+                "income_sensitivity": 0.5,
+                "precautionary_sensitivity": 0.4,
+            }
+        )
+        state = {
+            "baseline_consumption": 1000.0,
+            "liquid_assets": 10000.0,
+            "job_loss_probability": 7.2,
+            "unemployment_higher_probability_1y": 30.0,
+            "confidence_index": 55.0,
+            "income_growth_expectation_1y": 1.0,
+            "inflation_expectation_1y": 3.0,
+            "labor_income": 20000.0,
+            "debt": 5000.0,
+            "income_group": "middle",
+            "liquidity_group": "low",
+            "job_loss_risk_type": "low",
+        }
+        belief = {
+            "expected_inflation_next_period": 4.0,
+            "expected_income_growth_next_period": 1.0,
+            "perceived_job_loss_probability": 7.2,
+            "expected_unemployment_higher_probability_next_period": 30.0,
+            "confidence_index": 55.0,
+            "precautionary_saving_score": 5.0,
+        }
+        policy = _structural_consumption_policy(
+            static,
+            state,
+            belief,
+            {"transfer_per_household": 0.0, "policy_rate": 3.0},
+            representative_mpc=None,
+            behavior_policy_profile=loaded,
+        )
+
+        self.assertEqual(policy["behavior_policy_mode"], "empirical_bridge")
+        self.assertAlmostEqual(policy["empirical_bridge_annual_growth_deviation_pp"], 0.12)
+
+    def test_empirical_bridge_rejects_schema_estimator_drift(self):
+        kwargs = {
+            "panel_csv": Path("/missing-panel.csv"),
+            "coverage_json": Path("/missing-coverage.json"),
+            "output_json": Path("/missing-output.json"),
+            "cell_targets_csv": Path("/missing-cells.csv"),
+            "validation_scores_csv": Path("/missing-validation.csv"),
+        }
+
+        with self.assertRaisesRegex(ValueError, "empirical_bridge_v4 must use estimator=ols"):
+            fit_empirical_bridge(**kwargs, estimator="ridge_cv", bridge_spec_version=BRIDGE_SPEC_VERSION)
+
+        with self.assertRaisesRegex(ValueError, "empirical_bridge_v5_stabilized must use estimator=ridge_cv"):
+            fit_empirical_bridge(**kwargs, estimator="ols", bridge_spec_version=STABILIZED_BRIDGE_SPEC_VERSION)
+
+    def test_empirical_bridge_v5_defaults_resolve_to_stabilized_paths(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "bridge_spec_version": STABILIZED_BRIDGE_SPEC_VERSION,
+                "output_json": DEFAULT_BRIDGE,
+                "cell_targets_csv": DEFAULT_CELL_TARGETS,
+                "validation_scores_csv": DEFAULT_VALIDATION_SCORES,
+            },
+        )()
+
+        resolve_output_paths_for_spec(args)
+
+        self.assertEqual(args.output_json, DEFAULT_STABILIZED_BRIDGE)
+        self.assertEqual(args.cell_targets_csv, DEFAULT_STABILIZED_CELL_TARGETS)
+        self.assertEqual(args.validation_scores_csv, DEFAULT_STABILIZED_VALIDATION_SCORES)
 
     def test_phase4_fixture_cli_writes_locked_mapping_and_scores(self):
         with TemporaryDirectory() as temp_dir:

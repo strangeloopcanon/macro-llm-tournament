@@ -610,11 +610,14 @@ def load_empirical_bridge_profile(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Empirical bridge artifact must contain a JSON object")
-    if str(data.get("bridge_spec_version") or data.get("schema_version")) not in SUPPORTED_BRIDGE_SPEC_VERSIONS:
+    bridge_spec_version = str(data.get("bridge_spec_version") or data.get("schema_version"))
+    if bridge_spec_version not in SUPPORTED_BRIDGE_SPEC_VERSIONS:
         raise ValueError(f"Unsupported empirical bridge schema: {data.get('schema_version')!r}")
     if str(data.get("status")) != "accepted":
         raise ValueError(f"Empirical bridge is fail-closed and not accepted: status={data.get('status')!r}")
     out = dict(data)
+    out["bridge_spec_version"] = bridge_spec_version
+    out.setdefault("schema_version", bridge_spec_version)
     out["profile_json"] = str(path)
     out["profile_json_sha256"] = file_sha256(path)
     return out
@@ -2152,7 +2155,8 @@ def _structural_consumption_policy(
     )
     if (
         behavior_policy_profile is not None
-        and str(behavior_policy_profile.get("bridge_spec_version")) in SUPPORTED_BRIDGE_SPEC_VERSIONS
+        and str(behavior_policy_profile.get("bridge_spec_version") or behavior_policy_profile.get("schema_version"))
+        in SUPPORTED_BRIDGE_SPEC_VERSIONS
         and representative_mpc is None
     ):
         transfer_allocation = _transfer_windfall_allocation(
