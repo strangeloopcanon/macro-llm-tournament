@@ -1,0 +1,88 @@
+{
+  "schema_version": "macro_economy_tournament_v1",
+  "run_id": "macro_tournament_development_v3",
+  "scoring_label": "retrospective",
+  "confirmatory_surface_policy": "Do not spend the next newly scoreable FRED month during development search; tournament search uses only already-scored retrospective Phase 4 surfaces.",
+  "search_rationale": "Same grid as development_v2, re-scored after the December leg of the aligned panel was re-elicited under the pre-registered monthly-vintage environment fix (reports/prior_update_environment_v2_prereg.md) and cleared its gate at diagnostic status. The aligned surface now uses the gated v2 combined panel.",
+  "provider": "codex_cli",
+  "model": "gpt-5.5",
+  "profiles": {
+    "empirical_bridge_v4": "work/empirical_bridge/empirical_bridge_v4.json",
+    "empirical_bridge_v5_stabilized": "work/empirical_bridge/empirical_bridge_v5_stabilized.json",
+    "state_schedule": "outputs/state_policy_schedules_live_gpt55_sce_prior_update/state_behavior_policy_profile.json"
+  },
+  "candidate_grid": {
+    "belief_gain_global": [
+      1.0,
+      1.5,
+      2.0,
+      2.5,
+      3.0
+    ],
+    "belief_gain_inflation": [
+      0.5,
+      0.75,
+      1.0,
+      1.25,
+      1.5
+    ],
+    "belief_gain_income": [
+      0.5,
+      0.75,
+      1.0,
+      1.25,
+      1.5
+    ],
+    "belief_gain_unemployment": [
+      0.5,
+      0.75,
+      1.0,
+      1.25,
+      1.5
+    ],
+    "behavior_mechanisms": [
+      "empirical_bridge_v4",
+      "empirical_bridge_v5_stabilized"
+    ],
+    "hybrid_state_weights": [
+      1.0
+    ],
+    "feedback_modes": [
+      "closed_loop"
+    ],
+    "feedback_gain_multipliers": [
+      1.0,
+      1.5
+    ]
+  },
+  "surfaces": [
+    {
+      "surface_id": "original_onecard_retrospective",
+      "belief_source": "persona_ecology_replay",
+      "persona_ecology_dir": "outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100",
+      "primary_ecology_source": "llm_codex_cli_gpt-5.5",
+      "ecology_period_policy": "strict",
+      "data_mode": "fred",
+      "cutoff_date": "2025-12-01",
+      "asof_start": "2025-12-15",
+      "asof_end": "2025-12-15",
+      "history_months": 18,
+      "period_count": 2,
+      "scoring_label": "retrospective"
+    },
+    {
+      "surface_id": "aligned_octnovdec_twocard_retrospective_v2panel",
+      "belief_source": "persona_ecology_replay",
+      "persona_ecology_dir": "outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_octnovdec_combined_v2",
+      "primary_ecology_source": "llm_codex_cli_gpt-5.5",
+      "ecology_period_policy": "strict",
+      "data_mode": "fred",
+      "cutoff_date": "2025-12-01",
+      "asof_start": "2025-12-15",
+      "asof_end": "2026-01-15",
+      "history_months": 18,
+      "period_count": 3,
+      "scoring_label": "retrospective"
+    }
+  ]
+}

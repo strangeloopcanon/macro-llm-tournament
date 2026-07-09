@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay macro-tournament-dev macro-incumbent-v1 phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay prior-update-extension-v2-inputs prior-update-dec2024-v2-live prior-update-jan2025-v2-live macro-tournament-dev macro-tournament-dev-v2 macro-incumbent-v1 phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 # Current milestone
 macro-incumbent-v1:
@@ -11,9 +11,7 @@ macro-incumbent-v1:
 		--max-live-calls 0 \
 		--output-dir outputs/macro_incumbent_v1
 
-
 # Core utilities and forecast gates
-
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
 
@@ -401,6 +399,52 @@ macro-tournament-dev:
 		--mode replay \
 		--max-live-calls 0 \
 		--output-dir outputs/macro_tournament_development_v1
+
+prior-update-extension-v2-inputs:
+	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_prior_update_extension
+
+prior-update-dec2024-v2-live:
+	CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
+		--provider codex_cli \
+		--models gpt-5.5 \
+		--ecology-mode live \
+		--fresh-cache \
+		--max-live-calls 90 \
+		--respondent-source csv \
+		--survey-schema normalized \
+		--respondent-csv work/persona_beliefs/sce_2024_12_prior_update_extension_v2_input.csv \
+		--preserve-csv-respondent-ids \
+		--period-ids sce_2024_12 \
+		--prior-mode empirical \
+		--feedback-mode none \
+		--date-mode relative \
+		--target-fields expected_inflation_1y,expected_unemployment_higher_prob,expected_real_income_growth \
+		--output-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_dec2024_extension_v2
+
+prior-update-jan2025-v2-live:
+	CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
+		--provider codex_cli \
+		--models gpt-5.5 \
+		--ecology-mode live \
+		--fresh-cache \
+		--max-live-calls 75 \
+		--respondent-source csv \
+		--survey-schema normalized \
+		--respondent-csv work/persona_beliefs/sce_2025_01_prior_update_extension_v2_input.csv \
+		--preserve-csv-respondent-ids \
+		--period-ids sce_2025_01 \
+		--prior-mode empirical \
+		--feedback-mode none \
+		--date-mode relative \
+		--target-fields expected_inflation_1y,expected_unemployment_higher_prob,expected_real_income_growth \
+		--output-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_67_jan2025_extension_v2
+
+macro-tournament-dev-v2:
+	PYTHONPATH=src python3 -m macro_llm_tournament.macro_tournament \
+		--spec configs/macro_tournament/development_v2.json \
+		--mode replay \
+		--max-live-calls 0 \
+		--output-dir outputs/macro_tournament_development_v2
 
 # Diagnostics and scorecards
 phase4-v4-diagnostics:
