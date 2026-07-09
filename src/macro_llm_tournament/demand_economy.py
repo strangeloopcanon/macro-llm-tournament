@@ -22,8 +22,8 @@ from .forecast_llm import ForecastLLMClient, SUPPORTED_FORECAST_PROVIDERS
 from .llm_common import LLMUnavailable
 
 
-DEMAND_ECONOMY_VERSION = "hank_lite_belief_demand_economy_v2"
-DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v4"
+DEMAND_ECONOMY_VERSION = "hank_lite_belief_demand_economy_v3"
+DEMAND_ECONOMY_PROMPT_VERSION = "hank_lite_belief_module_v5"
 NAIVE_PERSONA_PROMPT_VERSION = "hank_lite_naive_persona_direct_consumption_v1"
 DEMAND_BEHAVIOR_POLICY_VERSION = "demand_behavior_policy_schedule_v1"
 DEMAND_STATE_BEHAVIOR_POLICY_VERSION = "demand_behavior_state_policy_schedule_v1"
@@ -38,7 +38,8 @@ INFLATION_TARGET = 2.0
 STEADY_EMPLOYMENT_RATE = 0.955
 DEFAULT_BEHAVIOR_POLICY_RAW_RECORDS = OUTPUT_ROOT / "behavior_ecology_gpt55_xhigh" / "ecology_raw_records.json"
 DEFAULT_EMPIRICAL_BRIDGE_JSON = DEFAULT_BRIDGE
-EMPIRICAL_BRIDGE_PERIODS_PER_YEAR = 4.0
+DEFAULT_PERIODS_PER_YEAR = 4.0
+PROTECTED_PERIOD_OVERRIDE_FIELDS = frozenset({"scenario_id", "period_id", "period_index"})
 FULL_LAB_LLM_METRICS = {
     "baseline_no_shock_output_gap_rms",
     "belief_feedback_amplification_ratio",
@@ -327,6 +328,7 @@ class DemandEconomyClient:
         max_live_calls: int = 0,
         raw_replay_records: list[dict[str, Any]] | None = None,
         belief_calibration_profile: dict[str, Any] | None = None,
+        execution_cwd: Path | None = None,
     ):
         if mode not in BELIEF_MODES:
             raise ValueError(f"Unsupported demand-economy mode: {mode}")
@@ -341,7 +343,14 @@ class DemandEconomyClient:
         self.raw_records: list[dict[str, Any]] = []
         self._raw_replay_records = _raw_replay_record_map(raw_replay_records or [])
         llm_mode = mode if variant in LLM_VARIANTS else "fixture"
-        self._llm = ForecastLLMClient(provider, model, cache_dir, mode=llm_mode, max_live_calls=max_live_calls)
+        self._llm = ForecastLLMClient(
+            provider,
+            model,
+            cache_dir,
+            mode=llm_mode,
+            max_live_calls=max_live_calls,
+            execution_cwd=execution_cwd,
+        )
 
     @property
     def live_call_count(self) -> int:
@@ -933,12 +942,18 @@ def run_demand_economy(
     period_count: int = 100,
     feedback_mode: str = "closed_loop",
     behavior_policy_profile: dict[str, Any] | None = None,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+    period_overrides: dict[int, dict[str, Any]] | None = None,
+    initial_environment_override: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     if feedback_mode not in FEEDBACK_MODES:
         raise ValueError(f"Unsupported feedback mode: {feedback_mode}")
+    periods_per_year = _validated_periods_per_year(periods_per_year)
+    normalized_period_overrides = _normalize_period_overrides(period_overrides)
+    normalized_initial_environment = _normalize_initial_environment_override(initial_environment_override)
     households = normalize_demand_households(households)
     source = client.source
-    initial = _initial_household_states(households, source=source, variant=client.variant)
+    initial = _initial_household_states(households, source=source, variant=client.variant, periods_per_year=periods_per_year)
     belief_rows: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
     period_rows: list[dict[str, Any]] = []
@@ -946,9 +961,18 @@ def run_demand_economy(
     prompt_rows: list[dict[str, Any]] = []
     for scenario in scenarios:
         household_states = initial.to_dict(orient="records")
-        env = _initial_environment(households)
+        env = {
+            **_initial_environment(households, periods_per_year=periods_per_year),
+            **normalized_initial_environment,
+        }
         for period_index in range(int(period_count)):
-            period_state = _period_state(env, scenario, period_index)
+            period_state = _period_state(
+                env,
+                scenario,
+                period_index,
+                periods_per_year=periods_per_year,
+                period_override=normalized_period_overrides.get(period_index),
+            )
             panel = client.belief_panel(scenario, period_state, household_states)
             prompt_rows.append(
                 {
@@ -970,13 +994,30 @@ def run_demand_economy(
                 source=source,
                 variant=client.variant,
                 behavior_policy_profile=behavior_policy_profile,
+                periods_per_year=periods_per_year,
             )
             decision_rows.extend(realized)
             aggregate = _aggregate_period(realized, scenario, period_state, source=source, variant=client.variant)
-            period_rows.append(aggregate)
             accounting_rows.extend(_accounting_rows(realized, aggregate))
-            household_states = _next_household_states(realized, households, aggregate)
-            env = _next_environment(env, aggregate, scenario, feedback_mode=feedback_mode)
+            next_household_states = _next_household_states(
+                realized,
+                households,
+                aggregate,
+                periods_per_year=periods_per_year,
+            )
+            next_env = _next_environment(env, aggregate, scenario, feedback_mode=feedback_mode)
+            aggregate.update(
+                {
+                    "next_output_gap_pct": float(next_env["output_gap_pct"]),
+                    "next_employment_rate": float(next_env["employment_rate"]),
+                    "next_inflation_rate": float(next_env["inflation_rate"]),
+                    "next_policy_rate": float(next_env["policy_rate"]),
+                    "next_aggregate_income": _weighted(next_household_states, "labor_income"),
+                }
+            )
+            period_rows.append(aggregate)
+            household_states = next_household_states
+            env = next_env
     return (
         initial,
         pd.DataFrame(belief_rows),
@@ -1008,6 +1049,7 @@ Return exactly this JSON shape:
       "expected_inflation_next_period": 2.0,
       "expected_income_growth_next_period": 1.0,
       "perceived_job_loss_probability": 5.0,
+      "expected_unemployment_higher_probability_next_period": 35.0,
       "confidence_index": 50.0,
       "precautionary_saving_score": 5.0,
       "attention_weight_prices": 0.5,
@@ -1031,16 +1073,18 @@ def belief_module_prompt_payload(
     *,
     variant: str = "llm_belief",
 ) -> dict[str, Any]:
+    has_as_of_history = bool(period_state.get("origin_visible_macro_history"))
+    information_label = "origin-visible as-of macro history" if has_as_of_history else "abstract current environment"
     return {
         "prompt_version": DEMAND_ECONOMY_PROMPT_VERSION,
         "variant": variant,
         "task": (
-            "Predict the beliefs of survey-seeded household cells in an abstract economy. "
+            f"Predict the beliefs of survey-seeded household cells from the supplied {information_label}. "
             "The structural code, not you, will choose consumption, saving, budgets, and aggregation."
         ),
         "belief_update_rules": [
             "Use each cell's prior_expected_inflation, prior_expected_income_growth, prior_job_loss_probability, and prior_confidence_index as survey-style anchors.",
-            "Update those anchors only from the abstract current_environment and the cell's own balance-sheet/labor-risk state.",
+            "Update those anchors only from the supplied current environment, origin-visible information if present, and the cell's own balance-sheet/labor-risk state.",
             "Do not collapse household cells to one representative answer; cross-cell heterogeneity is signal.",
             "In a no-shock period near steady state, beliefs should usually remain close to the cell's survey-style priors.",
             "Under normal dispersion and feedback conditions, damp one-period noise rather than extrapolating it into a persistent boom or slump.",
@@ -1054,7 +1098,12 @@ def belief_module_prompt_payload(
             "When output is only mildly above steady state and policy is responding, expected income growth should mean-revert toward the supplied prior rather than drift upward; do not convert temporary policy response after a cash transfer into a job-security scare by itself.",
             "Low-liquidity, high-job-risk, and low-income cells can rationally carry higher job-risk beliefs and precaution than high-buffer cells.",
         ],
-        "contamination_control": "No calendar dates, named historical episodes, target realized paths, or external data are supplied.",
+        "contamination_control": (
+            "Calendar dates and macro history are frozen at the declared as-of date. No later observations, "
+            "first-release targets, revisions, or realized target paths are supplied."
+            if has_as_of_history
+            else "No calendar dates, named historical episodes, target realized paths, or external data are supplied."
+        ),
         "economy": {
             "goods": "one nondurable consumption good",
             "capital": "none",
@@ -1904,15 +1953,22 @@ def build_demand_economy_report(
     return "\n".join(lines)
 
 
-def _initial_household_states(households: pd.DataFrame, *, source: str, variant: str) -> pd.DataFrame:
+def _initial_household_states(
+    households: pd.DataFrame,
+    *,
+    source: str,
+    variant: str,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+) -> pd.DataFrame:
     rows = []
     for _, row in households.iterrows():
-        baseline_consumption = float(row["baseline_consumption_annual"]) / 4.0
+        baseline_consumption = _per_period_amount(float(row["baseline_consumption_annual"]), periods_per_year)
         rows.append(
             {
                 "schema_version": DEMAND_ECONOMY_VERSION,
                 "source": source,
                 "variant": variant,
+                "periods_per_year": periods_per_year,
                 "type_id": row["type_id"],
                 "label": row["label"],
                 "population_weight": float(row["population_weight"]),
@@ -1922,7 +1978,7 @@ def _initial_household_states(households: pd.DataFrame, *, source: str, variant:
                 "job_loss_risk_type": row["job_loss_risk_type"],
                 "employment_status": row["employment_status"],
                 "annual_income": float(row["annual_income"]),
-                "labor_income": float(row["annual_income"]) / 4.0,
+                "labor_income": _per_period_amount(float(row["annual_income"]), periods_per_year),
                 "baseline_consumption": baseline_consumption,
                 "liquid_assets": float(row["liquid_assets"]),
                 "debt": float(row["debt"]),
@@ -1945,16 +2001,21 @@ def _initial_household_states(households: pd.DataFrame, *, source: str, variant:
                 "attention_weight_rates": float(row["attention_weight_rates"]),
                 "income_volatility": float(row["income_volatility"]),
                 "subsistence_floor_share": float(row["subsistence_floor_share"]),
-                "liquid_buffer_months": _buffer_months(float(row["liquid_assets"]), baseline_consumption),
+                "liquid_buffer_months": _buffer_months(float(row["liquid_assets"]), baseline_consumption, periods_per_year=periods_per_year),
                 "transfer_buffer_relief": 0.0,
             }
         )
     return pd.DataFrame(rows).sort_values("type_id").reset_index(drop=True)
 
 
-def _initial_environment(households: pd.DataFrame) -> dict[str, float]:
-    baseline_consumption = float((households["population_weight"] * households["baseline_consumption_annual"] / 4.0).sum())
+def _initial_environment(
+    households: pd.DataFrame,
+    *,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+) -> dict[str, float]:
+    baseline_consumption = float((households["population_weight"] * households["baseline_consumption_annual"] / periods_per_year).sum())
     return {
+        "periods_per_year": periods_per_year,
         "baseline_aggregate_consumption": baseline_consumption,
         "aggregate_consumption": baseline_consumption,
         "output_gap_pct": 0.0,
@@ -1967,7 +2028,14 @@ def _initial_environment(households: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def _period_state(env: dict[str, float], scenario: DemandScenario, period_index: int) -> dict[str, Any]:
+def _period_state(
+    env: dict[str, float],
+    scenario: DemandScenario,
+    period_index: int,
+    *,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+    period_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     rate_shock = (
         float(scenario.rate_shock_pp)
         if scenario.rate_shock_start <= period_index <= scenario.rate_shock_end and scenario.rate_shock_start >= 0
@@ -1979,16 +2047,24 @@ def _period_state(env: dict[str, float], scenario: DemandScenario, period_index:
         else 0.0
     )
     transfer = float(scenario.transfer_amount) if period_index == scenario.transfer_period else 0.0
-    return {
+    state: dict[str, Any] = {
         **env,
         "scenario_id": scenario.scenario_id,
         "period_index": int(period_index),
         "period_id": f"period_{period_index}",
+        "periods_per_year": periods_per_year,
+        "months_per_period": _months_per_period(periods_per_year),
         "transfer_per_household": transfer,
         "policy_rate_shock_pp": rate_shock,
         "job_risk_shock_pp": job_risk_shock,
         "policy_rate": float(env["policy_rate"]) + rate_shock,
     }
+    if period_override:
+        state.update(period_override)
+        state["supplied_exogenous_conditions"] = dict(period_override)
+    else:
+        state["supplied_exogenous_conditions"] = {}
+    return state
 
 
 def _realize_household_period(
@@ -2000,6 +2076,7 @@ def _realize_household_period(
     source: str,
     variant: str,
     behavior_policy_profile: dict[str, Any] | None = None,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
 ) -> list[dict[str, Any]]:
     household_by_type = {str(row["type_id"]): row for _, row in households.iterrows()}
     beliefs = panel["beliefs_by_type"]
@@ -2016,7 +2093,7 @@ def _realize_household_period(
         transfer = float(period_state["transfer_per_household"])
         cash_available = liquid_before + labor_income + transfer
         baseline_consumption = float(state["baseline_consumption"])
-        current_buffer = _buffer_months(liquid_before, baseline_consumption)
+        current_buffer = _buffer_months(liquid_before, baseline_consumption, periods_per_year=periods_per_year)
         transfer_buffer_relief_before = float(state.get("transfer_buffer_relief", 0.0))
         if direct is not None:
             desired_consumption = baseline_consumption * (1.0 + float(direct["desired_consumption_change_pct"]) / 100.0)
@@ -2033,7 +2110,14 @@ def _realize_household_period(
             behavior_policy_consumption_drag = 0.0
             empirical_bridge_annual_growth_deviation_pp = 0.0
             empirical_bridge_period_growth_deviation_pp = 0.0
+            empirical_bridge_consumption_delta = 0.0
             empirical_bridge_clipped_inputs_json = "{}"
+            income_effect = 0.0
+            expected_income_effect = 0.0
+            buffer_relief_support = 0.0
+            buffer_drag = 0.0
+            precaution_drag = 0.0
+            rate_drag = 0.0
         else:
             policy = _structural_consumption_policy(
                 static,
@@ -2042,6 +2126,7 @@ def _realize_household_period(
                 period_state,
                 representative_mpc=representative_mpc,
                 behavior_policy_profile=behavior_policy_profile,
+                periods_per_year=periods_per_year,
             )
             desired_consumption = policy["desired_consumption"]
             mpc = policy["effective_mpc"]
@@ -2057,7 +2142,14 @@ def _realize_household_period(
             behavior_policy_consumption_drag = float(policy["behavior_policy_consumption_drag"])
             empirical_bridge_annual_growth_deviation_pp = float(policy.get("empirical_bridge_annual_growth_deviation_pp", 0.0))
             empirical_bridge_period_growth_deviation_pp = float(policy.get("empirical_bridge_period_growth_deviation_pp", 0.0))
+            empirical_bridge_consumption_delta = float(policy.get("empirical_bridge_consumption_delta", 0.0))
             empirical_bridge_clipped_inputs_json = json.dumps(policy.get("empirical_bridge_clipped_inputs", {}), sort_keys=True)
+            income_effect = float(policy.get("income_effect", 0.0))
+            expected_income_effect = float(policy.get("expected_income_effect", 0.0))
+            buffer_relief_support = float(policy.get("buffer_relief_support", 0.0))
+            buffer_drag = float(policy.get("buffer_drag", 0.0))
+            precaution_drag = float(policy.get("precaution_drag", 0.0))
+            rate_drag = float(policy.get("rate_drag", 0.0))
         debt_before = float(state["debt"])
         floor_consumption = min(cash_available, float(static["subsistence_floor_share"]) * baseline_consumption)
         max_debt_repayment = max(0.0, min(debt_before, cash_available - floor_consumption))
@@ -2083,6 +2175,7 @@ def _realize_household_period(
                 "schema_version": DEMAND_ECONOMY_VERSION,
                 "source": source,
                 "variant": variant,
+                "periods_per_year": periods_per_year,
                 "scenario_id": period_state["scenario_id"],
                 "period_id": period_state["period_id"],
                 "period_index": int(period_state["period_index"]),
@@ -2106,7 +2199,7 @@ def _realize_household_period(
                 "liquid_assets_after": liquid_after,
                 "safe_asset_absorption": saving_flow,
                 "liquid_buffer_months_before": current_buffer,
-                "liquid_buffer_months_after": _buffer_months(liquid_after, baseline_consumption),
+                "liquid_buffer_months_after": _buffer_months(liquid_after, baseline_consumption, periods_per_year=periods_per_year),
                 "base_mpc": float(static["base_mpc"]),
                 "effective_mpc": mpc,
                 "realized_mpc_from_transfer": transfer_consumption_amount / transfer if transfer > 0 else np.nan,
@@ -2131,6 +2224,15 @@ def _realize_household_period(
                 "behavior_policy_mode": behavior_policy_mode,
                 "behavior_policy_type_id": behavior_policy_type_id,
                 "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
+                "behavior_transfer_consumption_amount": transfer_consumption_amount,
+                "behavior_income_effect": income_effect,
+                "behavior_expected_income_effect": expected_income_effect,
+                "behavior_empirical_bridge_consumption_delta": empirical_bridge_consumption_delta,
+                "behavior_buffer_relief_support": buffer_relief_support,
+                "behavior_buffer_drag": buffer_drag,
+                "behavior_precaution_drag": precaution_drag,
+                "behavior_rate_drag": rate_drag,
+                "behavior_schedule_consumption_drag": behavior_policy_consumption_drag,
                 "empirical_bridge_annual_growth_deviation_pp": empirical_bridge_annual_growth_deviation_pp,
                 "empirical_bridge_period_growth_deviation_pp": empirical_bridge_period_growth_deviation_pp,
                 "empirical_bridge_clipped_inputs_json": empirical_bridge_clipped_inputs_json,
@@ -2149,11 +2251,12 @@ def _structural_consumption_policy(
     *,
     representative_mpc: float | None,
     behavior_policy_profile: dict[str, Any] | None = None,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
 ) -> dict[str, Any]:
     baseline_consumption = float(state["baseline_consumption"])
     liquid_before = float(state["liquid_assets"])
     transfer = float(period_state["transfer_per_household"])
-    current_buffer = _buffer_months(liquid_before, baseline_consumption)
+    current_buffer = _buffer_months(liquid_before, baseline_consumption, periods_per_year=periods_per_year)
     job_loss = float(belief["perceived_job_loss_probability"])
     confidence = float(belief["confidence_index"])
     expected_income = float(belief["expected_income_growth_next_period"])
@@ -2194,10 +2297,11 @@ def _structural_consumption_policy(
     mpc += -0.010 * (precaution_score - 5.0)
     mpc = float(np.clip(mpc, 0.03, 0.96))
     labor_income = float(state["labor_income"])
-    normal_income = float(static["annual_income"]) / 4.0
+    normal_income = _per_period_amount(float(static["annual_income"]), periods_per_year)
     income_gap = labor_income / max(normal_income, 1e-9) - 1.0
-    target_buffer_dollars = target_buffer * (baseline_consumption / 3.0)
-    baseline_target_buffer_dollars = float(static["target_buffer_months"]) * (baseline_consumption / 3.0)
+    period_months = _months_per_period(periods_per_year)
+    target_buffer_dollars = target_buffer * (baseline_consumption / period_months)
+    baseline_target_buffer_dollars = float(static["target_buffer_months"]) * (baseline_consumption / period_months)
     baseline_buffer_gap = max(0.0, baseline_target_buffer_dollars - float(static["liquid_assets"]))
     buffer_gap = max(0.0, target_buffer_dollars - liquid_before)
     buffer_drag = 0.065 * (buffer_gap - baseline_buffer_gap)
@@ -2227,10 +2331,10 @@ def _structural_consumption_policy(
     state_profile = hybrid_profile.get("state_schedule_profile") if hybrid_profile is not None else behavior_policy_profile
     bridge_profile = hybrid_profile.get("empirical_bridge_profile") if hybrid_profile is not None else behavior_policy_profile
     state_behavior_match = (
-        _match_state_behavior_policy(static, state, state_profile) if state_profile is not None else None
+        _match_state_behavior_policy(static, state, state_profile, periods_per_year=periods_per_year) if state_profile is not None else None
     )
     behavior_match = (
-        _match_behavior_policy(static, state, behavior_policy_profile)
+        _match_behavior_policy(static, state, behavior_policy_profile, periods_per_year=periods_per_year)
         if behavior_policy_profile is not None and state_behavior_match is None and hybrid_profile is None
         else None
     )
@@ -2243,9 +2347,10 @@ def _structural_consumption_policy(
             desired_saving_rate=desired_saving_rate,
             real_rate=real_rate,
             representative_mpc=representative_mpc,
+            periods_per_year=periods_per_year,
         )
         state_transfer = (
-            _state_schedule_transfer_allocation(static, state, state_behavior_match, transfer)
+            _state_schedule_transfer_allocation(static, state, state_behavior_match, transfer, periods_per_year=periods_per_year)
             if state_behavior_match is not None
             else fallback_transfer
         )
@@ -2267,7 +2372,7 @@ def _structural_consumption_policy(
         )
         bridge_result = transform_belief_change(bridge_profile, previous_input, current_input)
         empirical_bridge_annual_growth_deviation_pp = float(bridge_result.annual_growth_deviation_pp)
-        empirical_bridge_period_growth_deviation_pp = empirical_bridge_annual_growth_deviation_pp / EMPIRICAL_BRIDGE_PERIODS_PER_YEAR
+        empirical_bridge_period_growth_deviation_pp = empirical_bridge_annual_growth_deviation_pp / periods_per_year
         empirical_bridge_consumption_delta = baseline_consumption * empirical_bridge_period_growth_deviation_pp / 100.0
         empirical_bridge_clipped_inputs = bridge_result.clipped
         behavior_policy_mode = "empirical_bridge_state_schedule"
@@ -2303,6 +2408,7 @@ def _structural_consumption_policy(
             desired_saving_rate=desired_saving_rate,
             real_rate=real_rate,
             representative_mpc=representative_mpc,
+            periods_per_year=periods_per_year,
         )
         previous_input = BridgeInput(
             inflation_expectation_1y=float(state["inflation_expectation_1y"]),
@@ -2320,7 +2426,7 @@ def _structural_consumption_policy(
         )
         bridge_result = transform_belief_change(bridge_profile, previous_input, current_input)
         empirical_bridge_annual_growth_deviation_pp = float(bridge_result.annual_growth_deviation_pp)
-        empirical_bridge_period_growth_deviation_pp = empirical_bridge_annual_growth_deviation_pp / EMPIRICAL_BRIDGE_PERIODS_PER_YEAR
+        empirical_bridge_period_growth_deviation_pp = empirical_bridge_annual_growth_deviation_pp / periods_per_year
         empirical_bridge_consumption_delta = baseline_consumption * empirical_bridge_period_growth_deviation_pp / 100.0
         empirical_bridge_clipped_inputs = bridge_result.clipped
         behavior_policy_mode = "empirical_bridge"
@@ -2331,7 +2437,7 @@ def _structural_consumption_policy(
         rate_drag = 0.0
         expected_income_effect = 0.0
     elif state_behavior_match is not None and representative_mpc is None:
-        transfer_allocation = _state_schedule_transfer_allocation(static, state, state_behavior_match, transfer)
+        transfer_allocation = _state_schedule_transfer_allocation(static, state, state_behavior_match, transfer, periods_per_year=periods_per_year)
         behavior_policy_mode = "state_schedule"
         behavior_policy_type_id = str(state_behavior_match["profile_id"])
         behavior_policy_consumption_drag = _state_schedule_consumption_drag(
@@ -2350,7 +2456,7 @@ def _structural_consumption_policy(
         rate_drag = 0.0
         expected_income_effect = 0.0
     elif behavior_match is not None and representative_mpc is None:
-        transfer_allocation = _schedule_transfer_allocation(static, state, behavior_match, transfer)
+        transfer_allocation = _schedule_transfer_allocation(static, state, behavior_match, transfer, periods_per_year=periods_per_year)
         behavior_policy_mode = "schedule"
         behavior_policy_type_id = str(behavior_match["type_id"])
         behavior_policy_consumption_drag = _schedule_consumption_drag(static, state, belief, period_state, behavior_match, baseline_consumption)
@@ -2363,6 +2469,7 @@ def _structural_consumption_policy(
             desired_saving_rate=desired_saving_rate,
             real_rate=real_rate,
             representative_mpc=representative_mpc,
+            periods_per_year=periods_per_year,
         )
         behavior_policy_mode = "fixed_kernel"
         behavior_policy_type_id = ""
@@ -2396,13 +2503,26 @@ def _structural_consumption_policy(
         "behavior_policy_mode": behavior_policy_mode,
         "behavior_policy_type_id": behavior_policy_type_id,
         "behavior_policy_consumption_drag": behavior_policy_consumption_drag,
+        "income_effect": income_effect,
+        "expected_income_effect": expected_income_effect,
+        "empirical_bridge_consumption_delta": empirical_bridge_consumption_delta,
+        "buffer_relief_support": buffer_relief_support,
+        "buffer_drag": buffer_drag,
+        "precaution_drag": precaution_drag,
+        "rate_drag": rate_drag,
         "empirical_bridge_annual_growth_deviation_pp": empirical_bridge_annual_growth_deviation_pp,
         "empirical_bridge_period_growth_deviation_pp": empirical_bridge_period_growth_deviation_pp,
         "empirical_bridge_clipped_inputs": empirical_bridge_clipped_inputs,
     }
 
 
-def _match_behavior_policy(static: pd.Series, state: dict[str, Any], profile: dict[str, Any] | None) -> dict[str, Any] | None:
+def _match_behavior_policy(
+    static: pd.Series,
+    state: dict[str, Any],
+    profile: dict[str, Any] | None,
+    *,
+    periods_per_year: float,
+) -> dict[str, Any] | None:
     if profile is None:
         return None
     if profile.get("schema_version") == DEMAND_STATE_BEHAVIOR_POLICY_VERSION:
@@ -2414,7 +2534,7 @@ def _match_behavior_policy(static: pd.Series, state: dict[str, Any], profile: di
     income_loss_policies = profile.get("income_loss_policies", {})
     if not isinstance(transfer_policies, dict) or not isinstance(income_loss_policies, dict):
         return None
-    household_features = _policy_matching_features(static, state)
+    household_features = _policy_matching_features(static, state, periods_per_year=periods_per_year)
     best_cell: dict[str, Any] | None = None
     best_distance = float("inf")
     for cell in type_cells:
@@ -2423,7 +2543,7 @@ def _match_behavior_policy(static: pd.Series, state: dict[str, Any], profile: di
         type_id = str(cell.get("type_id", ""))
         if type_id not in transfer_policies or type_id not in income_loss_policies:
             continue
-        cell_features = _policy_matching_features_from_cell(cell)
+        cell_features = _policy_matching_features_from_cell(cell, periods_per_year=periods_per_year)
         distance = (
             1.35 * (household_features["log_income"] - cell_features["log_income"]) ** 2
             + 1.00 * (household_features["log_buffer"] - cell_features["log_buffer"]) ** 2
@@ -2445,14 +2565,20 @@ def _match_behavior_policy(static: pd.Series, state: dict[str, Any], profile: di
     }
 
 
-def _match_state_behavior_policy(static: pd.Series, state: dict[str, Any], profile: dict[str, Any] | None) -> dict[str, Any] | None:
+def _match_state_behavior_policy(
+    static: pd.Series,
+    state: dict[str, Any],
+    profile: dict[str, Any] | None,
+    *,
+    periods_per_year: float,
+) -> dict[str, Any] | None:
     if profile is None or profile.get("schema_version") != DEMAND_STATE_BEHAVIOR_POLICY_VERSION:
         return None
     profiles = profile.get("profile_rows")
     policies = profile.get("state_policies")
     if not isinstance(profiles, list) or not isinstance(policies, dict):
         return None
-    household_features = _state_policy_matching_features(static, state)
+    household_features = _state_policy_matching_features(static, state, periods_per_year=periods_per_year)
     best_profile: dict[str, Any] | None = None
     best_distance = float("inf")
     for row in profiles:
@@ -2483,12 +2609,15 @@ def _match_state_behavior_policy(static: pd.Series, state: dict[str, Any], profi
     }
 
 
-def _policy_matching_features(static: pd.Series, state: dict[str, Any]) -> dict[str, float]:
+def _policy_matching_features(static: pd.Series, state: dict[str, Any], *, periods_per_year: float) -> dict[str, float]:
     annual_income = max(float(static["annual_income"]), 1.0)
-    baseline_consumption = max(float(state.get("baseline_consumption", float(static["baseline_consumption_annual"]) / 4.0)), 1.0)
+    baseline_consumption = max(
+        float(state.get("baseline_consumption", _per_period_amount(float(static["baseline_consumption_annual"]), periods_per_year))),
+        1.0,
+    )
     liquid_assets = max(float(state.get("liquid_assets", static["liquid_assets"])), 0.0)
     debt = max(float(state.get("debt", static["debt"])), 0.0)
-    buffer_months = _buffer_months(liquid_assets, baseline_consumption)
+    buffer_months = _buffer_months(liquid_assets, baseline_consumption, periods_per_year=periods_per_year)
     return {
         "log_income": float(np.log1p(annual_income)),
         "log_buffer": float(np.log1p(buffer_months)),
@@ -2497,12 +2626,15 @@ def _policy_matching_features(static: pd.Series, state: dict[str, Any]) -> dict[
     }
 
 
-def _state_policy_matching_features(static: pd.Series, state: dict[str, Any]) -> dict[str, float]:
+def _state_policy_matching_features(static: pd.Series, state: dict[str, Any], *, periods_per_year: float) -> dict[str, float]:
     annual_income = max(float(static["annual_income"]), 1.0)
-    baseline_consumption = max(float(state.get("baseline_consumption", float(static["baseline_consumption_annual"]) / 4.0)), 1.0)
+    baseline_consumption = max(
+        float(state.get("baseline_consumption", _per_period_amount(float(static["baseline_consumption_annual"]), periods_per_year))),
+        1.0,
+    )
     liquid_assets = max(float(state.get("liquid_assets", static["liquid_assets"])), 0.0)
     debt = max(float(state.get("debt", static["debt"])), 0.0)
-    buffer_months = _buffer_months(liquid_assets, baseline_consumption)
+    buffer_months = _buffer_months(liquid_assets, baseline_consumption, periods_per_year=periods_per_year)
     return {
         "log_income": float(np.log1p(annual_income)),
         "log_buffer": float(np.log1p(buffer_months)),
@@ -2525,12 +2657,12 @@ def _state_policy_matching_features_from_profile(row: dict[str, Any]) -> dict[st
     }
 
 
-def _policy_matching_features_from_cell(cell: dict[str, Any]) -> dict[str, float]:
+def _policy_matching_features_from_cell(cell: dict[str, Any], *, periods_per_year: float) -> dict[str, float]:
     annual_income = max(float(cell.get("annual_income", 1.0)), 1.0)
-    consumption = max(float(cell.get("consumption_proxy_annual", annual_income * 0.75)) / 4.0, 1.0)
+    consumption = max(_per_period_amount(float(cell.get("consumption_proxy_annual", annual_income * 0.75)), periods_per_year), 1.0)
     liquid_assets = max(float(cell.get("liquid_assets", 0.0)), 0.0)
     debt = max(float(cell.get("debt", 0.0)), 0.0)
-    buffer_months = float(cell.get("liquid_buffer_months", _buffer_months(liquid_assets, consumption)))
+    buffer_months = float(cell.get("liquid_buffer_months", _buffer_months(liquid_assets, consumption, periods_per_year=periods_per_year)))
     return {
         "log_income": float(np.log1p(annual_income)),
         "log_buffer": float(np.log1p(max(0.0, buffer_months))),
@@ -2539,13 +2671,20 @@ def _policy_matching_features_from_cell(cell: dict[str, Any]) -> dict[str, float
     }
 
 
-def _state_schedule_transfer_allocation(static: pd.Series, state: dict[str, Any], match: dict[str, Any], transfer: float) -> dict[str, float]:
+def _state_schedule_transfer_allocation(
+    static: pd.Series,
+    state: dict[str, Any],
+    match: dict[str, Any],
+    transfer: float,
+    *,
+    periods_per_year: float,
+) -> dict[str, float]:
     if transfer <= 0:
         return {"consumption_share": 0.0, "debt_repayment_share": 0.0, "liquid_saving_share": 0.0}
     policy = match["state_policy"]
     schedule = policy["transfer_schedule"]
-    quarterly_income = max(float(state.get("labor_income", float(static["annual_income"]) / 4.0)), 1.0)
-    ratio = float(transfer) / quarterly_income
+    period_income = max(float(state.get("labor_income", _per_period_amount(float(static["annual_income"]), periods_per_year))), 1.0)
+    ratio = float(transfer) / period_income
     spending_share = _interp_schedule(schedule, "ratio", "total_spending_share", ratio, log_x=True)
     debt_share = _interp_schedule(schedule, "ratio", "debt_repayment_share", ratio, log_x=True)
     liquid_share = _interp_schedule(schedule, "ratio", "liquid_saving_share", ratio, log_x=True)
@@ -2561,12 +2700,19 @@ def _state_schedule_transfer_allocation(static: pd.Series, state: dict[str, Any]
     }
 
 
-def _schedule_transfer_allocation(static: pd.Series, state: dict[str, Any], match: dict[str, Any], transfer: float) -> dict[str, float]:
+def _schedule_transfer_allocation(
+    static: pd.Series,
+    state: dict[str, Any],
+    match: dict[str, Any],
+    transfer: float,
+    *,
+    periods_per_year: float,
+) -> dict[str, float]:
     if transfer <= 0:
         return {"consumption_share": 0.0, "debt_repayment_share": 0.0, "liquid_saving_share": 0.0}
     policy = match["transfer_policy"]
     schedule = policy["schedule"]
-    monthly_income = max(float(static["annual_income"]) / 12.0 * 0.78, 1.0)
+    monthly_income = max(float(state.get("labor_income", _per_period_amount(float(static["annual_income"]), periods_per_year))) / _months_per_period(periods_per_year) * 0.78, 1.0)
     ratio = float(transfer) / monthly_income
     ratios = np.array([float(point["ratio"]) for point in schedule], dtype=float)
     log_ratio = float(np.log(np.clip(ratio, float(ratios.min()), float(ratios.max()))))
@@ -2696,6 +2842,7 @@ def _transfer_windfall_allocation(
     desired_saving_rate: float,
     real_rate: float,
     representative_mpc: float | None,
+    periods_per_year: float,
 ) -> dict[str, float]:
     if representative_mpc is not None:
         consumption_share = float(np.clip(representative_mpc, 0.08, 0.55))
@@ -2710,7 +2857,7 @@ def _transfer_windfall_allocation(
         precaution_gap = float(belief["precautionary_saving_score"]) - 5.0
         neutral_real_rate = NEUTRAL_POLICY_RATE - INFLATION_TARGET
         real_rate_gap = float(real_rate) - neutral_real_rate
-        current_buffer = _buffer_months(float(state["liquid_assets"]), float(state["baseline_consumption"]))
+        current_buffer = _buffer_months(float(state["liquid_assets"]), float(state["baseline_consumption"]), periods_per_year=periods_per_year)
         buffer_gap_months = max(0.0, float(target_buffer_months) - current_buffer)
         if low_liquid:
             consumption_share = 0.56 + 0.35 * (base_mpc - 0.72)
@@ -2785,6 +2932,14 @@ def _aggregate_period(
     aggregate_transfer_consumption = _weighted(realized, "transfer_consumption_amount")
     aggregate_transfer_debt_repayment = _weighted(realized, "transfer_debt_repayment_amount")
     aggregate_transfer_liquid_saving = _weighted(realized, "transfer_liquid_saving_amount")
+    aggregate_income_effect = _weighted(realized, "behavior_income_effect")
+    aggregate_expected_income_effect = _weighted(realized, "behavior_expected_income_effect")
+    aggregate_bridge_delta = _weighted(realized, "behavior_empirical_bridge_consumption_delta")
+    aggregate_buffer_relief = _weighted(realized, "behavior_buffer_relief_support")
+    aggregate_buffer_drag = _weighted(realized, "behavior_buffer_drag")
+    aggregate_precaution_drag = _weighted(realized, "behavior_precaution_drag")
+    aggregate_rate_drag = _weighted(realized, "behavior_rate_drag")
+    aggregate_schedule_drag = _weighted(realized, "behavior_schedule_consumption_drag")
     baseline = float(period_state["baseline_aggregate_consumption"])
     output = aggregate_consumption
     output_gap = 100.0 * (output / max(baseline, 1e-9) - 1.0)
@@ -2792,6 +2947,7 @@ def _aggregate_period(
         "schema_version": DEMAND_ECONOMY_VERSION,
         "source": source,
         "variant": variant,
+        "periods_per_year": float(period_state["periods_per_year"]),
         "scenario_id": scenario.scenario_id,
         "scenario_label": scenario.label,
         "period_id": period_state["period_id"],
@@ -2810,6 +2966,14 @@ def _aggregate_period(
         "aggregate_transfer_consumption": aggregate_transfer_consumption,
         "aggregate_transfer_debt_repayment": aggregate_transfer_debt_repayment,
         "aggregate_transfer_liquid_saving": aggregate_transfer_liquid_saving,
+        "aggregate_behavior_income_effect": aggregate_income_effect,
+        "aggregate_behavior_expected_income_effect": aggregate_expected_income_effect,
+        "aggregate_behavior_empirical_bridge_consumption_delta": aggregate_bridge_delta,
+        "aggregate_behavior_buffer_relief_support": aggregate_buffer_relief,
+        "aggregate_behavior_buffer_drag": aggregate_buffer_drag,
+        "aggregate_behavior_precaution_drag": aggregate_precaution_drag,
+        "aggregate_behavior_rate_drag": aggregate_rate_drag,
+        "aggregate_behavior_schedule_consumption_drag": aggregate_schedule_drag,
         "aggregate_transfer_consumption_share": aggregate_transfer_consumption / aggregate_transfer if aggregate_transfer > 0 else np.nan,
         "aggregate_transfer_debt_repayment_share": aggregate_transfer_debt_repayment / aggregate_transfer if aggregate_transfer > 0 else np.nan,
         "aggregate_transfer_liquid_saving_share": aggregate_transfer_liquid_saving / aggregate_transfer if aggregate_transfer > 0 else np.nan,
@@ -2821,6 +2985,7 @@ def _aggregate_period(
         "policy_rate_shock_pp": float(period_state["policy_rate_shock_pp"]),
         "job_risk_shock_pp": float(period_state["job_risk_shock_pp"]),
         "transfer_per_household": float(period_state["transfer_per_household"]),
+        "supplied_exogenous_conditions_json": json.dumps(period_state.get("supplied_exogenous_conditions", {}), sort_keys=True),
         "goods_market_residual": output - aggregate_consumption,
     }
 
@@ -2829,24 +2994,43 @@ def _next_household_states(
     realized: list[dict[str, Any]],
     households: pd.DataFrame,
     aggregate: dict[str, Any],
+    *,
+    periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
 ) -> list[dict[str, Any]]:
     static_by_type = {str(row["type_id"]): row for _, row in households.iterrows()}
     employment_factor = float(aggregate["employment_rate"]) / STEADY_EMPLOYMENT_RATE
     inflation_gap = float(aggregate["inflation_rate"]) - INFLATION_TARGET
     output_gap = float(aggregate["output_gap_pct"])
     rows: list[dict[str, Any]] = []
+    job_risk_persistence = _quarterly_persistence_for_frequency(0.78, periods_per_year)
+    job_risk_adjustment = _quarterly_flow_for_frequency(0.08, 0.78, periods_per_year)
+    inflation_belief_persistence = _quarterly_persistence_for_frequency(0.72, periods_per_year)
+    inflation_feedback = _quarterly_flow_for_frequency(0.10, 0.72, periods_per_year)
+    income_belief_persistence = _quarterly_persistence_for_frequency(0.68, periods_per_year)
+    income_feedback = _quarterly_flow_for_frequency(0.012, 0.68, periods_per_year)
+    confidence_persistence = _quarterly_persistence_for_frequency(0.70, periods_per_year)
+    confidence_feedback = _quarterly_flow_for_frequency(0.040, 0.70, periods_per_year)
     for row in realized:
         static = static_by_type[str(row["type_id"])]
         annual_income = float(static["annual_income"])
-        labor_income = annual_income / 4.0 * np.clip(employment_factor * (1.0 + 0.0015 * output_gap), 0.70, 1.25)
-        baseline_consumption = float(static["baseline_consumption_annual"]) / 4.0
+        labor_income = _per_period_amount(annual_income, periods_per_year) * np.clip(employment_factor * (1.0 + 0.0015 * output_gap), 0.70, 1.25)
+        baseline_consumption = _per_period_amount(float(static["baseline_consumption_annual"]), periods_per_year)
         job_loss = float(row["job_loss_probability"])
-        job_loss = float(np.clip(0.78 * job_loss + 0.22 * float(static["baseline_job_loss_probability"]) + 0.08 * max(0.0, -output_gap), 0.5, 35.0))
+        job_loss = float(
+            np.clip(
+                job_risk_persistence * job_loss
+                + (1.0 - job_risk_persistence) * float(static["baseline_job_loss_probability"])
+                + job_risk_adjustment * max(0.0, -output_gap),
+                0.5,
+                35.0,
+            )
+        )
         unemployment_higher = float(
             np.clip(
-                0.78 * float(row.get("unemployment_higher_probability", job_loss / 0.24))
-                + 0.22 * float(static.get("unemployment_higher_probability_1y", float(static["baseline_job_loss_probability"]) / 0.24))
-                + 0.08 * max(0.0, -output_gap) / 0.24,
+                job_risk_persistence * float(row.get("unemployment_higher_probability", job_loss / 0.24))
+                + (1.0 - job_risk_persistence)
+                * float(static.get("unemployment_higher_probability_1y", float(static["baseline_job_loss_probability"]) / 0.24))
+                + job_risk_adjustment * max(0.0, -output_gap) / 0.24,
                 0.0,
                 100.0,
             )
@@ -2856,6 +3040,7 @@ def _next_household_states(
                 "schema_version": DEMAND_ECONOMY_VERSION,
                 "source": row["source"],
                 "variant": row["variant"],
+                "periods_per_year": periods_per_year,
                 "type_id": row["type_id"],
                 "label": row["label"],
                 "population_weight": float(row["population_weight"]),
@@ -2880,15 +3065,39 @@ def _next_household_states(
                 "baseline_unemployment_higher_probability": float(static.get("unemployment_higher_probability_1y", float(static["baseline_job_loss_probability"]) / 0.24)),
                 "unemployment_higher_probability_1y": unemployment_higher,
                 "target_buffer_months": float(static["target_buffer_months"]),
-                "inflation_expectation_1y": float(np.clip(0.72 * float(row["expected_inflation_next_period"]) + 0.28 * float(static["inflation_expectation_1y"]) + 0.10 * inflation_gap, -2.0, 12.0)),
-                "income_growth_expectation_1y": float(np.clip(0.68 * float(row["expected_income_growth_next_period"]) + 0.32 * float(static["income_growth_expectation_1y"]) + 0.012 * output_gap, -8.0, 8.0)),
-                "confidence_index": float(np.clip(0.70 * float(row["confidence_index"]) + 0.30 * float(static["confidence_index"]) + 0.040 * output_gap, 0.0, 100.0)),
+                "inflation_expectation_1y": float(
+                    np.clip(
+                        inflation_belief_persistence * float(row["expected_inflation_next_period"])
+                        + (1.0 - inflation_belief_persistence) * float(static["inflation_expectation_1y"])
+                        + inflation_feedback * inflation_gap,
+                        -2.0,
+                        12.0,
+                    )
+                ),
+                "income_growth_expectation_1y": float(
+                    np.clip(
+                        income_belief_persistence * float(row["expected_income_growth_next_period"])
+                        + (1.0 - income_belief_persistence) * float(static["income_growth_expectation_1y"])
+                        + income_feedback * output_gap,
+                        -8.0,
+                        8.0,
+                    )
+                ),
+                "confidence_index": float(
+                    np.clip(
+                        confidence_persistence * float(row["confidence_index"])
+                        + (1.0 - confidence_persistence) * float(static["confidence_index"])
+                        + confidence_feedback * output_gap,
+                        0.0,
+                        100.0,
+                    )
+                ),
                 "attention_weight_prices": float(static["attention_weight_prices"]),
                 "attention_weight_jobs": float(static["attention_weight_jobs"]),
                 "attention_weight_rates": float(static["attention_weight_rates"]),
                 "income_volatility": float(static["income_volatility"]),
                 "subsistence_floor_share": float(static["subsistence_floor_share"]),
-                "liquid_buffer_months": _buffer_months(float(row["liquid_assets_after"]), baseline_consumption),
+                "liquid_buffer_months": _buffer_months(float(row["liquid_assets_after"]), baseline_consumption, periods_per_year=periods_per_year),
                 "transfer_buffer_relief": float(row.get("transfer_buffer_relief_after", 0.0)),
             }
         )
@@ -2910,12 +3119,25 @@ def _next_environment(
             "aggregate_confidence_index": float(aggregate["aggregate_confidence_index"]),
             "aggregate_liquid_buffer_months": float(aggregate["aggregate_liquid_buffer_months"]),
         }
+    periods_per_year = _validated_periods_per_year(env.get("periods_per_year", DEFAULT_PERIODS_PER_YEAR))
     output_gap = float(aggregate["output_gap_pct"])
     gain = float(scenario.feedback_gain)
-    next_employment = float(np.clip(0.82 * float(env["employment_rate"]) + 0.18 * (STEADY_EMPLOYMENT_RATE + 0.0010 * gain * output_gap), 0.82, 0.99))
+    employment_persistence = _quarterly_persistence_for_frequency(0.82, periods_per_year)
+    inflation_persistence = _quarterly_persistence_for_frequency(0.64, periods_per_year)
+    inflation_output_feedback = _quarterly_flow_for_frequency(0.024, 0.64, periods_per_year)
+    next_employment = float(
+        np.clip(
+            employment_persistence * float(env["employment_rate"])
+            + (1.0 - employment_persistence) * (STEADY_EMPLOYMENT_RATE + 0.0010 * gain * output_gap),
+            0.82,
+            0.99,
+        )
+    )
     next_inflation = float(
         np.clip(
-            0.64 * float(env["inflation_rate"]) + 0.36 * INFLATION_TARGET + 0.024 * gain * output_gap,
+            inflation_persistence * float(env["inflation_rate"])
+            + (1.0 - inflation_persistence) * INFLATION_TARGET
+            + inflation_output_feedback * gain * output_gap,
             -2.0,
             12.0,
         )
@@ -3091,11 +3313,14 @@ def _prompt_current_conditions(period_state: dict[str, Any], scenario: DemandSce
         active.append("elevated_macro_feedback_regime_now")
     return {
         "active_current_shocks": active or ["none"],
+        "periods_per_year": round_or_none(period_state.get("periods_per_year")),
+        "months_per_period": round_or_none(period_state.get("months_per_period")),
         "transfer_per_household": round_or_none(transfer),
         "policy_rate_shock_pp": round_or_none(rate_shock),
         "job_risk_news_shock_pp": round_or_none(job_risk_shock),
         "belief_dispersion_regime": "elevated" if float(scenario.belief_dispersion_multiplier) > 1.0 else "normal",
         "macro_feedback_regime": "elevated" if float(scenario.feedback_gain) > 1.0 else "normal",
+        "supplied_exogenous_conditions": _jsonable(period_state.get("supplied_exogenous_conditions", {})),
         "future_shock_path_disclosed": False,
     }
 
@@ -3103,6 +3328,8 @@ def _prompt_current_conditions(period_state: dict[str, Any], scenario: DemandSce
 def _prompt_current_environment(period_state: dict[str, Any]) -> dict[str, Any]:
     return {
         "period_index": round_or_none(period_state["period_index"]),
+        "periods_per_year": round_or_none(period_state.get("periods_per_year")),
+        "months_per_period": round_or_none(period_state.get("months_per_period")),
         "output_gap_pct": round_or_none(period_state["output_gap_pct"]),
         "employment_rate": round_or_none(period_state["employment_rate"]),
         "inflation_rate": round_or_none(period_state["inflation_rate"]),
@@ -3112,11 +3339,12 @@ def _prompt_current_environment(period_state: dict[str, Any]) -> dict[str, Any]:
         "aggregate_job_loss_belief": round_or_none(period_state.get("aggregate_job_loss_belief")),
         "aggregate_confidence_index": round_or_none(period_state.get("aggregate_confidence_index")),
         "aggregate_liquid_buffer_months": round_or_none(period_state.get("aggregate_liquid_buffer_months")),
+        "supplied_exogenous_conditions": _jsonable(period_state.get("supplied_exogenous_conditions", {})),
     }
 
 
 def _household_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
+    prompt_row = {
         "type_id": row["type_id"],
         "label": row["label"],
         "age_bucket": row.get("age_bucket"),
@@ -3124,8 +3352,9 @@ def _household_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
         "liquidity_group": row["liquidity_group"],
         "job_loss_risk_type": row.get("job_loss_risk_type"),
         "population_weight": round_or_none(row["population_weight"]),
-        "quarterly_labor_income": round_or_none(row["labor_income"]),
-        "quarterly_baseline_consumption": round_or_none(row["baseline_consumption"]),
+        "periods_per_year": round_or_none(row.get("periods_per_year", DEFAULT_PERIODS_PER_YEAR)),
+        "period_labor_income": round_or_none(row["labor_income"]),
+        "period_baseline_consumption": round_or_none(row["baseline_consumption"]),
         "liquid_assets": round_or_none(row["liquid_assets"]),
         "liquid_buffer_months": round_or_none(row["liquid_buffer_months"]),
         "debt_service_burden": round_or_none(row.get("debt_service_burden")),
@@ -3138,6 +3367,10 @@ def _household_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
         "attention_weight_jobs": round_or_none(row["attention_weight_jobs"]),
         "attention_weight_rates": round_or_none(row["attention_weight_rates"]),
     }
+    if np.isclose(float(row.get("periods_per_year", DEFAULT_PERIODS_PER_YEAR)), DEFAULT_PERIODS_PER_YEAR):
+        prompt_row["quarterly_labor_income"] = round_or_none(row["labor_income"])
+        prompt_row["quarterly_baseline_consumption"] = round_or_none(row["baseline_consumption"])
+    return prompt_row
 
 
 def _belief_payload_row(
@@ -3317,8 +3550,111 @@ def _weighted_std_frame(frame: pd.DataFrame, column: str, weight_column: str) ->
     return float(np.sqrt(max(0.0, variance)))
 
 
-def _buffer_months(liquid_assets: float, quarterly_consumption: float) -> float:
-    monthly_consumption = max(float(quarterly_consumption) / 3.0, 1e-9)
+def _validated_periods_per_year(periods_per_year: float) -> float:
+    value = float(periods_per_year)
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError("periods_per_year must be a positive finite float")
+    return value
+
+
+def _months_per_period(periods_per_year: float) -> float:
+    return 12.0 / _validated_periods_per_year(periods_per_year)
+
+
+def _per_period_amount(annual_amount: float, periods_per_year: float) -> float:
+    return float(annual_amount) / _validated_periods_per_year(periods_per_year)
+
+
+def _quarterly_persistence_for_frequency(quarterly_persistence: float, periods_per_year: float) -> float:
+    persistence = float(quarterly_persistence)
+    if not 0.0 <= persistence < 1.0:
+        raise ValueError("quarterly_persistence must be in [0, 1)")
+    frequency = _validated_periods_per_year(periods_per_year)
+    if np.isclose(frequency, DEFAULT_PERIODS_PER_YEAR):
+        return persistence
+    return float(persistence ** (DEFAULT_PERIODS_PER_YEAR / frequency))
+
+
+def _quarterly_flow_for_frequency(
+    quarterly_flow: float,
+    quarterly_persistence: float,
+    periods_per_year: float,
+) -> float:
+    persistence = float(quarterly_persistence)
+    if not 0.0 <= persistence < 1.0:
+        raise ValueError("quarterly_persistence must be in [0, 1)")
+    frequency_persistence = _quarterly_persistence_for_frequency(persistence, periods_per_year)
+    return float(quarterly_flow) * (1.0 - frequency_persistence) / (1.0 - persistence)
+
+
+def _normalize_period_overrides(period_overrides: dict[int, dict[str, Any]] | None) -> dict[int, dict[str, Any]]:
+    if period_overrides is None:
+        return {}
+    if not isinstance(period_overrides, dict):
+        raise ValueError("period_overrides must be a dict keyed by period index")
+    out: dict[int, dict[str, Any]] = {}
+    for raw_index, raw_override in period_overrides.items():
+        try:
+            period_index = int(raw_index)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"period_overrides key must be an integer period index, got {raw_index!r}") from exc
+        if period_index < 0:
+            raise ValueError(f"period_overrides period index must be non-negative, got {period_index}")
+        if not isinstance(raw_override, dict):
+            raise ValueError(f"period_overrides[{period_index}] must be a dict of exogenous fields")
+        forbidden = sorted(PROTECTED_PERIOD_OVERRIDE_FIELDS.intersection(raw_override))
+        if forbidden:
+            raise ValueError(
+                "period_overrides cannot override protected period identity fields: "
+                + ", ".join(forbidden)
+            )
+        override = dict(raw_override)
+        _assert_finite_override_values(override, path=f"period_overrides[{period_index}]")
+        out[period_index] = override
+    return out
+
+
+def _normalize_initial_environment_override(value: dict[str, Any] | None) -> dict[str, float]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("initial_environment_override must be a dict")
+    allowed = {
+        "output_gap_pct",
+        "employment_rate",
+        "inflation_rate",
+        "policy_rate",
+        "aggregate_job_loss_belief",
+        "aggregate_confidence_index",
+        "aggregate_liquid_buffer_months",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError("initial_environment_override contains unsupported fields: " + ", ".join(unknown))
+    _assert_finite_override_values(value, path="initial_environment_override")
+    out = {key: float(raw) for key, raw in value.items()}
+    if "employment_rate" in out and not 0.0 <= out["employment_rate"] <= 1.0:
+        raise ValueError("initial_environment_override employment_rate must be between zero and one")
+    return out
+
+
+def _assert_finite_override_values(value: Any, *, path: str) -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            _assert_finite_override_values(nested, path=f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, nested in enumerate(value):
+            _assert_finite_override_values(nested, path=f"{path}[{index}]")
+        return
+    if isinstance(value, (np.floating, float, np.integer, int)) and not isinstance(value, bool):
+        if not np.isfinite(float(value)):
+            raise ValueError(f"{path} contains a nonfinite numeric value")
+        return
+
+
+def _buffer_months(liquid_assets: float, quarterly_consumption: float, *, periods_per_year: float = DEFAULT_PERIODS_PER_YEAR) -> float:
+    monthly_consumption = max(float(quarterly_consumption) / _months_per_period(periods_per_year), 1e-9)
     return float(max(0.0, float(liquid_assets)) / monthly_consumption)
 
 
