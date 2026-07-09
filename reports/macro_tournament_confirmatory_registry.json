@@ -1,0 +1,30 @@
+{
+  "records": [
+    {
+      "normalized_spec_sha256": "ceb04eedd75428da977d6c0ed0806530311a352b5560800d4ce11c1ee8f354db",
+      "output_dir": "outputs/macro_confirmatory_fred_2026_02_v1",
+      "recorded_at_utc": "2026-07-09T01:39:55.754456+00:00",
+      "registry_path": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/reports/macro_tournament_confirmatory_registry.json",
+      "run_id": "macro_confirmatory_fred_2026_02_v1",
+      "scored_asof_dates_by_surface": {
+        "fresh_fred_2026_02_confirmatory": [
+          "2026-02-15"
+        ]
+      },
+      "spec_path": "configs/macro_tournament/confirmatory_fred_2026_02_v1.json",
+      "spec_sha256": "92237ce9a9f1d35ca01b809c00620c8c25cddab1ad50538c412d65d56dbaf475",
+      "surface_ids": [
+        "fresh_fred_2026_02_confirmatory"
+      ],
+      "surface_keys": [
+        "179b1711b512802cfc178488dbb005a64a7f2a396e6c531b65edd16c114c7782"
+      ],
+      "winner_candidate_id": "cand_0b1796192102",
+      "winner_mean_llm_rmse_scaled": 2.1202317127701313
+    }
+  ],
+  "schema_version": "macro_tournament_confirmatory_registry_v1",
+  "spent_surface_keys": [
+    "179b1711b512802cfc178488dbb005a64a7f2a396e6c531b65edd16c114c7782"
+  ]
+}

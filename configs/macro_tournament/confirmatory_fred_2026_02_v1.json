@@ -1,0 +1,62 @@
+{
+  "schema_version": "macro_economy_tournament_v1",
+  "run_id": "macro_confirmatory_fred_2026_02_v1",
+  "scoring_label": "confirmatory",
+  "confirmatory_lock": true,
+  "confirmatory_spent_registry_path": "reports/macro_tournament_confirmatory_registry.json",
+  "confirmatory_surface_policy": "Locked one-shot score of the first fresh scoreable FRED behavior month after the retrospective 2026-01-15 card. Alignment-history cards are carried forward from 2025-12-15, but only the 2026-02-15 as-of card is scored. No grid search, no live calls, no prompt changes, no post-score mapping changes.",
+  "promoted_candidate_ids": [
+    "cand_43e7c5658975"
+  ],
+  "provider": "codex_cli",
+  "model": "gpt-5.5",
+  "profiles": {
+    "empirical_bridge_v4": "work/empirical_bridge/empirical_bridge_v4.json",
+    "empirical_bridge_v5_stabilized": "work/empirical_bridge/empirical_bridge_v5_stabilized.json",
+    "state_schedule": "outputs/state_policy_schedules_live_gpt55_sce_prior_update/state_behavior_policy_profile.json"
+  },
+  "candidate_list": [
+    {
+      "candidate_id": "cand_43e7c5658975",
+      "belief_gain_global": 3.0,
+      "belief_gain_inflation": 1.5,
+      "belief_gain_income": 0.5,
+      "belief_gain_unemployment": 0.5,
+      "behavior_mechanism": "empirical_bridge_v4",
+      "hybrid_state_weight": null,
+      "feedback_mode": "closed_loop",
+      "feedback_gain_multiplier": 1.5
+    },
+    {
+      "candidate_id": "cand_0b1796192102",
+      "belief_gain_global": 1.0,
+      "belief_gain_inflation": 1.0,
+      "belief_gain_income": 1.0,
+      "belief_gain_unemployment": 1.0,
+      "behavior_mechanism": "empirical_bridge_v5_stabilized",
+      "hybrid_state_weight": null,
+      "feedback_mode": "closed_loop",
+      "feedback_gain_multiplier": 1.0
+    }
+  ],
+  "surfaces": [
+    {
+      "surface_id": "fresh_fred_2026_02_confirmatory",
+      "belief_source": "persona_ecology_replay",
+      "persona_ecology_dir": "outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_octnovdec_combined_v2",
+      "primary_ecology_source": "llm_codex_cli_gpt-5.5",
+      "ecology_period_policy": "hold_last",
+      "data_mode": "fred",
+      "cutoff_date": "2025-12-01",
+      "asof_start": "2025-12-15",
+      "asof_end": "2026-02-15",
+      "score_asof_dates": [
+        "2026-02-15"
+      ],
+      "history_months": 18,
+      "scoreable_only": true,
+      "period_count": 4,
+      "scoring_label": "confirmatory"
+    }
+  ]
+}

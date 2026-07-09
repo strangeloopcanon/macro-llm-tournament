@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .agent_common import ACCOUNTING_TOLERANCE, OUTPUT_ROOT, WORK_ROOT, markdown_table
+from .agent_common import ACCOUNTING_TOLERANCE, OUTPUT_ROOT, PROJECT_ROOT, WORK_ROOT, markdown_table
 from .demand_economy import DemandEconomyClient, behavior_policy_manifest, run_demand_economy
 from .phase4_matched_twins import (
     PHASE4_VERSION,
@@ -38,6 +38,20 @@ from .postcutoff_behavior_gate import build_postcutoff_behavior_cards, load_prox
 
 TOURNAMENT_VERSION = "macro_economy_tournament_v1"
 RETROSPECTIVE_ONLY_ERROR = "macro_tournament development search may not use confirmatory scoring surfaces"
+CONFIRMATORY_LOCK_ERROR = "macro_tournament confirmatory scoring requires a locked two-candidate spec and one unused score surface"
+CONFIRMATORY_REGISTRY_VERSION = "macro_tournament_confirmatory_registry_v1"
+DEFAULT_CONFIRMATORY_REGISTRY = PROJECT_ROOT / "reports" / "macro_tournament_confirmatory_registry.json"
+
+CANDIDATE_PAYLOAD_KEYS = [
+    "belief_gain_global",
+    "belief_gain_inflation",
+    "belief_gain_income",
+    "belief_gain_unemployment",
+    "behavior_mechanism",
+    "hybrid_state_weight",
+    "feedback_mode",
+    "feedback_gain_multiplier",
+]
 
 
 @dataclass(frozen=True)
@@ -98,10 +112,11 @@ def run_tournament(spec: dict[str, Any], *, args: argparse.Namespace, output_dir
     score_table = pd.DataFrame(score_rows)
     accounting_table = pd.DataFrame(accounting_rows)
     winner = select_winner(candidate_table)
+    verdict = "macro_tournament_confirmatory_scored" if spec_scoring_label(spec) == "confirmatory" else "macro_tournament_development_scored"
     manifest.update(
         {
             "status": "ok",
-            "verdict": "macro_tournament_development_scored",
+            "verdict": verdict,
             "winner_candidate_id": winner.get("candidate_id"),
             "winner_mean_llm_rmse_scaled": winner.get("mean_llm_rmse_scaled"),
             "winner_behavior_mechanism": winner.get("behavior_mechanism"),
@@ -126,12 +141,16 @@ def run_tournament(spec: dict[str, Any], *, args: argparse.Namespace, output_dir
 def validate_spec(spec: dict[str, Any], *, args: argparse.Namespace) -> None:
     if str(spec.get("schema_version")) != TOURNAMENT_VERSION:
         raise ValueError(f"Unsupported macro tournament schema_version: {spec.get('schema_version')!r}")
-    if str(spec.get("scoring_label", "retrospective")) != "retrospective":
-        raise ValueError(RETROSPECTIVE_ONLY_ERROR)
+    scoring_label = spec_scoring_label(spec)
     if args.max_live_calls != 0:
         raise ValueError("macro_tournament currently consumes replayed Phase 4 inputs only; use --max-live-calls 0")
     if not isinstance(spec.get("surfaces"), list) or not spec["surfaces"]:
         raise ValueError("Tournament spec must include at least one surface")
+    if scoring_label == "confirmatory":
+        validate_confirmatory_spec(spec, args=args)
+        return
+    if scoring_label != "retrospective":
+        raise ValueError(RETROSPECTIVE_ONLY_ERROR)
     if not isinstance(spec.get("candidate_grid"), dict):
         raise ValueError("Tournament spec must include candidate_grid")
     for surface in spec["surfaces"]:
@@ -141,11 +160,50 @@ def validate_spec(spec: dict[str, Any], *, args: argparse.Namespace) -> None:
             raise ValueError(RETROSPECTIVE_ONLY_ERROR)
 
 
+def validate_confirmatory_spec(spec: dict[str, Any], *, args: argparse.Namespace) -> None:
+    if args.mode != "replay":
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    if spec.get("confirmatory_lock") is not True:
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    if "candidate_grid" in spec:
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    candidates = spec.get("candidate_list")
+    if not isinstance(candidates, list) or len(candidates) != 2:
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    # Validate candidate IDs before any scoring or data access.
+    expand_candidates(spec)
+    surfaces = spec.get("surfaces")
+    if not isinstance(surfaces, list) or len(surfaces) != 1:
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    surface = surfaces[0]
+    if str(surface.get("scoring_label", spec.get("scoring_label"))) != "confirmatory":
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    if str(surface.get("data_mode", "fred")) != "fred":
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    if bool(surface.get("scoreable_only")) is not True:
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    score_dates = surface_score_asof_dates(surface)
+    if len(score_dates) != 1:
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    start = pd.Timestamp(surface["asof_start"])
+    end = pd.Timestamp(surface["asof_end"])
+    score_date = pd.Timestamp(score_dates[0])
+    if score_date < start or score_date > end:
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    registry = load_confirmatory_registry(confirmatory_registry_path(spec))
+    spent = set(registry.get("spent_surface_keys", []))
+    keys = confirmatory_surface_keys(spec)
+    if spent.intersection(keys):
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: surface already spent")
+
+
 def normalize_spec(spec: dict[str, Any]) -> dict[str, Any]:
     return json.loads(json.dumps(spec, sort_keys=True))
 
 
 def expand_candidates(spec: dict[str, Any]) -> list[Candidate]:
+    if isinstance(spec.get("candidate_list"), list):
+        return expand_explicit_candidates(spec)
     grid = spec["candidate_grid"]
     global_gains = list(grid.get("belief_gain_global", [1.0]))
     inflation_gains = list(grid.get("belief_gain_inflation", [1.0]))
@@ -186,6 +244,36 @@ def expand_candidates(spec: dict[str, Any]) -> list[Candidate]:
     return sorted(candidates, key=lambda candidate: candidate.candidate_id)
 
 
+def expand_explicit_candidates(spec: dict[str, Any]) -> list[Candidate]:
+    candidates: list[Candidate] = []
+    seen: set[str] = set()
+    for raw in spec["candidate_list"]:
+        if not isinstance(raw, dict):
+            raise ValueError("candidate_list entries must be JSON objects")
+        missing = [key for key in CANDIDATE_PAYLOAD_KEYS if key not in raw]
+        if missing:
+            raise ValueError(f"candidate_list entry missing keys: {', '.join(missing)}")
+        payload = {
+            "belief_gain_global": float(raw["belief_gain_global"]),
+            "belief_gain_inflation": float(raw["belief_gain_inflation"]),
+            "belief_gain_income": float(raw["belief_gain_income"]),
+            "belief_gain_unemployment": float(raw["belief_gain_unemployment"]),
+            "behavior_mechanism": str(raw["behavior_mechanism"]),
+            "hybrid_state_weight": None if raw.get("hybrid_state_weight") is None else float(raw["hybrid_state_weight"]),
+            "feedback_mode": str(raw["feedback_mode"]),
+            "feedback_gain_multiplier": float(raw["feedback_gain_multiplier"]),
+        }
+        candidate_id = candidate_id_for(payload)
+        supplied_id = raw.get("candidate_id")
+        if supplied_id is not None and str(supplied_id) != candidate_id:
+            raise ValueError(f"candidate_list supplied candidate_id {supplied_id!r} but payload hashes to {candidate_id!r}")
+        if candidate_id in seen:
+            raise ValueError(f"Duplicate candidate_list candidate_id: {candidate_id}")
+        seen.add(candidate_id)
+        candidates.append(Candidate(candidate_id=candidate_id, payload={**payload, "candidate_id": candidate_id}))
+    return candidates
+
+
 def candidate_id_for(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "cand_" + hashlib.sha256(encoded).hexdigest()[:12]
@@ -211,6 +299,7 @@ def prepare_surface(surface: dict[str, Any], *, spec: dict[str, Any]) -> dict[st
     )
     if not cards:
         raise ValueError(f"Surface {surface.get('surface_id')} built no Phase 4 cards")
+    targets = filter_surface_targets_for_score_dates(targets, surface)
     ecology_bundle = load_persona_ecology_bundle(surface_args) if surface_args.belief_source == "persona_ecology_replay" else None
     households = load_phase4_households(surface_args, ecology_bundle=ecology_bundle)
     period_count = max(int(surface_args.period_count), len(cards) + 1, 2)
@@ -229,7 +318,28 @@ def prepare_surface(surface: dict[str, Any], *, spec: dict[str, Any]) -> dict[st
         "ecology_bundle": ecology_bundle,
         "households": households,
         "period_count": period_count,
+        "scored_asof_dates": surface_score_asof_dates(surface),
     }
+
+
+def filter_surface_targets_for_score_dates(targets: pd.DataFrame, surface: dict[str, Any]) -> pd.DataFrame:
+    score_dates = surface_score_asof_dates(surface)
+    if not score_dates:
+        return targets
+    allowed = {pd.Timestamp(value).date().isoformat() for value in score_dates}
+    filtered = targets[targets["as_of_date"].astype(str).isin(allowed)].copy()
+    if filtered.empty:
+        raise ValueError(f"Surface {surface.get('surface_id')} has no targets for score_asof_dates={sorted(allowed)}")
+    return filtered.reset_index(drop=True)
+
+
+def surface_score_asof_dates(surface: dict[str, Any]) -> list[str]:
+    raw = surface.get("score_asof_dates", [])
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("score_asof_dates must be a list")
+    return [pd.Timestamp(value).date().isoformat() for value in raw]
 
 
 def namespace_for_surface(surface: dict[str, Any], *, spec: dict[str, Any], candidate: Candidate | None) -> SimpleNamespace:
@@ -532,6 +642,12 @@ def base_manifest(
     candidates: list[Candidate],
     surfaces: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    scoring_label = spec_scoring_label(spec)
+    claim_scope = (
+        "locked_confirmatory_score_once"
+        if scoring_label == "confirmatory"
+        else "exploratory_development_search_only"
+    )
     return {
         "schema_version": TOURNAMENT_VERSION,
         "phase4_schema_version": PHASE4_VERSION,
@@ -539,15 +655,19 @@ def base_manifest(
         "run_id": spec.get("run_id"),
         "mode": args.mode,
         "max_live_calls": int(args.max_live_calls),
-        "claim_scope": "exploratory_development_search_only",
-        "scoring_label": spec.get("scoring_label", "retrospective"),
+        "claim_scope": claim_scope,
+        "scoring_label": scoring_label,
         "confirmatory_surface_policy": spec.get("confirmatory_surface_policy"),
+        "confirmatory_lock": bool(spec.get("confirmatory_lock", False)),
+        "confirmatory_spent_registry_path": str(confirmatory_registry_path(spec)),
+        "confirmatory_surface_keys": confirmatory_surface_keys(spec) if scoring_label == "confirmatory" else [],
         "spec_path": spec.get("spec_path"),
         "spec_sha256": spec.get("spec_sha256"),
         "normalized_spec_sha256": hashlib.sha256(json.dumps(normalized_spec, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
         "candidate_count": len(candidates),
         "surface_count": len(surfaces),
         "surface_ids": [surface["surface_id"] for surface in surfaces],
+        "scored_asof_dates_by_surface": {surface["surface_id"]: surface["scored_asof_dates"] for surface in surfaces},
         "mapping_sha256_by_surface": {surface["surface_id"]: surface["mapping_sha256"] for surface in surfaces},
     }
 
@@ -557,6 +677,17 @@ def build_report(manifest: dict[str, Any], candidate_table: pd.DataFrame, score_
     winner_rows = candidate_table[candidate_table["candidate_id"].astype(str).eq(str(winner_id))] if not candidate_table.empty else pd.DataFrame()
     top = candidate_table[~candidate_table["disqualified"].astype(bool)].sort_values("mean_llm_rmse_scaled").head(12) if not candidate_table.empty else pd.DataFrame()
     incumbent = candidate_table[candidate_table["is_incumbent"].astype(bool)] if not candidate_table.empty else pd.DataFrame()
+    confirmatory = manifest.get("scoring_label") == "confirmatory"
+    guardrails = [
+        "- Adaptive and persistence-style baselines are diagnostics, not vetoes.",
+        "- Accounting, provenance, score labels, and locked mappings are hard constraints.",
+        f"- Confirmatory surface policy: `{manifest.get('confirmatory_surface_policy')}`.",
+    ]
+    if confirmatory:
+        guardrails.insert(0, "- This is locked confirmatory scoring, not candidate search.")
+        guardrails.append(f"- Spent-surface keys: `{json.dumps(manifest.get('confirmatory_surface_keys', []), sort_keys=True)}`.")
+    else:
+        guardrails.insert(0, "- This is exploratory model-building, not confirmatory scoring.")
     return "\n".join(
         [
             "# Macro Economy Tournament",
@@ -565,10 +696,7 @@ def build_report(manifest: dict[str, Any], candidate_table: pd.DataFrame, score_
             tournament_bottom_line(winner_rows, incumbent),
             "",
             "## Guardrails",
-            "- This is exploratory model-building, not confirmatory scoring.",
-            "- Adaptive and persistence-style baselines are diagnostics, not vetoes.",
-            "- Accounting, provenance, retrospective labels, and locked mappings are hard constraints.",
-            f"- Confirmatory surface policy: `{manifest.get('confirmatory_surface_policy')}`.",
+            *guardrails,
             "",
             "## Winner",
             markdown_table(winner_rows),
@@ -602,6 +730,8 @@ def tournament_bottom_line(winner_rows: pd.DataFrame, incumbent: pd.DataFrame) -
 
 
 def write_tournament_outputs(output_dir: Path, result: dict[str, Any]) -> None:
+    if result["manifest"].get("scoring_label") == "confirmatory":
+        result["manifest"]["confirmatory_registry_record"] = build_confirmatory_registry_record(output_dir, result)
     (output_dir / "macro_tournament_spec.normalized.json").write_text(
         json.dumps(result["normalized_spec"], indent=2, sort_keys=True),
         encoding="utf-8",
@@ -612,6 +742,87 @@ def write_tournament_outputs(output_dir: Path, result: dict[str, Any]) -> None:
     result["accounting_table"].to_csv(output_dir / "macro_tournament_accounting.csv", index=False)
     (output_dir / "winner_manifest.json").write_text(json.dumps(result["winner"], indent=2, sort_keys=True), encoding="utf-8")
     (output_dir / "macro_tournament_report.md").write_text(result["report"], encoding="utf-8")
+    if result["manifest"].get("scoring_label") == "confirmatory":
+        mark_confirmatory_surfaces_spent(result["manifest"]["confirmatory_registry_record"])
+
+
+def spec_scoring_label(spec: dict[str, Any]) -> str:
+    return str(spec.get("scoring_label", "retrospective"))
+
+
+def confirmatory_registry_path(spec: dict[str, Any]) -> Path:
+    raw = spec.get("confirmatory_spent_registry_path") or spec.get("spent_registry_path")
+    if raw is None:
+        return DEFAULT_CONFIRMATORY_REGISTRY
+    path = Path(str(raw))
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def confirmatory_surface_keys(spec: dict[str, Any]) -> list[str]:
+    if spec_scoring_label(spec) != "confirmatory":
+        return []
+    keys: list[str] = []
+    for surface in spec.get("surfaces", []):
+        for score_date in surface_score_asof_dates(surface):
+            payload = {
+                "schema_version": TOURNAMENT_VERSION,
+                "surface_id": str(surface.get("surface_id")),
+                "data_mode": str(surface.get("data_mode", "fred")),
+                "cutoff_date": str(surface.get("cutoff_date", "2025-12-01")),
+                "asof_start": str(surface.get("asof_start")),
+                "asof_end": str(surface.get("asof_end")),
+                "score_asof_date": score_date,
+                "scoreable_only": bool(surface.get("scoreable_only")),
+            }
+            keys.append(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest())
+    return keys
+
+
+def load_confirmatory_registry(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "schema_version": CONFIRMATORY_REGISTRY_VERSION,
+            "spent_surface_keys": [],
+            "records": [],
+        }
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != CONFIRMATORY_REGISTRY_VERSION:
+        raise ValueError(f"Unsupported confirmatory registry schema_version: {data.get('schema_version')!r}")
+    data.setdefault("spent_surface_keys", [])
+    data.setdefault("records", [])
+    return data
+
+
+def build_confirmatory_registry_record(output_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
+    manifest = result["manifest"]
+    return {
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "run_id": manifest.get("run_id"),
+        "output_dir": str(output_dir),
+        "spec_path": manifest.get("spec_path"),
+        "spec_sha256": manifest.get("spec_sha256"),
+        "normalized_spec_sha256": manifest.get("normalized_spec_sha256"),
+        "registry_path": manifest.get("confirmatory_spent_registry_path"),
+        "surface_ids": manifest.get("surface_ids", []),
+        "scored_asof_dates_by_surface": manifest.get("scored_asof_dates_by_surface", {}),
+        "surface_keys": manifest.get("confirmatory_surface_keys", []),
+        "winner_candidate_id": manifest.get("winner_candidate_id"),
+        "winner_mean_llm_rmse_scaled": manifest.get("winner_mean_llm_rmse_scaled"),
+    }
+
+
+def mark_confirmatory_surfaces_spent(record: dict[str, Any]) -> None:
+    registry_path = Path(str(record.get("registry_path") or DEFAULT_CONFIRMATORY_REGISTRY))
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry = load_confirmatory_registry(registry_path)
+    spent = set(str(value) for value in registry.get("spent_surface_keys", []))
+    new_keys = [str(value) for value in record.get("surface_keys", [])]
+    duplicate = spent.intersection(new_keys)
+    if duplicate:
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: surface already spent")
+    registry["spent_surface_keys"] = sorted(spent | set(new_keys))
+    registry.setdefault("records", []).append(record)
+    registry_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def output_filenames() -> list[str]:

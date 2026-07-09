@@ -3,15 +3,21 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 
 import pandas as pd
 
 from macro_llm_tournament.macro_tournament import (
+    CONFIRMATORY_LOCK_ERROR,
     RETROSPECTIVE_ONLY_ERROR,
+    candidate_id_for,
+    confirmatory_surface_keys,
     expand_candidates,
+    filter_surface_targets_for_score_dates,
     is_promoted_incumbent,
     select_winner,
+    validate_spec,
 )
 
 
@@ -31,6 +37,32 @@ class MacroTournamentTests(unittest.TestCase):
         self.assertEqual([candidate.candidate_id for candidate in first], [candidate.candidate_id for candidate in second])
         self.assertEqual(len(first), 3)
         self.assertEqual(len({candidate.candidate_id for candidate in first}), 3)
+
+    def test_explicit_candidate_list_expands_with_stable_supplied_ids(self):
+        conservative = _candidate_payload(
+            behavior_mechanism="empirical_bridge_v4",
+            belief_gain_global=3.0,
+            belief_gain_inflation=1.5,
+            belief_gain_income=0.5,
+            belief_gain_unemployment=0.5,
+            feedback_gain_multiplier=1.5,
+        )
+        unit_gain = _candidate_payload()
+        spec = {
+            "schema_version": "macro_economy_tournament_v1",
+            "run_id": "test_explicit_candidates",
+            "scoring_label": "confirmatory",
+            "candidate_list": [
+                {**conservative, "candidate_id": candidate_id_for(conservative)},
+                {**unit_gain, "candidate_id": candidate_id_for(unit_gain)},
+            ],
+        }
+
+        candidates = expand_candidates(spec)
+
+        self.assertEqual([candidate.candidate_id for candidate in candidates], [candidate_id_for(conservative), candidate_id_for(unit_gain)])
+        self.assertEqual(candidates[0].payload["behavior_mechanism"], "empirical_bridge_v4")
+        self.assertEqual(candidates[1].payload["belief_gain_global"], 1.0)
 
     def test_promoted_incumbent_spec_locks_current_winner(self):
         spec = json.loads((REPO_ROOT / "configs/macro_tournament/incumbent_v1.json").read_text(encoding="utf-8"))
@@ -79,7 +111,7 @@ class MacroTournamentTests(unittest.TestCase):
 
         self.assertEqual(winner["candidate_id"], "worse_than_adaptive_but_best_llm")
 
-    def test_macro_tournament_rejects_confirmatory_development_spec(self):
+    def test_macro_tournament_rejects_unlocked_confirmatory_development_spec(self):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             spec = _tiny_spec_dict()
@@ -109,7 +141,39 @@ class MacroTournamentTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn(RETROSPECTIVE_ONLY_ERROR, result.stderr)
+            self.assertIn(CONFIRMATORY_LOCK_ERROR, result.stderr)
+
+    def test_confirmatory_locked_spec_validates_and_spent_registry_blocks_rerun(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            spec = _locked_confirmatory_spec(root)
+            args = SimpleNamespace(mode="replay", max_live_calls=0)
+
+            validate_spec(spec, args=args)
+
+            registry = {
+                "schema_version": "macro_tournament_confirmatory_registry_v1",
+                "spent_surface_keys": confirmatory_surface_keys(spec),
+                "records": [],
+            }
+            Path(spec["confirmatory_spent_registry_path"]).write_text(json.dumps(registry), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "surface already spent"):
+                validate_spec(spec, args=args)
+
+    def test_score_asof_date_filter_keeps_alignment_history_out_of_scoring(self):
+        targets = pd.DataFrame(
+            [
+                {"period_id": "blind_post_cutoff_01", "as_of_date": "2025-12-15", "target_name": "pce_mom_pct"},
+                {"period_id": "blind_post_cutoff_02", "as_of_date": "2026-01-15", "target_name": "pce_mom_pct"},
+                {"period_id": "blind_post_cutoff_03", "as_of_date": "2026-02-15", "target_name": "pce_mom_pct"},
+            ]
+        )
+        surface = {"surface_id": "fresh", "score_asof_dates": ["2026-02-15"]}
+
+        filtered = filter_surface_targets_for_score_dates(targets, surface)
+
+        self.assertEqual(filtered["period_id"].tolist(), ["blind_post_cutoff_03"])
 
     def test_macro_tournament_fixture_cli_writes_output_contract(self):
         with TemporaryDirectory() as temp_dir:
@@ -198,6 +262,67 @@ def _tiny_spec_dict(ecology_dir: Path | None = None, bridge_path: Path | None = 
                 "history_months": 18,
                 "period_count": 2,
                 "scoring_label": "retrospective",
+            }
+        ],
+    }
+
+
+def _candidate_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "belief_gain_global": 1.0,
+        "belief_gain_inflation": 1.0,
+        "belief_gain_income": 1.0,
+        "belief_gain_unemployment": 1.0,
+        "behavior_mechanism": "empirical_bridge_v5_stabilized",
+        "hybrid_state_weight": None,
+        "feedback_mode": "closed_loop",
+        "feedback_gain_multiplier": 1.0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _locked_confirmatory_spec(root: Path) -> dict[str, object]:
+    conservative = _candidate_payload(
+        behavior_mechanism="empirical_bridge_v4",
+        belief_gain_global=3.0,
+        belief_gain_inflation=1.5,
+        belief_gain_income=0.5,
+        belief_gain_unemployment=0.5,
+        feedback_gain_multiplier=1.5,
+    )
+    unit_gain = _candidate_payload()
+    return {
+        "schema_version": "macro_economy_tournament_v1",
+        "run_id": "test_confirmatory",
+        "scoring_label": "confirmatory",
+        "confirmatory_lock": True,
+        "confirmatory_spent_registry_path": str(root / "registry.json"),
+        "profiles": {
+            "empirical_bridge_v4": str(root / "bridge_v4.json"),
+            "empirical_bridge_v5_stabilized": str(root / "bridge_v5.json"),
+            "state_schedule": str(root / "state_policy.json"),
+        },
+        "candidate_list": [
+            {**conservative, "candidate_id": candidate_id_for(conservative)},
+            {**unit_gain, "candidate_id": candidate_id_for(unit_gain)},
+        ],
+        "surfaces": [
+            {
+                "surface_id": "fred_confirmatory_2026_02",
+                "belief_source": "persona_ecology_replay",
+                "persona_ecology_dir": str(root / "ecology"),
+                "primary_ecology_source": "llm_codex_cli_gpt-5.5",
+                "ecology_period_policy": "hold_last",
+                "data_mode": "fred",
+                "cutoff_date": "2025-12-01",
+                "asof_start": "2025-12-15",
+                "asof_end": "2026-02-15",
+                "score_asof_dates": ["2026-02-15"],
+                "history_months": 18,
+                "scoreable_only": True,
+                "period_count": 4,
+                "scoring_label": "confirmatory",
             }
         ],
     }
