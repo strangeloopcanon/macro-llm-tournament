@@ -38,7 +38,7 @@ from .frozen_vintage_bundle import load_frozen_vintage_bundle
 from .llm_common import LLMUnavailable
 
 
-SCHEMA_VERSION = "recursive_dynamic_macro_economy_v2"
+SCHEMA_VERSION = "recursive_dynamic_macro_economy_v3"
 PERIODS_PER_YEAR = 12.0
 ACCOUNTING_TOLERANCE = 1e-8
 DEFAULT_BOOTSTRAP_SEED = 20260709
@@ -187,7 +187,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--households-csv", help="Demand-economy-ready household CSV."
     )
     parser.add_argument(
-        "--mode", choices=("fixture", "replay", "live"), default="fixture"
+        "--mode",
+        choices=("fixture", "replay", "replay_live", "live"),
+        default="fixture",
     )
     parser.add_argument("--provider", choices=("codex_cli",), default="codex_cli")
     parser.add_argument("--model", default="gpt-5.5")
@@ -202,6 +204,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--raw-records-json",
         help="Identity-bearing raw records to use instead of replay cache files.",
+    )
+    parser.add_argument(
+        "--replay-prefix-period-count",
+        type=int,
+        default=0,
+        help="In replay_live mode, require raw records for exactly periods 0..N-1 and call Codex thereafter.",
+    )
+    parser.add_argument(
+        "--score-origin-start",
+        help="First origin month included in scoring; earlier origins remain recursive warm-up periods.",
+    )
+    parser.add_argument(
+        "--score-origin-end",
+        help="Last origin month included in scoring; later origins remain in the path but are not scored.",
     )
     parser.add_argument(
         "--behavior-policy-mode",
@@ -273,9 +289,9 @@ def main(argv: list[str] | None = None) -> int:
 def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
     _validate_args(args)
     output_dir = Path(args.output_dir)
-    if args.mode == "live" and output_dir.exists():
+    if args.mode in {"live", "replay_live"} and output_dir.exists():
         raise DynamicMacroError(
-            "Live mode refuses to reuse an existing output directory"
+            "Live-style mode refuses to reuse an existing output directory"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -284,6 +300,11 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         loaded_bundle,
         model=args.model,
         policy=args.contamination_policy,
+    )
+    score_bundle, score_origin_contract = select_score_origins(
+        bundle,
+        start=args.score_origin_start,
+        end=args.score_origin_end,
     )
     households = load_households(args)
     household_temporal_coverage = validate_household_temporal_availability(
@@ -318,32 +339,46 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         else WORK_ROOT / "dynamic_macro_economy_cache"
     )
     provider_cwd = (
-        output_dir / "provider_cwd" if args.mode in {"live", "replay"} else None
+        output_dir / "provider_cwd"
+        if args.mode in {"live", "replay", "replay_live"}
+        else None
     )
     if provider_cwd is not None:
         provider_cwd.mkdir(parents=True, exist_ok=True)
         if any(provider_cwd.iterdir()):
             raise DynamicMacroError("Isolated provider_cwd must be empty at run start")
-    llm_mode = (
-        "raw_replay"
-        if args.mode == "replay" and raw_replay_records is not None
-        else args.mode
-    )
-    llm_base = DemandEconomyClient(
-        args.provider,
-        args.model,
-        cache_dir,
-        mode=llm_mode,
-        variant="llm_belief",
-        max_live_calls=args.max_live_calls,
-        raw_replay_records=raw_replay_records,
-        execution_cwd=provider_cwd,
-    )
+    if args.mode == "replay_live":
+        llm_base: Any = ReplayThenLiveDemandClient(
+            args.provider,
+            args.model,
+            cache_dir,
+            replay_records=raw_replay_records or [],
+            replay_prefix_period_count=int(args.replay_prefix_period_count),
+            max_live_calls=int(args.max_live_calls),
+            execution_cwd=provider_cwd,
+        )
+    else:
+        llm_mode = (
+            "raw_replay"
+            if args.mode == "replay" and raw_replay_records is not None
+            else args.mode
+        )
+        llm_base = DemandEconomyClient(
+            args.provider,
+            args.model,
+            cache_dir,
+            mode=llm_mode,
+            variant="llm_belief",
+            max_live_calls=args.max_live_calls,
+            raw_replay_records=raw_replay_records,
+            execution_cwd=provider_cwd,
+        )
     llm_client = GainAdjustedDemandClient(
         llm_base,
         gains=gains,
         requested_mode=args.mode,
         replay_records=raw_replay_records,
+        replay_prefix_period_count=int(args.replay_prefix_period_count),
     )
     adaptive_client = ObservedSignalAdaptiveClient()
     scenario = DemandScenario(
@@ -401,8 +436,8 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
     assert_accounting(accounting_frame)
     assert_no_prompt_target_leakage(prompt_rows)
 
-    forecasts = build_forecasts(periods_frame, households, bundle)
-    joined = join_and_score_forecasts(forecasts, bundle.targets)
+    forecasts = build_forecasts(periods_frame, households, score_bundle)
+    joined = join_and_score_forecasts(forecasts, score_bundle.targets)
     target_scores, family_scores, origin_scores, macro_scores = score_macro(joined)
     bootstrap = origin_block_bootstrap(
         joined,
@@ -422,6 +457,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         household_provenance=household_provenance,
         household_flow_anchor=household_flow_anchor,
         contamination_coverage=contamination_coverage,
+        score_origin_contract=score_origin_contract,
     )
     spec_sha256 = _sha256_json(spec)
     prompt_frame = prompt_rows_to_frame(prompt_rows)
@@ -450,7 +486,9 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "periods_per_year": PERIODS_PER_YEAR,
         "origin_count": len(bundle.origins),
         "target_count": len(bundle.target_specs),
-        "scored_target_row_count": len(bundle.targets),
+        "scored_origin_count": score_origin_contract["scored_origin_count"],
+        "scored_target_row_count": len(score_bundle.targets),
+        "score_origin_contract": score_origin_contract,
         "contamination_coverage": contamination_coverage,
         "provider_execution_isolation": provider_execution_isolation(args.mode),
         "initial_environment_anchor": initial_environment_anchor,
@@ -461,6 +499,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "household_count": int(len(households)),
         "live_call_count": llm_client.live_call_count,
         "cache_hit_count": llm_client.cache_hit_count,
+        "replayed_record_count": llm_client.replayed_record_count,
         "max_accounting_abs_residual": _max_accounting_residual(accounting_frame),
         "macro_scores": macro_scores,
         "llm_minus_adaptive": macro_scores["llm"] - macro_scores["adaptive"],
@@ -481,6 +520,129 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
     return manifest
 
 
+class ReplayThenLiveDemandClient:
+    """Replay a locked recursive prefix, then call the live provider for new states."""
+
+    variant = "llm_belief"
+
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        cache_dir: Path,
+        *,
+        replay_records: list[dict[str, Any]],
+        replay_prefix_period_count: int,
+        max_live_calls: int,
+        execution_cwd: Path | None,
+    ) -> None:
+        validate_replay_prefix_records(
+            replay_records,
+            provider=provider,
+            model=model,
+            prefix_period_count=replay_prefix_period_count,
+        )
+        self.provider = provider
+        self.model = model
+        self.replay_prefix_period_count = int(replay_prefix_period_count)
+        self._replay = DemandEconomyClient(
+            provider,
+            model,
+            cache_dir,
+            mode="raw_replay",
+            variant=self.variant,
+            raw_replay_records=replay_records,
+        )
+        self._live = DemandEconomyClient(
+            provider,
+            model,
+            cache_dir,
+            mode="live",
+            variant=self.variant,
+            max_live_calls=max_live_calls,
+            execution_cwd=execution_cwd,
+        )
+        self._raw_records: list[dict[str, Any]] = []
+        self._replayed_record_count = 0
+
+    @property
+    def source(self) -> str:
+        return f"llm_belief_replay_live_{self.provider}_{self.model}"
+
+    @property
+    def live_call_count(self) -> int:
+        return self._live.live_call_count
+
+    @property
+    def cache_hit_count(self) -> int:
+        return self._replay.cache_hit_count + self._live.cache_hit_count
+
+    @property
+    def replayed_record_count(self) -> int:
+        return self._replayed_record_count
+
+    @property
+    def raw_records(self) -> list[dict[str, Any]]:
+        return self._raw_records
+
+    def belief_panel(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        client = (
+            self._replay
+            if int(period_state["period_index"]) < self.replay_prefix_period_count
+            else self._live
+        )
+        panel = client.belief_panel(scenario, period_state, household_states)
+        if client is self._replay:
+            self._replayed_record_count += 1
+        self._raw_records.append(dict(client.raw_records[-1]))
+        return panel
+
+    def decision_panel(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self.belief_panel(scenario, period_state, household_states)
+
+
+def validate_replay_prefix_records(
+    records: list[dict[str, Any]],
+    *,
+    provider: str,
+    model: str,
+    prefix_period_count: int,
+) -> None:
+    if prefix_period_count <= 0:
+        raise DynamicMacroError("replay_live requires a positive replay prefix")
+    matching = [
+        row
+        for row in records
+        if str(row.get("provider")) == provider
+        and str(row.get("model")) == model
+        and str(row.get("variant")) == "llm_belief"
+        and str(row.get("scenario_id")) == "recursive_monthly_path"
+    ]
+    try:
+        periods = [int(row["period_index"]) for row in matching]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DynamicMacroError("Replay prefix records have malformed period indexes") from exc
+    expected = list(range(prefix_period_count))
+    if sorted(periods) != expected or len(periods) != len(set(periods)):
+        raise DynamicMacroError(
+            f"Replay prefix must contain exactly periods {expected}; found {sorted(periods)}"
+        )
+    for row in matching:
+        identity = row.get("cache_identity")
+        if not isinstance(identity, dict) or not identity.get("state_identity_sha256"):
+            raise DynamicMacroError("Replay prefix record lacks its state identity")
+
+
 class GainAdjustedDemandClient:
     """Identity-checking client that applies gains to belief update deltas."""
 
@@ -493,10 +655,12 @@ class GainAdjustedDemandClient:
         gains: Mapping[str, float],
         requested_mode: str,
         replay_records: list[dict[str, Any]] | None,
+        replay_prefix_period_count: int = 0,
     ) -> None:
         self.base = base
         self.gains = dict(gains)
         self.requested_mode = requested_mode
+        self.replay_prefix_period_count = int(replay_prefix_period_count)
         self._replay_by_key = {
             (
                 str(row.get("provider")),
@@ -519,6 +683,10 @@ class GainAdjustedDemandClient:
     @property
     def cache_hit_count(self) -> int:
         return self.base.cache_hit_count
+
+    @property
+    def replayed_record_count(self) -> int:
+        return int(getattr(self.base, "replayed_record_count", 0))
 
     @property
     def raw_records(self) -> list[dict[str, Any]]:
@@ -550,7 +718,13 @@ class GainAdjustedDemandClient:
                 int(period_state["period_index"]),
             )
             record = self._replay_by_key.get(key)
-            if record is None or record.get("cache_identity") != identity:
+            replay_required = (
+                self.requested_mode == "replay"
+                or int(period_state["period_index"]) < self.replay_prefix_period_count
+            )
+            if replay_required and (
+                record is None or record.get("cache_identity") != identity
+            ):
                 raise DynamicMacroError(
                     "Replay identity mismatch for "
                     f"provider={key[0]}, model={key[1]}, candidate={key[2]}, scenario={key[3]}, period={key[4]}"
@@ -577,7 +751,7 @@ class GainAdjustedDemandClient:
         identity: dict[str, Any],
         prompt_payload: dict[str, Any],
     ) -> None:
-        if self.requested_mode not in {"replay", "live"}:
+        if self.requested_mode not in {"replay", "replay_live", "live"}:
             return
         if (
             str(record.get("provider")) != self.base.provider
@@ -1046,6 +1220,65 @@ def filter_bundle_targets(
             bundle.target_contamination,
         ),
         coverage,
+    )
+
+
+def select_score_origins(
+    bundle: BundleView,
+    *,
+    start: str | None,
+    end: str | None,
+) -> tuple[BundleView, dict[str, Any]]:
+    available = [str(row["origin_month"]) for row in bundle.origins]
+    if not available:
+        raise DynamicMacroError("Cannot select score origins from an empty bundle")
+    score_start = str(start or available[0])
+    score_end = str(end or available[-1])
+    if score_start not in available or score_end not in available:
+        raise DynamicMacroError(
+            f"Score-origin range {score_start}:{score_end} must use bundle origins"
+        )
+    start_index = available.index(score_start)
+    end_index = available.index(score_end)
+    if start_index > end_index:
+        raise DynamicMacroError("--score-origin-start must not follow --score-origin-end")
+    selected = available[start_index : end_index + 1]
+    selected_set = set(selected)
+    targets = tuple(
+        row for row in bundle.targets if str(row["origin_month"]) in selected_set
+    )
+    contamination = tuple(
+        row
+        for row in bundle.target_contamination
+        if str(row["origin_month"]) in selected_set
+    )
+    expected_per_origin = len(bundle.target_specs)
+    counts = {
+        origin: sum(str(row["origin_month"]) == origin for row in targets)
+        for origin in selected
+    }
+    if not targets or any(count != expected_per_origin for count in counts.values()):
+        raise DynamicMacroError("Score-origin range does not retain the complete target contract")
+    contract = {
+        "score_origin_start": score_start,
+        "score_origin_end": score_end,
+        "scored_origins": selected,
+        "scored_origin_count": len(selected),
+        "warmup_origins": available[:start_index],
+        "trailing_unscored_origins": available[end_index + 1 :],
+        "target_rows_per_scored_origin": expected_per_origin,
+        "rule": "all_target_families_share_the_origin_observation_month",
+    }
+    return (
+        BundleView(
+            bundle.bundle_sha256,
+            bundle.origins,
+            bundle.history,
+            targets,
+            bundle.target_specs,
+            contamination,
+        ),
+        contract,
     )
 
 
@@ -1877,7 +2110,7 @@ def build_forecasts(
             previous: Mapping[str, Any] = (
                 initial if index == 0 else path.iloc[index - 1]
             )
-            for target in targets_by_origin[origin["origin_month"]]:
+            for target in targets_by_origin.get(origin["origin_month"], []):
                 mapping = MAPPING_BY_SERIES[target["series_id"]]
                 prediction = mapped_value(current, previous, mapping)
                 rows.append(
@@ -2186,6 +2419,7 @@ def normalized_spec(
     household_provenance: dict[str, Any],
     household_flow_anchor: dict[str, Any],
     contamination_coverage: dict[str, Any],
+    score_origin_contract: dict[str, Any],
 ) -> dict[str, Any]:
     mappings = []
     for spec in bundle.target_specs:
@@ -2208,13 +2442,23 @@ def normalized_spec(
         "household_flow_anchor": household_flow_anchor,
         "behavior_policy_mode": args.behavior_policy_mode,
         "behavior_policy_content_sha256": behavior_profile_content_sha256,
+        "replay_provenance": {
+            "raw_records_json": str(args.raw_records_json) if args.raw_records_json else None,
+            "raw_records_sha256": (
+                hashlib.sha256(Path(args.raw_records_json).read_bytes()).hexdigest()
+                if args.raw_records_json
+                else None
+            ),
+            "replay_prefix_period_count": int(args.replay_prefix_period_count),
+        },
         "period_overrides": {
             str(key): value for key, value in period_overrides.items()
         },
         "target_mappings": mappings,
         "contamination_coverage": contamination_coverage,
+        "score_origin_contract": score_origin_contract,
         "macro_score": {
-            "target_score": "sqrt(mean squared scaled error across origins)",
+            "target_score": "sqrt(mean squared scaled error across scored origins)",
             "family_score": "sqrt(mean target mean-squared-scaled-error within family)",
             "macro_score": "sqrt(mean family mean-squared-scaled-error with equal family weight)",
             "adaptive_role": "diagnostic_only_not_a_selection_veto",
@@ -2224,7 +2468,7 @@ def normalized_spec(
 
 
 def provider_execution_isolation(mode: str) -> dict[str, Any]:
-    enabled = mode in {"live", "replay"}
+    enabled = mode in {"live", "replay", "replay_live"}
     return {
         "enabled": enabled,
         "relative_path": "provider_cwd" if enabled else None,
@@ -2305,6 +2549,8 @@ def build_report(
             f"- LLM minus adaptive: `{manifest['llm_minus_adaptive']:.6f}`.",
             f"- 95% origin-block bootstrap interval: `[{bootstrap['lower']:.6f}, {bootstrap['upper']:.6f}]`.",
             "- The adaptive twin is diagnostic only and does not veto or select the LLM candidate.",
+            f"- Scored origins: `{', '.join(manifest['score_origin_contract']['scored_origins'])}`; "
+            f"warm-up origins: `{', '.join(manifest['score_origin_contract']['warmup_origins']) or 'none'}`.",
             "",
             "## Family Scores",
             markdown_table(summary),
@@ -2335,6 +2581,8 @@ def build_report(
             f"- Shared first-origin environment anchor: `{_canonical_json(manifest['initial_environment_anchor'])}`.",
             f"- Household flow anchor: `{_canonical_json(manifest['household_flow_anchor'])}`.",
             f"- Maximum accounting residual: `{manifest['max_accounting_abs_residual']:.12g}`.",
+            f"- Live calls: `{manifest['live_call_count']}`; replayed identity-bearing records: "
+            f"`{manifest['replayed_record_count']}`; ordinary cache hits: `{manifest['cache_hit_count']}`.",
             f"- Monthly origins: `{manifest['origin_count']}`; frozen targets: `{manifest['target_count']}`.",
             f"- Contamination policy `{contamination['policy']}` for `{contamination['model']}` selected "
             f"`{contamination['selected_rows']}` of `{contamination['catalogue_rows']}` origin-target rows.",
@@ -2373,10 +2621,25 @@ def load_raw_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
-    if args.mode == "live" and int(args.max_live_calls) <= 0:
-        raise DynamicMacroError("--max-live-calls must be positive in live mode")
-    if args.mode != "replay" and args.raw_records_json:
-        raise DynamicMacroError("--raw-records-json is only valid in replay mode")
+    if args.mode in {"live", "replay_live"} and int(args.max_live_calls) <= 0:
+        raise DynamicMacroError(
+            "--max-live-calls must be positive in live and replay_live modes"
+        )
+    if args.mode not in {"replay", "replay_live"} and args.raw_records_json:
+        raise DynamicMacroError(
+            "--raw-records-json is only valid in replay or replay_live mode"
+        )
+    if args.mode == "replay_live":
+        if not args.raw_records_json:
+            raise DynamicMacroError("replay_live requires --raw-records-json")
+        if int(args.replay_prefix_period_count) <= 0:
+            raise DynamicMacroError(
+                "replay_live requires --replay-prefix-period-count greater than zero"
+            )
+    elif int(args.replay_prefix_period_count) != 0:
+        raise DynamicMacroError(
+            "--replay-prefix-period-count is only valid in replay_live mode"
+        )
     if not math.isfinite(float(args.feedback_gain)) or float(args.feedback_gain) < 0.0:
         raise DynamicMacroError("--feedback-gain must be finite and non-negative")
     if (

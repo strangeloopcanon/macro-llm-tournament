@@ -24,7 +24,7 @@ import requests
 from .env import load_secret_env
 
 
-BUNDLE_SCHEMA_VERSION = "frozen_rolling_origin_vintage_bundle_v3"
+BUNDLE_SCHEMA_VERSION = "frozen_rolling_origin_vintage_bundle_v4"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_VINTAGE_DATES_URL = "https://api.stlouisfed.org/fred/series/vintagedates"
 FRED_DOCUMENTATION_URL = "https://fred.stlouisfed.org/docs/api/fred/series_observations.html"
@@ -91,6 +91,7 @@ TARGET_COLUMNS = (
     "first_release_value",
     "origin_visible_denominator_date",
     "origin_visible_denominator_value",
+    "first_release_denominator_date",
     "first_release_denominator_value",
     "target_value",
 )
@@ -452,9 +453,11 @@ def build_frozen_vintage_bundle(
             visible = history_by_series[spec.series_id]
             if not visible:
                 raise FrozenVintageBundleError(f"No origin-visible denominator for {spec.series_id} at {as_of_date}")
-            denominator = visible[-1]
-            target_observation = _next_month(_parse_iso_date(denominator["date"]))
+            origin_visible_denominator = visible[-1]
+            target_observation = origin
             target_text = target_observation.isoformat()
+            transform_denominator = _month_offset(target_observation, -1)
+            transform_denominator_text = transform_denominator.isoformat()
             horizon_date = min(target_observation + timedelta(days=int(release_lag_days)), build_as_of_date)
             horizon_text = horizon_date.isoformat()
             first_release, first_release_text, detection_method = _detect_first_release(
@@ -479,14 +482,14 @@ def build_frozen_vintage_bundle(
             first_release_window = _valid_observations(
                 client.observations(
                     spec.series_id,
-                    observation_start=denominator["date"],
+                    observation_start=transform_denominator_text,
                     observation_end=target_text,
                     realtime_start=first_release_text,
                     realtime_end=first_release_text,
                 )
             )
             first_by_date = {row["date"]: row for row in first_release_window}
-            if target_text not in first_by_date or denominator["date"] not in first_by_date:
+            if target_text not in first_by_date or transform_denominator_text not in first_by_date:
                 raise FrozenVintageBundleError(
                     f"First-release vintage lacks a matched numerator/denominator for {spec.series_id} {target_text}"
                 )
@@ -498,14 +501,14 @@ def build_frozen_vintage_bundle(
                     "first_release_target",
                     first_release_text,
                     first_release_text,
-                    denominator["date"],
+                    transform_denominator_text,
                     target_text,
                     detection_method,
                 )
             )
             first_value = float(first_by_date[target_text]["value"])
-            first_denominator_value = float(first_by_date[denominator["date"]]["value"])
-            denominator_value = float(denominator["value"])
+            first_denominator_value = float(first_by_date[transform_denominator_text]["value"])
+            origin_visible_denominator_value = float(origin_visible_denominator["value"])
             target_rows.append(
                 {
                     "origin_month": origin_month,
@@ -519,8 +522,9 @@ def build_frozen_vintage_bundle(
                     "first_release_as_of_date": first_release_text,
                     "release_detection_method": detection_method,
                     "first_release_value": first_value,
-                    "origin_visible_denominator_date": denominator["date"],
-                    "origin_visible_denominator_value": denominator_value,
+                    "origin_visible_denominator_date": origin_visible_denominator["date"],
+                    "origin_visible_denominator_value": origin_visible_denominator_value,
+                    "first_release_denominator_date": transform_denominator_text,
                     "first_release_denominator_value": first_denominator_value,
                     "target_value": _apply_transform(spec.transform, first_value, first_denominator_value),
                 }
@@ -607,9 +611,9 @@ def build_frozen_vintage_bundle(
         "fred_documentation_url": FRED_DOCUMENTATION_URL,
         "origins": origin_records,
         "target_observation_semantics": {
-            "rule": "next_monthly_observation_after_last_origin_visible_observation",
-            "publication_lag_note": "Target observation is not assumed to equal origin_month plus one month; it follows the last value visible as of as_of_date.",
-            "transform_denominator": "Percentage-change and difference targets use numerator and denominator from the same earliest first-release vintage; the origin-visible denominator is retained for audit and level-direction scoring.",
+            "rule": "common_origin_observation_month",
+            "publication_lag_note": "Every target at an origin refers to the same calendar observation month, equal to origin_month, regardless of series-specific publication lag.",
+            "transform_denominator": "Percentage-change and difference targets use the previous calendar month and the target month from the same earliest first-release vintage; the latest origin-visible value is retained separately for audit and level-direction scoring.",
         },
         "first_release_detection": "earliest usable fred/series/vintagedates entry within release_lag_days, otherwise horizon fallback",
         "vintage_dates_semantics": "FRED vintage dates represent releases or revisions; each candidate is checked for target-observation availability.",
@@ -671,8 +675,8 @@ def validate_frozen_vintage_bundle(root: Path | str) -> dict[str, Any]:
     if origins != expected_origins or origins != manifest.get("origins"):
         raise FrozenVintageBundleError("Bundle origins do not match canonical origin_month and as_of_date records")
     semantics = manifest.get("target_observation_semantics")
-    if not isinstance(semantics, dict) or semantics.get("rule") != "next_monthly_observation_after_last_origin_visible_observation":
-        raise FrozenVintageBundleError("Bundle does not declare next-unreleased-observation target semantics")
+    if not isinstance(semantics, dict) or semantics.get("rule") != "common_origin_observation_month":
+        raise FrozenVintageBundleError("Bundle does not declare common-observation-month target semantics")
     targets = payload_rows["targets.csv"]
     expected_pairs = {(row["origin_month"], spec.target_name) for row in origins for spec in TARGET_SPECS}
     actual_pairs = {(row["origin_month"], row["target_name"]) for row in targets}
@@ -704,6 +708,9 @@ def validate_frozen_vintage_bundle(root: Path | str) -> dict[str, Any]:
             or target["transform"] != spec.transform
             or target["default_scale"] != _format_number(spec.default_scale)
             or target["release_detection_method"] not in {"vintage_dates", "release_lag_fallback"}
+            or target["target_observation_date"] != target["origin_month"]
+            or target["first_release_denominator_date"]
+            != _month_offset(_parse_iso_date(target["target_observation_date"]), -1).isoformat()
         ):
             raise FrozenVintageBundleError("Target row metadata does not match the required target specification")
     audits = payload_rows["revision_audit.csv"]
@@ -955,7 +962,7 @@ def _validate_source_request_provenance(
             or search["release_detection_method"] != "vintage_dates"
             or first["realtime_start"] != target["first_release_as_of_date"]
             or first["realtime_end"] != target["first_release_as_of_date"]
-            or first["observation_start"] != target["origin_visible_denominator_date"]
+            or first["observation_start"] != target["first_release_denominator_date"]
             or first["observation_end"] != target["target_observation_date"]
             or first["release_detection_method"] != target["release_detection_method"]
             or latest["realtime_start"]

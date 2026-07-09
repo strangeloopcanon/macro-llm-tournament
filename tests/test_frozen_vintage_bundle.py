@@ -63,6 +63,22 @@ class NoVintageDatesFixtureClient:
         return []
 
 
+class LaggedHistoryFixtureClient:
+    """Expose stale origin history while keeping later releases queryable."""
+
+    def __init__(self) -> None:
+        self.delegate = FixtureAlfredClient()
+
+    def observations(self, series_id: str, **kwargs):
+        rows = self.delegate.observations(series_id, **kwargs)
+        if kwargs.get("realtime_start") == "2024-09-15" and kwargs.get("observation_end") == "2024-09-15":
+            return [row for row in rows if row["date"] <= "2024-06-01"]
+        return rows
+
+    def vintage_dates(self, series_id: str, **kwargs):
+        return self.delegate.vintage_dates(series_id, **kwargs)
+
+
 class FrozenVintageBundleTests(unittest.TestCase):
     def test_target_catalogue_covers_the_requested_macro_families(self) -> None:
         self.assertEqual(
@@ -94,7 +110,7 @@ class FrozenVintageBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(FrozenVintageBundleError, "first day"):
             parse_monthly_origins("2024-01-02:2024-03-01")
 
-    def test_fixture_bundle_freezes_history_at_as_of_date_and_uses_next_unreleased_target(self) -> None:
+    def test_fixture_bundle_freezes_history_and_uses_one_common_target_month(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             build_fixture_bundle(root, ["2024-09-01", "2024-10-01"])
@@ -104,7 +120,7 @@ class FrozenVintageBundleTests(unittest.TestCase):
             self.assertEqual(bundle.origins[0], {"origin_month": "2024-09-01", "as_of_date": "2024-09-15"})
             self.assertEqual(
                 bundle.manifest["target_observation_semantics"]["rule"],
-                "next_monthly_observation_after_last_origin_visible_observation",
+                "common_origin_observation_month",
             )
             self.assertIn("same earliest first-release vintage", bundle.manifest["target_observation_semantics"]["transform_denominator"])
             self.assertEqual(len(bundle.targets), len(TARGET_SPECS) * 2)
@@ -112,6 +128,7 @@ class FrozenVintageBundleTests(unittest.TestCase):
             self.assertEqual(target["as_of_date"], "2024-09-15")
             self.assertEqual(target["origin_visible_denominator_date"], "2024-08-01")
             self.assertEqual(target["target_observation_date"], "2024-09-01")
+            self.assertEqual(target["first_release_denominator_date"], "2024-08-01")
             self.assertEqual(target["first_release_as_of_date"], "2024-09-21")
             self.assertEqual(target["release_detection_method"], "vintage_dates")
             expected = 100 * (float(target["first_release_value"]) / float(target["first_release_denominator_value"]) - 1)
@@ -124,6 +141,28 @@ class FrozenVintageBundleTests(unittest.TestCase):
 
             audit = next(row for row in bundle.revision_audit if row["origin_month"] == "2024-09-01" and row["series_id"] == "PCE")
             self.assertNotEqual(audit["first_release_value"], audit["latest_revision_value"])
+
+    def test_stale_series_history_does_not_change_the_common_target_month(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            build_frozen_vintage_bundle(
+                Path(temp_dir),
+                ["2024-09-01"],
+                mode="fixture",
+                client=LaggedHistoryFixtureClient(),
+            )
+            bundle = load_frozen_vintage_bundle(temp_dir)
+            self.assertEqual(
+                {row["target_observation_date"] for row in bundle.targets},
+                {"2024-09-01"},
+            )
+            self.assertEqual(
+                {row["origin_visible_denominator_date"] for row in bundle.targets},
+                {"2024-06-01"},
+            )
+            self.assertEqual(
+                {row["first_release_denominator_date"] for row in bundle.targets},
+                {"2024-08-01"},
+            )
 
     def test_earliest_vintage_is_selected_before_later_configured_horizon(self) -> None:
         with TemporaryDirectory() as temp_dir:

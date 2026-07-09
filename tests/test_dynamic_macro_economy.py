@@ -26,6 +26,8 @@ from macro_llm_tournament.dynamic_macro_economy import (
     parse_args,
     run_dynamic_macro,
     score_macro,
+    select_score_origins,
+    validate_replay_prefix_records,
 )
 from macro_llm_tournament.demand_economy import DemandScenario, build_fixture_demand_households
 from macro_llm_tournament.frozen_vintage_bundle import (
@@ -119,7 +121,7 @@ def fixture_bundle() -> BundleView:
             target_value = 0.25 + 0.03 * target_index + 0.02 * origin_index
             if transform == "level":
                 target_value = 4.0 + 0.1 * target_index + 0.02 * origin_index
-            target_month = ["2025-11-01", "2025-12-01", "2026-01-01"][origin_index]
+            target_month = origin["origin_month"]
             targets.append(
                 {
                     **origin,
@@ -218,6 +220,9 @@ def runner_args(
     feedback_mode: str = "closed_loop",
     feedback_gain: float = 1.0,
     raw_records: Path | None = None,
+    replay_prefix_period_count: int = 0,
+    score_origin_start: str | None = None,
+    score_origin_end: str | None = None,
 ) -> object:
     argv = [
         "--bundle-dir",
@@ -243,6 +248,14 @@ def runner_args(
     ]
     if raw_records is not None:
         argv.extend(["--raw-records-json", str(raw_records)])
+    if replay_prefix_period_count:
+        argv.extend(
+            ["--replay-prefix-period-count", str(replay_prefix_period_count)]
+        )
+    if score_origin_start:
+        argv.extend(["--score-origin-start", score_origin_start])
+    if score_origin_end:
+        argv.extend(["--score-origin-end", score_origin_end])
     return parse_args(argv)
 
 
@@ -269,6 +282,46 @@ def prompt_payloads(output_dir: Path, candidate: str) -> list[dict]:
 
 
 class DynamicMacroEconomyTests(unittest.TestCase):
+    def test_score_origin_range_keeps_warmup_path_but_excludes_it_from_scores(self) -> None:
+        bundle = fixture_bundle()
+        selected, contract = select_score_origins(
+            bundle,
+            start="2025-11-01",
+            end="2025-12-01",
+        )
+        self.assertEqual(
+            sorted({row["origin_month"] for row in selected.targets}),
+            ["2025-11-01", "2025-12-01"],
+        )
+        self.assertEqual(contract["warmup_origins"], ["2025-10-01"])
+        self.assertEqual(contract["scored_origin_count"], 2)
+
+    def test_replay_prefix_requires_exact_contiguous_identity_bearing_records(self) -> None:
+        records = [
+            {
+                "provider": "codex_cli",
+                "model": "gpt-5.5",
+                "variant": "llm_belief",
+                "scenario_id": "recursive_monthly_path",
+                "period_index": index,
+                "cache_identity": {"state_identity_sha256": f"state-{index}"},
+            }
+            for index in range(2)
+        ]
+        validate_replay_prefix_records(
+            records,
+            provider="codex_cli",
+            model="gpt-5.5",
+            prefix_period_count=2,
+        )
+        with self.assertRaisesRegex(DynamicMacroError, "exactly periods"):
+            validate_replay_prefix_records(
+                records[:1],
+                provider="codex_cli",
+                model="gpt-5.5",
+                prefix_period_count=2,
+            )
+
     def test_household_flow_anchor_matches_origin_saving_rate_and_preserves_buffers(self) -> None:
         households = build_fixture_demand_households(12)
         households = households.assign(
@@ -376,7 +429,25 @@ class DynamicMacroEconomyTests(unittest.TestCase):
     def test_first_release_policy_keeps_pre_cutoff_events_but_strict_policy_excludes_them(
         self,
     ) -> None:
-        bundle = fixture_bundle()
+        base = fixture_bundle()
+        contamination = tuple(
+            {
+                **row,
+                "target_observation_date": "2025-12-02",
+                "contamination_label": "post_cutoff_holdout",
+            }
+            if row["origin_month"] == "2025-12-01"
+            else row
+            for row in base.target_contamination
+        )
+        bundle = BundleView(
+            base.bundle_sha256,
+            base.origins,
+            base.history,
+            base.targets,
+            base.target_specs,
+            contamination,
+        )
 
         unavailable, unavailable_coverage = filter_bundle_targets(
             bundle,
@@ -649,6 +720,37 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                 )
             periods = pd.read_csv(output / "periods.csv")
             self.assertEqual(set(periods["periods_per_year"]), {12.0})
+
+    def test_fixture_scores_only_locked_origins_after_recursive_warmup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            panel = root / "sce_panel.csv"
+            write_sce_panel(panel)
+            args = runner_args(
+                root,
+                panel,
+                score_origin_start="2025-11-01",
+                score_origin_end="2025-12-01",
+            )
+            with patch(
+                "macro_llm_tournament.dynamic_macro_economy.load_bundle_view",
+                return_value=fixture_bundle(),
+            ):
+                manifest = run_dynamic_macro(args)
+            periods = pd.read_csv(root / "output" / "periods.csv")
+            scores = pd.read_csv(root / "output" / "origin_scores.csv")
+            self.assertEqual(sorted(periods["origin_month"].unique()), [
+                "2025-10-01",
+                "2025-11-01",
+                "2025-12-01",
+            ])
+            self.assertEqual(sorted(scores["origin_month"].unique()), [
+                "2025-11-01",
+                "2025-12-01",
+            ])
+            self.assertEqual(manifest["score_origin_contract"]["warmup_origins"], [
+                "2025-10-01"
+            ])
 
     def test_fixture_has_no_target_leakage_and_exact_output_contract(self) -> None:
         with TemporaryDirectory() as temp_dir:
