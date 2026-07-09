@@ -48,6 +48,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=("fixture", "live"), required=True)
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--resume", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -66,8 +67,11 @@ def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
     raw_spec = json.loads(spec_path.read_text(encoding="utf-8"))
     spec = normalize_spec(raw_spec, spec_path=spec_path)
     output_dir = Path(args.output_dir).resolve()
-    if output_dir.exists() and any(output_dir.iterdir()):
+    existing_output = output_dir.exists() and any(output_dir.iterdir())
+    if existing_output and not args.resume:
         raise DynamicMacroTournamentError("Tournament output directory must be absent or empty")
+    if args.resume and not existing_output:
+        raise DynamicMacroTournamentError("--resume requires an existing incomplete tournament output")
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.mode == "live" and int(args.max_live_calls) < int(spec["maximum_authorized_live_calls"]):
         raise DynamicMacroTournamentError(
@@ -76,25 +80,54 @@ def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
     if args.mode == "fixture" and int(args.max_live_calls) != 0:
         raise DynamicMacroTournamentError("Fixture tournament requires --max-live-calls 0")
 
-    (output_dir / "normalized_spec.json").write_text(
-        json.dumps(spec, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    normalized_spec_path = output_dir / "normalized_spec.json"
+    if args.resume:
+        if (output_dir / "manifest.json").is_file():
+            raise DynamicMacroTournamentError("Completed tournament output cannot be resumed")
+        if not normalized_spec_path.is_file() or _read_json(normalized_spec_path) != spec:
+            raise DynamicMacroTournamentError("Resume spec does not match the existing locked tournament")
+    else:
+        normalized_spec_path.write_text(
+            json.dumps(spec, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
     candidate_rows: list[dict[str, Any]] = []
     family_frames: list[pd.DataFrame] = []
     origin_frames: list[pd.DataFrame] = []
     used_live_calls = 0
+    failed_live_calls = 0
+    failed_attempts: list[dict[str, Any]] = []
     for index, candidate in enumerate(spec["candidates"], start=1):
         candidate_id = candidate["candidate_id"]
         candidate_dir = output_dir / "candidates" / candidate_id
+        prior_failed_for_candidate = 0
         try:
-            _run_candidate(
-                spec,
-                candidate,
-                mode=args.mode,
-                output_dir=candidate_dir,
-            )
+            if args.resume and _candidate_output_is_complete(candidate_dir):
+                resumed_existing = True
+            else:
+                resumed_existing = False
+                if args.resume and candidate_dir.exists():
+                    archived = _archive_failed_candidate_attempt(
+                        output_dir, candidate_id, candidate_dir
+                    )
+                    prior_failed_for_candidate = int(archived["live_call_count"])
+                    failed_live_calls += prior_failed_for_candidate
+                    failed_attempts.append(archived)
+                _run_candidate(
+                    spec,
+                    candidate,
+                    mode=args.mode,
+                    output_dir=candidate_dir,
+                )
             row, family, origin = collect_candidate_result(spec, candidate, candidate_dir)
+            row["resumed_existing_result"] = resumed_existing
+            row["prior_failed_live_call_count"] = prior_failed_for_candidate
             used_live_calls += int(row["live_call_count"])
+            if prior_failed_for_candidate + int(row["live_call_count"]) > int(
+                candidate["max_live_calls"]
+            ):
+                raise DynamicMacroTournamentError(
+                    f"Candidate {candidate_id} exceeded its cumulative live-call cap"
+                )
             candidate_rows.append(row)
             family.insert(0, "tournament_candidate_id", candidate_id)
             origin.insert(0, "tournament_candidate_id", candidate_id)
@@ -117,10 +150,12 @@ def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
                     "max_accounting_abs_residual": math.nan,
                     "live_call_count": 0,
                     "replayed_record_count": 0,
+                    "resumed_existing_result": False,
+                    "prior_failed_live_call_count": prior_failed_for_candidate,
                     "mechanism_complexity": int(candidate["mechanism_complexity"]),
                 }
             )
-        if used_live_calls > int(args.max_live_calls):
+        if used_live_calls + failed_live_calls > int(args.max_live_calls):
             raise DynamicMacroTournamentError(
                 "Observed live calls exceeded the tournament authorization"
             )
@@ -157,7 +192,10 @@ def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_count": len(spec["candidates"]),
         "eligible_candidate_count": int(scores["status"].eq("complete").sum()),
         "winner_candidate_id": winner_id,
-        "live_call_count": int(used_live_calls),
+        "live_call_count": int(used_live_calls + failed_live_calls),
+        "successful_live_call_count": int(used_live_calls),
+        "failed_live_call_count": int(failed_live_calls),
+        "failed_attempts": failed_attempts,
         "maximum_authorized_live_calls": int(args.max_live_calls),
         "adaptive_role": "diagnostic_only_not_a_selection_veto",
         "reserved_confirmatory_origin": spec["reserved_confirmatory"]["origin_month"],
@@ -522,6 +560,58 @@ def _assert_locked_paths_unchanged(candidate: dict[str, Any]) -> None:
             raise DynamicMacroTournamentError(
                 f"Locked candidate input changed after normalization: {key}"
             )
+
+
+def _candidate_output_is_complete(candidate_dir: Path) -> bool:
+    required = (
+        candidate_dir / "manifest.json",
+        candidate_dir / "normalized_spec.json",
+        candidate_dir / "family_scores.csv",
+        candidate_dir / "origin_scores.csv",
+    )
+    if any(not path.is_file() for path in required):
+        return False
+    try:
+        return _read_json(candidate_dir / "manifest.json").get("status") == "complete"
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _archive_failed_candidate_attempt(
+    output_dir: Path, candidate_id: str, candidate_dir: Path
+) -> dict[str, Any]:
+    failed_root = output_dir / "failed_attempts"
+    failed_root.mkdir(parents=True, exist_ok=True)
+    attempt_number = 1 + len(list(failed_root.glob(f"{candidate_id}_attempt_*")))
+    archived = failed_root / f"{candidate_id}_attempt_{attempt_number}"
+    candidate_dir.replace(archived)
+    live_cache_records: list[dict[str, Any]] = []
+    for path in sorted(archived.glob(".cache/**/*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("cache_hit") is False
+            and payload.get("response_created_utc")
+        ):
+            live_cache_records.append(
+                {
+                    "relative_path": str(path.relative_to(output_dir)),
+                    "sha256": _file_sha256(path),
+                    "provider": payload.get("provider"),
+                    "model": payload.get("model"),
+                    "response_created_utc": payload.get("response_created_utc"),
+                }
+            )
+    return {
+        "candidate_id": candidate_id,
+        "attempt_number": attempt_number,
+        "archive_path": str(archived.relative_to(output_dir)),
+        "live_call_count": len(live_cache_records),
+        "live_cache_records": live_cache_records,
+    }
 
 
 def _assert_child_spec_matches_candidate(

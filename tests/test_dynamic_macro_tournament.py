@@ -224,6 +224,68 @@ class DynamicMacroTournamentTests(unittest.TestCase):
                     run_tournament(args)
             self.assertFalse((root / "out" / "winner_manifest.json").exists())
 
+    def test_live_resume_reuses_complete_children_and_counts_failed_attempts(self) -> None:
+        with TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            spec_path = write_inputs(root)
+            raw_spec = json.loads(spec_path.read_text())
+            normalized = normalize_spec(raw_spec, spec_path=spec_path)
+            output = root / "out"
+            output.mkdir()
+            (output / "normalized_spec.json").write_text(
+                json.dumps(normalized, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            candidate_a = next(
+                row for row in normalized["candidates"] if row["candidate_id"] == "candidate_a"
+            )
+            fake_child(
+                normalized,
+                candidate_a,
+                mode="live",
+                output_dir=output / "candidates" / "candidate_a",
+            )
+            partial = output / "candidates" / "candidate_b" / ".cache" / "codex_cli"
+            partial.mkdir(parents=True)
+            (partial / "bad.json").write_text(
+                json.dumps(
+                    {
+                        "provider": "codex_cli",
+                        "model": "gpt-5.5",
+                        "cache_hit": False,
+                        "response_created_utc": "2026-07-09T00:00:00+00:00",
+                        "payload": {"beliefs": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--spec",
+                    str(spec_path),
+                    "--mode",
+                    "live",
+                    "--max-live-calls",
+                    "12",
+                    "--output-dir",
+                    str(output),
+                    "--resume",
+                ]
+            )
+            with patch(
+                "macro_llm_tournament.dynamic_macro_tournament._run_candidate",
+                side_effect=fake_child,
+            ) as run_child:
+                manifest = run_tournament(args)
+            self.assertEqual(run_child.call_count, 1)
+            self.assertEqual(manifest["failed_live_call_count"], 1)
+            self.assertEqual(manifest["successful_live_call_count"], 4)
+            self.assertEqual(manifest["live_call_count"], 5)
+            scores = pd.read_csv(output / "candidate_scores.csv").set_index("candidate_id")
+            self.assertTrue(bool(scores.loc["candidate_a", "resumed_existing_result"]))
+            self.assertEqual(scores.loc["candidate_b", "prior_failed_live_call_count"], 1)
+            self.assertTrue((output / "failed_attempts" / "candidate_b_attempt_1").is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

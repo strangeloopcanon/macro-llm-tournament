@@ -212,6 +212,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="In replay_live mode, require raw records for exactly periods 0..N-1 and call Codex thereafter.",
     )
     parser.add_argument(
+        "--semantic-retry-limit",
+        type=int,
+        default=2,
+        help="Maximum fresh retries after a structurally invalid live belief payload.",
+    )
+    parser.add_argument(
         "--score-origin-start",
         help="First origin month included in scoring; earlier origins remain recursive warm-up periods.",
     )
@@ -355,6 +361,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
             replay_records=raw_replay_records or [],
             replay_prefix_period_count=int(args.replay_prefix_period_count),
             max_live_calls=int(args.max_live_calls),
+            semantic_retry_limit=int(args.semantic_retry_limit),
             execution_cwd=provider_cwd,
         )
     else:
@@ -500,6 +507,8 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "live_call_count": llm_client.live_call_count,
         "cache_hit_count": llm_client.cache_hit_count,
         "replayed_record_count": llm_client.replayed_record_count,
+        "semantic_retry_count": llm_client.semantic_retry_count,
+        "rejected_semantic_payloads": llm_client.rejected_semantic_payloads,
         "max_accounting_abs_residual": _max_accounting_residual(accounting_frame),
         "macro_scores": macro_scores,
         "llm_minus_adaptive": macro_scores["llm"] - macro_scores["adaptive"],
@@ -534,6 +543,7 @@ class ReplayThenLiveDemandClient:
         replay_records: list[dict[str, Any]],
         replay_prefix_period_count: int,
         max_live_calls: int,
+        semantic_retry_limit: int,
         execution_cwd: Path | None,
     ) -> None:
         validate_replay_prefix_records(
@@ -545,6 +555,8 @@ class ReplayThenLiveDemandClient:
         self.provider = provider
         self.model = model
         self.replay_prefix_period_count = int(replay_prefix_period_count)
+        self.semantic_retry_limit = int(semantic_retry_limit)
+        self.cache_dir = cache_dir
         self._replay = DemandEconomyClient(
             provider,
             model,
@@ -564,6 +576,8 @@ class ReplayThenLiveDemandClient:
         )
         self._raw_records: list[dict[str, Any]] = []
         self._replayed_record_count = 0
+        self._semantic_retry_count = 0
+        self._rejected_semantic_payloads: list[dict[str, Any]] = []
 
     @property
     def source(self) -> str:
@@ -582,6 +596,14 @@ class ReplayThenLiveDemandClient:
         return self._replayed_record_count
 
     @property
+    def semantic_retry_count(self) -> int:
+        return self._semantic_retry_count
+
+    @property
+    def rejected_semantic_payloads(self) -> list[dict[str, Any]]:
+        return list(self._rejected_semantic_payloads)
+
+    @property
     def raw_records(self) -> list[dict[str, Any]]:
         return self._raw_records
 
@@ -596,11 +618,59 @@ class ReplayThenLiveDemandClient:
             if int(period_state["period_index"]) < self.replay_prefix_period_count
             else self._live
         )
-        panel = client.belief_panel(scenario, period_state, household_states)
+        if client is self._replay:
+            panel = client.belief_panel(scenario, period_state, household_states)
+        else:
+            panel = self._live_belief_panel_with_semantic_retry(
+                scenario, period_state, household_states
+            )
         if client is self._replay:
             self._replayed_record_count += 1
         self._raw_records.append(dict(client.raw_records[-1]))
         return panel
+
+    def _live_belief_panel_with_semantic_retry(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        for attempt in range(self.semantic_retry_limit + 1):
+            try:
+                return self._live.belief_panel(
+                    scenario, period_state, household_states
+                )
+            except LLMUnavailable as exc:
+                if not str(exc).startswith("Demand economy belief payload"):
+                    raise
+                if attempt >= self.semantic_retry_limit:
+                    raise
+                cache_path = self._live.belief_cache_path(
+                    scenario, period_state, household_states
+                )
+                if not cache_path.is_file():
+                    raise DynamicMacroError(
+                        "Structurally invalid live payload has no cache artifact to quarantine"
+                    ) from exc
+                rejected_dir = self.cache_dir / "rejected_semantic"
+                rejected_dir.mkdir(parents=True, exist_ok=True)
+                payload_sha = hashlib.sha256(cache_path.read_bytes()).hexdigest()
+                rejected_path = rejected_dir / (
+                    f"{cache_path.stem}.attempt_{attempt + 1}.{payload_sha[:12]}.json"
+                )
+                cache_path.replace(rejected_path)
+                self._semantic_retry_count += 1
+                self._rejected_semantic_payloads.append(
+                    {
+                        "period_index": int(period_state["period_index"]),
+                        "payload_sha256": payload_sha,
+                        "relative_path": str(
+                            rejected_path.relative_to(self.cache_dir.parent)
+                        ),
+                        "reason": str(exc)[:500],
+                    }
+                )
+        raise AssertionError("unreachable semantic retry loop")
 
     def decision_panel(
         self,
@@ -687,6 +757,14 @@ class GainAdjustedDemandClient:
     @property
     def replayed_record_count(self) -> int:
         return int(getattr(self.base, "replayed_record_count", 0))
+
+    @property
+    def semantic_retry_count(self) -> int:
+        return int(getattr(self.base, "semantic_retry_count", 0))
+
+    @property
+    def rejected_semantic_payloads(self) -> list[dict[str, Any]]:
+        return list(getattr(self.base, "rejected_semantic_payloads", []))
 
     @property
     def raw_records(self) -> list[dict[str, Any]]:
@@ -2450,6 +2528,7 @@ def normalized_spec(
                 else None
             ),
             "replay_prefix_period_count": int(args.replay_prefix_period_count),
+            "semantic_retry_limit": int(args.semantic_retry_limit),
         },
         "period_overrides": {
             str(key): value for key, value in period_overrides.items()
@@ -2640,6 +2719,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise DynamicMacroError(
             "--replay-prefix-period-count is only valid in replay_live mode"
         )
+    if int(args.semantic_retry_limit) < 0:
+        raise DynamicMacroError("--semantic-retry-limit must be non-negative")
     if not math.isfinite(float(args.feedback_gain)) or float(args.feedback_gain) < 0.0:
         raise DynamicMacroError("--feedback-gain must be finite and non-negative")
     if (

@@ -17,6 +17,7 @@ from macro_llm_tournament.dynamic_macro_economy import (
     PERIODS_PER_YEAR,
     BundleView,
     DynamicMacroError,
+    ReplayThenLiveDemandClient,
     anchor_household_flows,
     apply_belief_gains,
     canonical_behavior_profile_sha256,
@@ -34,6 +35,7 @@ from macro_llm_tournament.frozen_vintage_bundle import (
     FixtureAlfredClient,
     build_frozen_vintage_bundle,
 )
+from macro_llm_tournament.llm_common import LLMUnavailable
 
 
 SERIES = (
@@ -282,6 +284,59 @@ def prompt_payloads(output_dir: Path, candidate: str) -> list[dict]:
 
 
 class DynamicMacroEconomyTests(unittest.TestCase):
+    def test_replay_live_semantic_retry_quarantines_bad_cached_payload(self) -> None:
+        records = [
+            {
+                "provider": "codex_cli",
+                "model": "gpt-5.5",
+                "variant": "llm_belief",
+                "scenario_id": "recursive_monthly_path",
+                "period_index": 0,
+                "cache_identity": {"state_identity_sha256": "state-0"},
+            }
+        ]
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            client = ReplayThenLiveDemandClient(
+                "codex_cli",
+                "gpt-5.5",
+                root / ".cache",
+                replay_records=records,
+                replay_prefix_period_count=1,
+                max_live_calls=3,
+                semantic_retry_limit=1,
+                execution_cwd=root / "provider_cwd",
+            )
+            bad_cache = root / ".cache" / "codex_cli" / "bad.json"
+            bad_cache.parent.mkdir(parents=True, exist_ok=True)
+            bad_cache.write_text('{"payload":{"beliefs":[]}}', encoding="utf-8")
+            valid = {"prompt_version": "test", "beliefs_by_type": {}}
+            with (
+                patch.object(client._live, "belief_cache_path", return_value=bad_cache),
+                patch.object(
+                    client._live,
+                    "belief_panel",
+                    side_effect=[
+                        LLMUnavailable(
+                            "Demand economy belief payload missing household type_ids: h"
+                        ),
+                        valid,
+                    ],
+                ),
+            ):
+                result = client._live_belief_panel_with_semantic_retry(
+                    DemandScenario("recursive_monthly_path", "test"),
+                    {"period_index": 1},
+                    [],
+                )
+            self.assertEqual(result, valid)
+            self.assertEqual(client.semantic_retry_count, 1)
+            self.assertFalse(bad_cache.exists())
+            self.assertEqual(
+                len(list((root / ".cache" / "rejected_semantic").glob("*.json"))),
+                1,
+            )
+
     def test_score_origin_range_keeps_warmup_path_but_excludes_it_from_scores(self) -> None:
         bundle = fixture_bundle()
         selected, contract = select_score_origins(

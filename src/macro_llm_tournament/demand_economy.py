@@ -373,6 +373,29 @@ class DemandEconomyClient:
             return f"{self.variant}_{prefix}_{self.model}{suffix}"
         return self.variant
 
+    def belief_cache_path(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> Path:
+        if self.variant != "llm_belief":
+            raise ValueError("Belief cache paths are only defined for llm_belief")
+        prompt_payload = belief_module_prompt_payload(
+            scenario, period_state, household_states, variant=self.variant
+        )
+        cache_name = (
+            "demand_belief_"
+            + cache_key(
+                {
+                    "provider": self.provider,
+                    "model": self.model,
+                    "prompt": prompt_payload,
+                }
+            )
+        )
+        return self._llm.cache_path(cache_name)
+
     def belief_panel(
         self,
         scenario: DemandScenario,
