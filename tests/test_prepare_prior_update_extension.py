@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 
 from macro_llm_tournament.combine_prior_update_panels import combine_prior_update_panels
+from macro_llm_tournament.persona_ecology import main as persona_ecology_main
+from macro_llm_tournament.persona_ecology import normalize_ecology_panel
 from macro_llm_tournament.prepare_prior_update_extension import (
     ENVIRONMENT_COLUMNS,
     ENVIRONMENT_PROVENANCE_V2,
@@ -132,6 +136,85 @@ class MonthlyEnvironmentTests(unittest.TestCase):
             build_monthly_environment(vintage, as_of_date="2024-12-15")
 
 
+class StrictEmpiricalInputTests(unittest.TestCase):
+    def test_normalized_panel_rejects_missing_empirical_priors_and_environment(self) -> None:
+        raw = pd.DataFrame(
+            [
+                {
+                    "respondent_id": "respondent_1",
+                    "period_id": "sce_2025_01",
+                    "period_index": 3,
+                    "survey_date": "2025-01-01",
+                    "weight": 1.0,
+                    "actual_expected_inflation_1y": 3.0,
+                    "actual_expected_unemployment_higher_prob": 35.0,
+                    "actual_expected_real_income_growth": 1.0,
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing required normalized empirical fields"):
+            normalize_ecology_panel(
+                raw,
+                survey_schema="normalized",
+                target_fields=(
+                    "expected_inflation_1y",
+                    "expected_unemployment_higher_prob",
+                    "expected_real_income_growth",
+                ),
+                strict_empirical_inputs=True,
+            )
+
+    def test_normalized_panel_rejects_nonnumeric_empirical_values(self) -> None:
+        raw = _base_extension().head(1).copy()
+        raw["prior_expected_inflation_1y"] = raw["prior_expected_inflation_1y"].astype(object)
+        raw.loc[:, "prior_expected_inflation_1y"] = "."
+
+        with self.assertRaisesRegex(ValueError, "missing required normalized empirical fields"):
+            normalize_ecology_panel(
+                raw,
+                survey_schema="normalized",
+                target_fields=(
+                    "expected_inflation_1y",
+                    "expected_unemployment_higher_prob",
+                    "expected_real_income_growth",
+                ),
+                strict_empirical_inputs=True,
+            )
+
+    def test_live_run_refuses_existing_output_directory_before_loading_inputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "existing_output"
+            output_dir.mkdir()
+            respondent_csv = root / "respondents.csv"
+            respondent_csv.write_text("invalid\nvalue\n", encoding="utf-8")
+            argv = [
+                "persona_ecology",
+                "--ecology-mode",
+                "live",
+                "--fresh-cache",
+                "--max-live-calls",
+                "1",
+                "--respondent-source",
+                "csv",
+                "--respondent-csv",
+                str(respondent_csv),
+                "--output-dir",
+                str(output_dir),
+            ]
+
+            try:
+                with patch.object(sys, "argv", argv):
+                    persona_ecology_main()
+            except (Exception, SystemExit) as exc:
+                message = str(exc)
+            else:
+                message = ""
+
+            self.assertIn("Refusing to reuse live output directory", message)
+
+
 class ExtensionInputTests(unittest.TestCase):
     def setUp(self) -> None:
         self.environment = build_monthly_environment(_synthetic_vintage(), as_of_date="2024-12-15")
@@ -208,6 +291,39 @@ class CombinePriorUpdatePanelsTests(unittest.TestCase):
             self.assertEqual(set(predictions["source"]), {"llm_codex_cli_gpt-5.5"})
             self.assertEqual(manifest["prior_update_evidence"], {"note": "test note"})
             self.assertIn("source_artifacts", manifest)
+
+    def test_combiner_intersects_all_extension_respondent_sets(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            bank_dir = root / "bank"
+            december_dir = root / "december"
+            january_dir = root / "january"
+            output_dir = root / "combined"
+            _write_run(
+                bank_dir,
+                respondents=["respondent_a", "respondent_b", "respondent_c"],
+                periods=[("sce_2024_10", 0), ("sce_2024_11", 1)],
+            )
+            _write_run(
+                december_dir,
+                respondents=["respondent_a", "respondent_b"],
+                periods=[("sce_2024_12", 2)],
+            )
+            _write_run(
+                january_dir,
+                respondents=["respondent_a"],
+                periods=[("sce_2025_01", 3)],
+            )
+
+            result = combine_prior_update_panels(
+                bank_dir=bank_dir,
+                extension_dirs=[december_dir, january_dir],
+                primary_source="llm_codex_cli_gpt-5.5",
+                output_dir=output_dir,
+            )
+
+            self.assertEqual(result["respondent_count"], 1)
+            self.assertEqual(result["period_count"], 4)
 
 
 def _write_run(

@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: test fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay prior-update-extension-v2-inputs prior-update-dec2024-v2-live prior-update-jan2025-v2-live macro-tournament-dev macro-tournament-dev-v2 macro-incumbent-v1 macro-confirmatory-v1 phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: check test all fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay prior-update-extension-v2-inputs prior-update-dec2024-v2-live prior-update-jan2025-v2-live macro-tournament-dev macro-tournament-dev-v2 macro-incumbent-v1 macro-confirmatory-v1 phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 # Current milestone
 macro-incumbent-v1:
@@ -19,8 +19,16 @@ macro-confirmatory-v1:
 		--output-dir outputs/macro_confirmatory_fred_2026_02_v1
 
 # Core utilities and forecast gates
+check:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q src tests
+	@for file in $$(git ls-files '*.json'); do python3 -m json.tool "$$file" >/dev/null || exit 1; done
+	@python3 -c 'import json, pathlib, subprocess; [json.loads(line) for name in subprocess.check_output(["git", "ls-files", "*.jsonl"], text=True).splitlines() for line in pathlib.Path(name).read_text(encoding="utf-8").splitlines() if line.strip()]'
+	git diff --check
+
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+all: check test
 
 fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.forecast_tournament \
@@ -467,6 +475,7 @@ macro-performance-fixture: demand-economy-fixture demand-vintage-oos-fixture
 		--output-dir outputs/macro_performance_gate_fixture
 
 macro-validity-scorecard:
+	@echo "Legacy mechanism-readiness scorecard: OOS readiness rows are static. Use macro-performance-fixture for executable OOS checks."
 	@test -d "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" || { echo "Missing $(DEMAND_ECONOMY_REPLAY_OUTPUT). Run demand-economy-live-replay with a fresh DEMAND_ECONOMY_REPLAY_OUTPUT first."; exit 2; }
 	PYTHONPATH=src python3 -m macro_llm_tournament.macro_validity \
 		--demand-run-dir "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" \

@@ -99,7 +99,7 @@
       "mean_llm_rmse_scaled": 2.1202317127701313
     }
   ],
-  "claim_scope": "locked_confirmatory_score_once",
+  "claim_scope": "one_shot_held_out_current_vintage_diagnostic",
   "confirmatory_surface_keys": [
     "179b1711b512802cfc178488dbb005a64a7f2a396e6c531b65edd16c114c7782"
   ],
@@ -107,7 +107,22 @@
   "mapping_sha256_by_surface": {
     "fresh_fred_2026_02_confirmatory": "a30be7d0d8aa5fc14538c2fa3b4fa50cd19bf7124ed3950e1eb2a533a28114ba"
   },
+  "integrity_review": {
+    "reviewed_at": "2026-07-09",
+    "status": "downgraded_from_confirmatory",
+    "reasons": [
+      "FRED inputs were current observations retrieved after the score date, not frozen real-time vintages",
+      "the belief panel used hold_last from December 2024",
+      "four available targets were scored with one observation each",
+      "the spec, lock implementation, registry, and result entered git together",
+      "the original spent key was renameable and was written only after scoring"
+    ],
+    "score_arithmetic_status": "preserved_and_locally_reproduced",
+    "future_use": "The 2026-02-15 score date remains spent and must not be used for tuning or a new claim."
+  },
   "normalized_spec_sha256": "ceb04eedd75428da977d6c0ed0806530311a352b5560800d4ce11c1ee8f354db",
+  "original_scoring_label": "confirmatory",
+  "original_verdict": "macro_tournament_confirmatory_scored",
   "per_target_score_rows": [
     {
       "candidate_id": "cand_43e7c5658975",
@@ -293,7 +308,7 @@
       "2026-02-15"
     ]
   },
-  "scoring_label": "confirmatory",
+  "scoring_label": "held_out_current_vintage_diagnostic",
   "source_artifacts": [
     "macro_tournament_spec.normalized.json",
     "manifest.json",
@@ -309,7 +324,7 @@
     "normalized_spec_sha256": "ceb04eedd75428da977d6c0ed0806530311a352b5560800d4ce11c1ee8f354db",
     "output_dir": "outputs/macro_confirmatory_fred_2026_02_v1",
     "recorded_at_utc": "2026-07-09T01:39:55.754456+00:00",
-    "registry_path": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/reports/macro_tournament_confirmatory_registry.json",
+    "registry_path": "reports/macro_tournament_confirmatory_registry.json",
     "run_id": "macro_confirmatory_fred_2026_02_v1",
     "scored_asof_dates_by_surface": {
       "fresh_fred_2026_02_confirmatory": [
@@ -328,7 +343,7 @@
     "winner_mean_llm_rmse_scaled": 2.1202317127701313
   },
   "status": "ok",
-  "verdict": "macro_tournament_confirmatory_scored",
+  "verdict": "held_out_current_vintage_diagnostic_scored",
   "winner_candidate_id": "cand_0b1796192102",
   "winner_mean_llm_rmse_scaled": 2.1202317127701313
 }

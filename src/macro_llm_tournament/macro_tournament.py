@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import itertools
 import json
+import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -94,39 +97,63 @@ def run_tournament(spec: dict[str, Any], *, args: argparse.Namespace, output_dir
     normalized_spec = normalize_spec(spec)
     candidates = expand_candidates(spec)
     surfaces = [prepare_surface(surface, spec=spec) for surface in spec["surfaces"]]
+    behavior_profile_cache: dict[tuple[Any, ...], dict[str, Any] | None] = {}
     manifest = base_manifest(spec, args=args, normalized_spec=normalized_spec, candidates=candidates, surfaces=surfaces)
+    if (
+        spec_scoring_label(spec) == "confirmatory"
+        and not bool(getattr(args, "allow_test_unfrozen_confirmatory", False))
+        and manifest["git"].get("dirty") is not False
+    ):
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: clean git state is required")
+    manifest["behavior_profiles_by_candidate"] = preload_behavior_profiles(
+        candidates,
+        surfaces,
+        spec=spec,
+        cache=behavior_profile_cache,
+    )
+    reservation: dict[str, Any] | None = None
+    if spec_scoring_label(spec) == "confirmatory":
+        reservation = reserve_confirmatory_surfaces(spec, output_dir=output_dir, manifest=manifest)
+        manifest["confirmatory_registry_record"] = reservation
     candidate_rows: list[dict[str, Any]] = []
     score_rows: list[dict[str, Any]] = []
     accounting_rows: list[dict[str, Any]] = []
-    behavior_profile_cache: dict[tuple[Any, ...], dict[str, Any] | None] = {}
 
-    for index, candidate in enumerate(candidates, start=1):
-        candidate_result = score_candidate(candidate, surfaces, spec=spec, behavior_profile_cache=behavior_profile_cache)
-        candidate_rows.append(candidate_result["summary"])
-        score_rows.extend(candidate_result["scores"])
-        accounting_rows.extend(candidate_result["accounting"])
-        if index == 1 or index % 100 == 0 or index == len(candidates):
-            print(f"macro_tournament progress: {index}/{len(candidates)} candidates", file=sys.stderr, flush=True)
+    try:
+        for index, candidate in enumerate(candidates, start=1):
+            candidate_result = score_candidate(candidate, surfaces, spec=spec, behavior_profile_cache=behavior_profile_cache)
+            candidate_rows.append(candidate_result["summary"])
+            score_rows.extend(candidate_result["scores"])
+            accounting_rows.extend(candidate_result["accounting"])
+            if index == 1 or index % 100 == 0 or index == len(candidates):
+                print(f"macro_tournament progress: {index}/{len(candidates)} candidates", file=sys.stderr, flush=True)
 
-    candidate_table = pd.DataFrame(candidate_rows)
-    score_table = pd.DataFrame(score_rows)
-    accounting_table = pd.DataFrame(accounting_rows)
-    winner = select_winner(candidate_table)
-    verdict = "macro_tournament_confirmatory_scored" if spec_scoring_label(spec) == "confirmatory" else "macro_tournament_development_scored"
-    manifest.update(
-        {
-            "status": "ok",
-            "verdict": verdict,
-            "winner_candidate_id": winner.get("candidate_id"),
-            "winner_mean_llm_rmse_scaled": winner.get("mean_llm_rmse_scaled"),
-            "winner_behavior_mechanism": winner.get("behavior_mechanism"),
-            "winner_is_incumbent": winner.get("is_incumbent"),
-            "winner_is_promoted_incumbent": winner.get("is_promoted_incumbent"),
-            "disqualified_candidates": int(candidate_table["disqualified"].sum()) if not candidate_table.empty else 0,
-            "outputs": output_filenames(),
-        }
-    )
-    report = build_report(manifest, candidate_table, score_table)
+        candidate_table = pd.DataFrame(candidate_rows)
+        score_table = pd.DataFrame(score_rows)
+        accounting_table = pd.DataFrame(accounting_rows)
+        if spec_scoring_label(spec) == "confirmatory":
+            validate_confirmatory_candidate_results(candidate_table, spec)
+            validate_confirmatory_score_results(score_table, spec)
+        winner = select_winner(candidate_table)
+        verdict = "macro_tournament_confirmatory_scored" if spec_scoring_label(spec) == "confirmatory" else "macro_tournament_development_scored"
+        manifest.update(
+            {
+                "status": "ok",
+                "verdict": verdict,
+                "winner_candidate_id": winner.get("candidate_id"),
+                "winner_mean_llm_rmse_scaled": winner.get("mean_llm_rmse_scaled"),
+                "winner_behavior_mechanism": winner.get("behavior_mechanism"),
+                "winner_is_incumbent": winner.get("is_incumbent"),
+                "winner_is_promoted_incumbent": winner.get("is_promoted_incumbent"),
+                "disqualified_candidates": int(candidate_table["disqualified"].sum()) if not candidate_table.empty else 0,
+                "outputs": output_filenames(),
+            }
+        )
+        report = build_report(manifest, candidate_table, score_table)
+    except Exception as exc:
+        if reservation is not None:
+            fail_confirmatory_reservation(reservation, status="failed_after_reservation", error=str(exc))
+        raise
     return {
         "normalized_spec": normalized_spec,
         "manifest": manifest,
@@ -190,11 +217,27 @@ def validate_confirmatory_spec(spec: dict[str, Any], *, args: argparse.Namespace
     score_date = pd.Timestamp(score_dates[0])
     if score_date < start or score_date > end:
         raise ValueError(CONFIRMATORY_LOCK_ERROR)
-    registry = load_confirmatory_registry(confirmatory_registry_path(spec))
-    spent = set(registry.get("spent_surface_keys", []))
+    registry_path = confirmatory_registry_path(spec)
+    if registry_path.resolve() != DEFAULT_CONFIRMATORY_REGISTRY.resolve():
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
+    registry = load_confirmatory_registry(registry_path)
+    spent = confirmatory_spent_keys(registry)
     keys = confirmatory_surface_keys(spec)
     if spent.intersection(keys):
         raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: surface already spent")
+    if not bool(getattr(args, "allow_test_unfrozen_confirmatory", False)):
+        raise ValueError(
+            f"{CONFIRMATORY_LOCK_ERROR}: frozen vintage inputs are required and the production loader is not implemented"
+        )
+    required_targets = spec.get("required_target_names")
+    if (
+        not isinstance(required_targets, list)
+        or not required_targets
+        or any(not isinstance(target, str) or not target for target in required_targets)
+        or len(set(required_targets)) != len(required_targets)
+        or "ALL" in required_targets
+    ):
+        raise ValueError(CONFIRMATORY_LOCK_ERROR)
 
 
 def normalize_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -303,6 +346,9 @@ def prepare_surface(surface: dict[str, Any], *, spec: dict[str, Any]) -> dict[st
     ecology_bundle = load_persona_ecology_bundle(surface_args) if surface_args.belief_source == "persona_ecology_replay" else None
     households = load_phase4_households(surface_args, ecology_bundle=ecology_bundle)
     period_count = max(int(surface_args.period_count), len(cards) + 1, 2)
+    scoring_targets = phase4_scoring_targets(targets, mapping)
+    if spec_scoring_label(spec) == "confirmatory":
+        validate_confirmatory_target_set(scoring_targets, spec)
     return {
         "surface_id": str(surface["surface_id"]),
         "surface_spec": surface,
@@ -312,9 +358,24 @@ def prepare_surface(surface: dict[str, Any], *, spec: dict[str, Any]) -> dict[st
         "mapping_sha256": mapping_sha256(mapping_payload),
         "cards": cards,
         "cards_frame": cards_to_frame(cards),
-        "targets": phase4_scoring_targets(targets, mapping),
+        "targets": scoring_targets,
         "context": context,
         "data_status": data_status,
+        "input_hashes": {
+            "proxy_frames_sha256": {
+                str(series_id): dataframe_sha256(frame)
+                for series_id, frame in sorted(frames.items())
+            },
+            "persona_ecology_manifest_sha256": (
+                ecology_bundle.get("manifest_sha256") if ecology_bundle else None
+            ),
+            "persona_ecology_panel_sha256": (
+                ecology_bundle.get("panel_sha256") if ecology_bundle else None
+            ),
+            "persona_ecology_predictions_sha256": (
+                ecology_bundle.get("predictions_sha256") if ecology_bundle else None
+            ),
+        },
         "ecology_bundle": ecology_bundle,
         "households": households,
         "period_count": period_count,
@@ -340,6 +401,161 @@ def surface_score_asof_dates(surface: dict[str, Any]) -> list[str]:
     if not isinstance(raw, list):
         raise ValueError("score_asof_dates must be a list")
     return [pd.Timestamp(value).date().isoformat() for value in raw]
+
+
+def validate_confirmatory_target_set(targets: pd.DataFrame, spec: dict[str, Any]) -> None:
+    required = {str(value) for value in spec.get("required_target_names", [])}
+    required_columns = {"target_name", "target_available", "target_value", "as_of_date"}
+    if not required_columns.issubset(targets.columns):
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: missing required targets: malformed target table")
+    rows = targets.copy()
+    actual = set(rows["target_name"].astype(str))
+    if actual != required:
+        missing = sorted(required - actual)
+        extra = sorted(actual - required)
+        details = []
+        if missing:
+            details.append(f"missing={','.join(missing)}")
+        if extra:
+            details.append(f"undeclared={','.join(extra)}")
+        raise ValueError(
+            f"{CONFIRMATORY_LOCK_ERROR}: target contract mismatch: {'; '.join(details)}"
+        )
+    rows["target_value"] = pd.to_numeric(rows["target_value"], errors="coerce")
+    valid = rows[
+        rows["target_available"].astype(bool)
+        & rows["target_value"].map(np.isfinite)
+    ]
+    row_counts = rows.groupby(rows["target_name"].astype(str)).size()
+    valid_counts = valid.groupby(valid["target_name"].astype(str)).size()
+    missing = sorted(
+        target
+        for target in required
+        if int(row_counts.get(target, 0)) != 1 or int(valid_counts.get(target, 0)) != 1
+    )
+    if rows["as_of_date"].astype(str).nunique() != 1:
+        missing.append("single_score_date_contract")
+    if missing:
+        raise ValueError(
+            f"{CONFIRMATORY_LOCK_ERROR}: missing required targets: {', '.join(missing)}"
+        )
+
+
+def validate_confirmatory_candidate_results(candidate_table: pd.DataFrame, spec: dict[str, Any]) -> None:
+    expected_candidates = len(spec.get("candidate_list", []))
+    expected_surfaces = len(spec.get("surfaces", []))
+    complete = (
+        candidate_table.shape[0] == expected_candidates
+        and not candidate_table.empty
+        and not candidate_table["disqualified"].astype(bool).any()
+        and candidate_table["surface_count"].astype(int).eq(expected_surfaces).all()
+    )
+    if not complete:
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: incomplete candidate comparison")
+
+
+def validate_confirmatory_score_results(score_table: pd.DataFrame, spec: dict[str, Any]) -> None:
+    required_columns = {"candidate_id", "source", "target_name", "rmse_scaled", "n"}
+    if not required_columns.issubset(score_table.columns):
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: incomplete score rows")
+    required_targets = {str(value) for value in spec.get("required_target_names", [])}
+    expected_candidates = {
+        str(candidate.get("candidate_id"))
+        for candidate in spec.get("candidate_list", [])
+    }
+    target_names = set(score_table["target_name"].astype(str))
+    scored_targets = target_names - {"ALL"}
+    actual_candidates = set(score_table["candidate_id"].astype(str))
+    if scored_targets != required_targets or target_names != required_targets | {"ALL"}:
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: score target contract mismatch")
+    if actual_candidates != expected_candidates:
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: incomplete score rows")
+    rows = score_table.copy()
+    rows["rmse_scaled"] = pd.to_numeric(rows["rmse_scaled"], errors="coerce")
+    rows["n"] = pd.to_numeric(rows["n"], errors="coerce")
+    complete = True
+    for candidate_id in expected_candidates:
+        candidate_rows = rows[
+            rows["candidate_id"].astype(str).eq(candidate_id)
+            & rows["rmse_scaled"].map(np.isfinite)
+        ]
+        for target_name in required_targets:
+            target_rows = candidate_rows[
+                candidate_rows["target_name"].astype(str).eq(target_name)
+                & candidate_rows["n"].eq(1)
+            ]
+            adaptive_count = int(target_rows["source"].astype(str).eq("adaptive").sum())
+            llm_count = int((~target_rows["source"].astype(str).eq("adaptive")).sum())
+            if adaptive_count != 1 or llm_count != 1:
+                complete = False
+        overall_rows = candidate_rows[candidate_rows["target_name"].astype(str).eq("ALL")]
+        valid_overall = overall_rows["n"].eq(len(required_targets))
+        adaptive_count = int(
+            (valid_overall & overall_rows["source"].astype(str).eq("adaptive")).sum()
+        )
+        llm_count = int(
+            (valid_overall & ~overall_rows["source"].astype(str).eq("adaptive")).sum()
+        )
+        if adaptive_count != 1 or llm_count != 1:
+            complete = False
+    if not complete:
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: incomplete score rows")
+
+
+def locked_confirmatory_scoring_inputs(
+    forecasts: pd.DataFrame,
+    targets: pd.DataFrame,
+    spec: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    validate_confirmatory_target_set(targets, spec)
+    required_targets = {str(value) for value in spec["required_target_names"]}
+    locked_forecasts = forecasts[
+        forecasts["target_name"].astype(str).isin(required_targets)
+    ].copy()
+    locked_targets = targets[
+        targets["target_name"].astype(str).isin(required_targets)
+    ].copy()
+    return locked_forecasts, locked_targets
+
+
+def dataframe_sha256(frame: pd.DataFrame) -> str:
+    canonical = frame.copy()
+    canonical = canonical.reindex(sorted(canonical.columns), axis=1)
+    if not canonical.empty:
+        canonical = canonical.sort_values(list(canonical.columns), kind="mergesort").reset_index(drop=True)
+    encoded = canonical.to_csv(
+        index=False,
+        lineterminator="\n",
+        date_format="%Y-%m-%dT%H:%M:%S",
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def git_metadata() -> dict[str, Any]:
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=PROJECT_ROOT,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        )
+        return {"commit": commit, "branch": branch, "dirty": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "branch": None, "dirty": None}
 
 
 def namespace_for_surface(surface: dict[str, Any], *, spec: dict[str, Any], candidate: Candidate | None) -> SimpleNamespace:
@@ -457,7 +673,14 @@ def run_candidate_surface(
     periods_frame = pd.concat(all_periods, ignore_index=True)
     accounting_frame = pd.concat(all_accounting, ignore_index=True)
     forecasts = economy_proxy_forecasts(periods_frame, surface["cards"], surface["mapping"])
-    scores, _joined = score_proxy_forecasts(forecasts, surface["targets"])
+    scoring_targets = surface["targets"]
+    if spec_scoring_label(spec) == "confirmatory":
+        forecasts, scoring_targets = locked_confirmatory_scoring_inputs(
+            forecasts,
+            scoring_targets,
+            spec,
+        )
+    scores, _joined = score_proxy_forecasts(forecasts, scoring_targets)
     score_rows = decorate_score_rows(scores, candidate, surface, behavior_profile)
     accounting_rows = decorate_accounting_rows(accounting_frame, decisions_frame, candidate, surface)
     return {"scores": score_rows, "accounting": accounting_rows, "beliefs": beliefs_frame}
@@ -477,6 +700,26 @@ def cached_behavior_policy_profile(
     if key not in cache:
         cache[key] = load_phase4_behavior_policy_profile(args)
     return cache[key]
+
+
+def preload_behavior_profiles(
+    candidates: list[Candidate],
+    surfaces: list[dict[str, Any]],
+    *,
+    spec: dict[str, Any],
+    cache: dict[tuple[Any, ...], dict[str, Any] | None],
+) -> dict[str, Any]:
+    if not surfaces:
+        return {}
+    manifests: dict[str, Any] = {}
+    for candidate in candidates:
+        args = namespace_for_surface(surfaces[0]["surface_spec"], spec=spec, candidate=candidate)
+        profile = cached_behavior_policy_profile(args, cache)
+        manifests[candidate.candidate_id] = behavior_policy_manifest(
+            profile,
+            mode=behavior_mode_for_candidate(candidate.payload),
+        )
+    return manifests
 
 
 def decorate_score_rows(
@@ -659,7 +902,7 @@ def base_manifest(
         "scoring_label": scoring_label,
         "confirmatory_surface_policy": spec.get("confirmatory_surface_policy"),
         "confirmatory_lock": bool(spec.get("confirmatory_lock", False)),
-        "confirmatory_spent_registry_path": str(confirmatory_registry_path(spec)),
+        "confirmatory_spent_registry_path": repo_relative_path(confirmatory_registry_path(spec)),
         "confirmatory_surface_keys": confirmatory_surface_keys(spec) if scoring_label == "confirmatory" else [],
         "spec_path": spec.get("spec_path"),
         "spec_sha256": spec.get("spec_sha256"),
@@ -669,6 +912,11 @@ def base_manifest(
         "surface_ids": [surface["surface_id"] for surface in surfaces],
         "scored_asof_dates_by_surface": {surface["surface_id"]: surface["scored_asof_dates"] for surface in surfaces},
         "mapping_sha256_by_surface": {surface["surface_id"]: surface["mapping_sha256"] for surface in surfaces},
+        "input_hashes_by_surface": {
+            surface["surface_id"]: surface["input_hashes"]
+            for surface in surfaces
+        },
+        "git": git_metadata(),
     }
 
 
@@ -730,20 +978,30 @@ def tournament_bottom_line(winner_rows: pd.DataFrame, incumbent: pd.DataFrame) -
 
 
 def write_tournament_outputs(output_dir: Path, result: dict[str, Any]) -> None:
-    if result["manifest"].get("scoring_label") == "confirmatory":
-        result["manifest"]["confirmatory_registry_record"] = build_confirmatory_registry_record(output_dir, result)
-    (output_dir / "macro_tournament_spec.normalized.json").write_text(
-        json.dumps(result["normalized_spec"], indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    (output_dir / "manifest.json").write_text(json.dumps(result["manifest"], indent=2, sort_keys=True), encoding="utf-8")
-    result["candidate_table"].to_csv(output_dir / "macro_tournament_candidates.csv", index=False)
-    result["score_table"].to_csv(output_dir / "macro_tournament_scores.csv", index=False)
-    result["accounting_table"].to_csv(output_dir / "macro_tournament_accounting.csv", index=False)
-    (output_dir / "winner_manifest.json").write_text(json.dumps(result["winner"], indent=2, sort_keys=True), encoding="utf-8")
-    (output_dir / "macro_tournament_report.md").write_text(result["report"], encoding="utf-8")
-    if result["manifest"].get("scoring_label") == "confirmatory":
-        mark_confirmatory_surfaces_spent(result["manifest"]["confirmatory_registry_record"])
+    reservation = result["manifest"].get("confirmatory_registry_record")
+    try:
+        (output_dir / "macro_tournament_spec.normalized.json").write_text(
+            json.dumps(result["normalized_spec"], indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        (output_dir / "manifest.json").write_text(json.dumps(result["manifest"], indent=2, sort_keys=True), encoding="utf-8")
+        result["candidate_table"].to_csv(output_dir / "macro_tournament_candidates.csv", index=False)
+        result["score_table"].to_csv(output_dir / "macro_tournament_scores.csv", index=False)
+        result["accounting_table"].to_csv(output_dir / "macro_tournament_accounting.csv", index=False)
+        (output_dir / "winner_manifest.json").write_text(json.dumps(result["winner"], indent=2, sort_keys=True), encoding="utf-8")
+        (output_dir / "macro_tournament_report.md").write_text(result["report"], encoding="utf-8")
+        if result["manifest"].get("scoring_label") == "confirmatory":
+            completed = complete_confirmatory_reservation(reservation, result)
+            result["manifest"]["confirmatory_registry_record"] = completed
+            atomic_write_json(output_dir / "manifest.json", result["manifest"])
+    except Exception as exc:
+        if reservation is not None:
+            fail_confirmatory_reservation(
+                reservation,
+                status="output_incomplete",
+                error=str(exc),
+            )
+        raise
 
 
 def spec_scoring_label(spec: dict[str, Any]) -> str:
@@ -766,16 +1024,27 @@ def confirmatory_surface_keys(spec: dict[str, Any]) -> list[str]:
         for score_date in surface_score_asof_dates(surface):
             payload = {
                 "schema_version": TOURNAMENT_VERSION,
-                "surface_id": str(surface.get("surface_id")),
                 "data_mode": str(surface.get("data_mode", "fred")),
-                "cutoff_date": str(surface.get("cutoff_date", "2025-12-01")),
-                "asof_start": str(surface.get("asof_start")),
-                "asof_end": str(surface.get("asof_end")),
                 "score_asof_date": score_date,
-                "scoreable_only": bool(surface.get("scoreable_only")),
             }
             keys.append(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest())
     return keys
+
+
+def confirmatory_spent_keys(registry: dict[str, Any]) -> set[str]:
+    spent = {str(value) for value in registry.get("spent_surface_keys", [])}
+    for record in registry.get("records", []):
+        if not isinstance(record, dict):
+            continue
+        for score_dates in record.get("scored_asof_dates_by_surface", {}).values():
+            for score_date in score_dates:
+                payload = {
+                    "schema_version": TOURNAMENT_VERSION,
+                    "data_mode": "fred",
+                    "score_asof_date": pd.Timestamp(score_date).date().isoformat(),
+                }
+                spent.add(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest())
+    return spent
 
 
 def load_confirmatory_registry(path: Path) -> dict[str, Any]:
@@ -785,11 +1054,32 @@ def load_confirmatory_registry(path: Path) -> dict[str, Any]:
             "spent_surface_keys": [],
             "records": [],
         }
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Malformed confirmatory registry: {path}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Malformed confirmatory registry: {path}")
     if data.get("schema_version") != CONFIRMATORY_REGISTRY_VERSION:
         raise ValueError(f"Unsupported confirmatory registry schema_version: {data.get('schema_version')!r}")
-    data.setdefault("spent_surface_keys", [])
-    data.setdefault("records", [])
+    spent_surface_keys = data.setdefault("spent_surface_keys", [])
+    records = data.setdefault("records", [])
+    if not isinstance(spent_surface_keys, list) or any(
+        not isinstance(value, str) or not value for value in spent_surface_keys
+    ):
+        raise ValueError(f"Malformed confirmatory registry: {path}")
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise ValueError(f"Malformed confirmatory registry: {path}")
+    reservation_ids = []
+    for record in records:
+        if "reservation_id" not in record:
+            continue
+        reservation_id = record["reservation_id"]
+        if not isinstance(reservation_id, str) or not reservation_id:
+            raise ValueError(f"Malformed confirmatory registry: {path}")
+        reservation_ids.append(reservation_id)
+    if len(reservation_ids) != len(set(reservation_ids)):
+        raise ValueError(f"Malformed confirmatory registry: duplicate reservation_id in {path}")
     return data
 
 
@@ -811,18 +1101,139 @@ def build_confirmatory_registry_record(output_dir: Path, result: dict[str, Any])
     }
 
 
-def mark_confirmatory_surfaces_spent(record: dict[str, Any]) -> None:
-    registry_path = Path(str(record.get("registry_path") or DEFAULT_CONFIRMATORY_REGISTRY))
+def reserve_confirmatory_surfaces(
+    spec: dict[str, Any],
+    *,
+    output_dir: Path,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    registry_path = confirmatory_registry_path(spec)
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-    registry = load_confirmatory_registry(registry_path)
-    spent = set(str(value) for value in registry.get("spent_surface_keys", []))
-    new_keys = [str(value) for value in record.get("surface_keys", [])]
-    duplicate = spent.intersection(new_keys)
-    if duplicate:
-        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: surface already spent")
-    registry["spent_surface_keys"] = sorted(spent | set(new_keys))
-    registry.setdefault("records", []).append(record)
-    registry_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+    keys = confirmatory_surface_keys(spec)
+    reservation_id = hashlib.sha256(
+        json.dumps(
+            {
+                "run_id": spec.get("run_id"),
+                "score_keys": keys,
+                "spec_sha256": spec.get("spec_sha256"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    with registry_lock(registry_path):
+        registry = load_confirmatory_registry(registry_path)
+        if confirmatory_spent_keys(registry).intersection(keys):
+            raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: surface already spent")
+        record = {
+            "reservation_id": reservation_id,
+            "status": "reserved_before_scoring",
+            "reserved_at_utc": datetime.now(timezone.utc).isoformat(),
+            "run_id": spec.get("run_id"),
+            "output_dir": repo_relative_path(output_dir),
+            "spec_path": spec.get("spec_path"),
+            "spec_sha256": spec.get("spec_sha256"),
+            "normalized_spec_sha256": manifest.get("normalized_spec_sha256"),
+            "registry_path": repo_relative_path(registry_path),
+            "git": manifest.get("git"),
+            "mapping_sha256_by_surface": manifest.get("mapping_sha256_by_surface"),
+            "input_hashes_by_surface": manifest.get("input_hashes_by_surface"),
+            "behavior_profiles_by_candidate": manifest.get("behavior_profiles_by_candidate"),
+            "scored_asof_dates_by_surface": {
+                str(surface.get("surface_id")): surface_score_asof_dates(surface)
+                for surface in spec.get("surfaces", [])
+            },
+            "surface_keys": keys,
+        }
+        registry["spent_surface_keys"] = sorted(
+            {str(value) for value in registry.get("spent_surface_keys", [])} | set(keys)
+        )
+        registry.setdefault("records", []).append(record)
+        atomic_write_json(registry_path, registry)
+    return record
+
+
+def complete_confirmatory_reservation(record: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    registry_path = path_from_registry_record(record)
+    with registry_lock(registry_path):
+        registry = load_confirmatory_registry(registry_path)
+        reservation_id = str(record.get("reservation_id"))
+        matches = [
+            item
+            for item in registry.get("records", [])
+            if isinstance(item, dict) and str(item.get("reservation_id")) == reservation_id
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: reservation record missing or duplicated")
+        completed = build_confirmatory_registry_record(Path(record["output_dir"]), result)
+        matches[0].update(completed)
+        matches[0]["reservation_id"] = reservation_id
+        matches[0]["status"] = "completed"
+        matches[0]["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        matches[0]["registry_path"] = repo_relative_path(registry_path)
+        atomic_write_json(registry_path, registry)
+        return dict(matches[0])
+
+
+def fail_confirmatory_reservation(
+    record: dict[str, Any],
+    *,
+    status: str,
+    error: str,
+) -> None:
+    registry_path = path_from_registry_record(record)
+    with registry_lock(registry_path):
+        registry = load_confirmatory_registry(registry_path)
+        reservation_id = str(record.get("reservation_id"))
+        matches = [
+            item
+            for item in registry.get("records", [])
+            if isinstance(item, dict) and str(item.get("reservation_id")) == reservation_id
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: reservation record missing or duplicated")
+        matches[0]["status"] = status
+        matches[0]["failed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        matches[0]["error"] = error
+        atomic_write_json(registry_path, registry)
+
+
+def path_from_registry_record(record: dict[str, Any]) -> Path:
+    raw = record.get("registry_path")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError(f"{CONFIRMATORY_LOCK_ERROR}: reservation record has no registry path")
+    path = Path(raw)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+class registry_lock:
+    def __init__(self, registry_path: Path):
+        self.path = registry_path.with_suffix(registry_path.suffix + ".lock")
+        self.handle: Any = None
+
+    def __enter__(self) -> None:
+        self.handle = self.path.open("a+", encoding="utf-8")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        if self.handle is not None:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def repo_relative_path(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(resolved)
 
 
 def output_filenames() -> list[str]:

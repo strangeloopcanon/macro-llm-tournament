@@ -82,8 +82,9 @@ def combine_prior_update_panels(
     respondent_ids = set(extensions[0]["panel"]["respondent_id"].astype(str))
     for extension in extensions[1:]:
         ids = set(extension["panel"]["respondent_id"].astype(str))
-        if not ids.issubset(respondent_ids):
-            respondent_ids = respondent_ids & ids
+        respondent_ids &= ids
+    if not respondent_ids:
+        raise ValueError("Extension runs have no common respondents")
 
     panels: list[pd.DataFrame] = []
     predictions: list[pd.DataFrame] = []

@@ -1,5 +1,11 @@
 # Macro LLM Simulation: Research Retrospective
 
+**Status:** Historical experiment log through the first aligned Phase 4 runs.
+For the current evidence verdict, use
+[`macro_simulation_report.md`](macro_simulation_report.md). A July 2026
+integrity review downgraded the February score from confirmatory to a one-shot
+held-out current-vintage diagnostic.
+
 This is the project log behind the current report. It tracks what we tested, what broke, what survived, and why the architecture moved.
 
 ## The Current Shape
@@ -154,7 +160,7 @@ Status: keep as a promising diagnostic, not final validation. The aligned econom
 8. Deterministic execution remains non-negotiable: budgets, feasibility, accounting, and aggregation belong in code.
 9. Bridge stabilization helps but does not solve the problem alone.
 10. Horizon alignment is load-bearing. The first aligned retrospective Phase 4 replay beats the adaptive twin, but its added belief-update leg does not clear persistence.
-11. The macro-simulation claim is still open. We have a retrospective end-to-end positive, not a confirmatory one.
+11. The macro-simulation claim is unvalidated. We have a retrospective end-to-end positive and a negative held-out diagnostic, not a valid real-time-vintage confirmation.
 
 ## What Should Happen Next
 
@@ -162,6 +168,6 @@ The next real test needs new evidence, not more reuse of spent holdouts.
 
 1. Treat v5 as the current stabilized bridge and stop tuning it against Phase 4.
 2. Build a longer same-horizon SCE prior-update panel that clears the prior-update gate.
-3. Run the next Phase 4 comparison as confirmatory only after the panel horizon, belief replay horizon, behavior executor, bridge, and target mapping are all fixed in the manifest.
+3. Run the next Phase 4 comparison as confirmatory only after the panel horizon, belief replay horizon, behavior executor, bridge, target mapping, complete target set, and frozen input hashes are committed before scoring.
 4. Freeze CTC, lottery, and UI for mechanism evaluation; any new behavior promotion needs a new family.
-5. Keep the Phase 4 v2 FRED mapping locked until the next newly scoreable month.
+5. Keep the Phase 4 v2 mapping locked and use frozen ALFRED/release-aware inputs for the next newly scoreable month.

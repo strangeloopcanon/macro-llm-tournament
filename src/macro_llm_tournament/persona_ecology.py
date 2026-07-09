@@ -211,6 +211,11 @@ def main() -> int:
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_ROOT / f"persona_ecology_{timestamp}"
+    if args.ecology_mode == "live":
+        try:
+            output_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise SystemExit(f"Refusing to reuse live output directory: {output_dir}") from exc
     cache_dir = output_dir / "fresh_persona_ecology_cache" if args.fresh_cache else WORK_ROOT / "persona_ecology_cache"
     respondent_csv = Path(args.respondent_csv) if args.respondent_csv else None
     panel = load_ecology_panel(
@@ -221,6 +226,7 @@ def main() -> int:
         period_count=args.period_count,
         survey_start=args.survey_start,
         target_fields=target_fields,
+        strict_empirical_inputs=args.ecology_mode == "live" and args.prior_mode == "empirical",
     )
     panel = _anonymize_csv_panel_ids(panel) if args.respondent_source == "csv" and not args.preserve_csv_respondent_ids else panel
     pre_selection_panel = panel.copy()
@@ -560,6 +566,7 @@ def load_ecology_panel(
     period_count: int,
     survey_start: str,
     target_fields: Iterable[str],
+    strict_empirical_inputs: bool = False,
 ) -> pd.DataFrame:
     if source == "fixture":
         return build_fixture_ecology_panel(
@@ -571,7 +578,12 @@ def load_ecology_panel(
     if respondent_csv is None:
         raise ValueError("--respondent-csv is required when --respondent-source csv")
     frame = pd.read_csv(respondent_csv)
-    return normalize_ecology_panel(frame, survey_schema=survey_schema, target_fields=target_fields)
+    return normalize_ecology_panel(
+        frame,
+        survey_schema=survey_schema,
+        target_fields=target_fields,
+        strict_empirical_inputs=strict_empirical_inputs,
+    )
 
 
 def normalize_ecology_panel(
@@ -579,6 +591,7 @@ def normalize_ecology_panel(
     *,
     survey_schema: str = "normalized",
     target_fields: Iterable[str] = DEFAULT_TARGET_FIELDS,
+    strict_empirical_inputs: bool = False,
 ) -> pd.DataFrame:
     if survey_schema not in SURVEY_SCHEMAS:
         raise ValueError(f"Unsupported survey schema: {survey_schema}")
@@ -633,12 +646,29 @@ def normalize_ecology_panel(
         if prior_column not in out:
             out[prior_column] = np.nan
         out[prior_column] = pd.to_numeric(out[prior_column], errors="coerce")
-    out = _fill_missing_priors(out, target_fields=target_fields)
 
     for column in ENVIRONMENT_COLUMNS:
         if column not in out:
             out[column] = np.nan
         out[column] = pd.to_numeric(out[column], errors="coerce")
+
+    if strict_empirical_inputs:
+        required_empirical_fields = [
+            *[f"prior_{target}" for target in target_fields],
+            *ENVIRONMENT_COLUMNS,
+        ]
+        missing_fields = [
+            column
+            for column in required_empirical_fields
+            if out[column].isna().any()
+        ]
+        if missing_fields:
+            raise ValueError(
+                "Respondent panel missing required normalized empirical fields: "
+                + ", ".join(sorted(missing_fields))
+            )
+
+    out = _fill_missing_priors(out, target_fields=target_fields)
     out = _fill_missing_environment(out)
 
     for column in OPTIONAL_BEHAVIOR_TARGET_COLUMNS:

@@ -48,7 +48,7 @@ The end state of the project is the Phase 4 matched-twin pipeline. Real survey r
                     +------------------------------+
  real FRED data --->|  4. SCORE AGAINST REALITY    |
  (post-cutoff       |  simulated aggregates vs     |
-  months only)      |  PCE growth, saving-rate     |
+  target dates)     |  PCE growth, saving-rate     |
                     |  change, retail sales,       |
                     |  revolving credit            |
                     +------------------------------+
@@ -65,6 +65,13 @@ The end state of the project is the Phase 4 matched-twin pipeline. Real survey r
 ```
 
 Design decisions baked into the diagram: the LLM never chooses actions (that was tested and lost to a simple liquidity rule); personas are conditioned on real respondents' prior answers, not invented from demographic profiles (profile-only and backstory-only personas both failed their gates); and the output mapping is locked and hashed before scoring so results cannot be tuned after the fact.
+
+Evidence status: the February 2026 score is a one-shot held-out
+**current-vintage diagnostic**, not a valid real-time-vintage confirmation. The
+run used FRED observations retrieved in July 2026, held the last December 2024
+belief update forward, and scored four available targets (`n=1` each). Its
+negative arithmetic is preserved, but a future confirmatory run must freeze and
+hash ALFRED/release-aware inputs before scoring.
 
 ## What is in the repo
 
@@ -88,7 +95,7 @@ Design decisions baked into the diagram: the LLM never chooses actions (that was
 - `src/macro_llm_tournament/macro_playground.py` wraps the demand kernel in a branchable scenario sandbox with bounded household, firm, policy/narrative, and critic actor payloads.
 - `src/macro_llm_tournament/macro_tournament.py` runs retrospective full-economy candidate tournaments and replays the promoted incumbent without spending fresh score surfaces.
 - `src/macro_llm_tournament/macro_performance_gate.py` scores the macro lab and vintage OOS artifacts against an executable target catalog without promoting fixture runs to empirical validity.
-- `src/macro_llm_tournament/macro_validity.py` builds the external-validity bridge scorecard for micro behavior, IRF shape, and vintage-data readiness.
+- `src/macro_llm_tournament/macro_validity.py` is the legacy mechanism-readiness scorecard; its OOS rows are static gaps. Use `macro_performance_gate.py` for executable OOS readiness.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
 
 ## Quick start
@@ -101,10 +108,10 @@ source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
-Run the test suite:
+Run the local contract (syntax/diff checks, then tests):
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+make all
 ```
 
 Run a zero-cost fixture forecast tournament:
@@ -213,7 +220,7 @@ Replay the banked Codex prior-update result through the Phase 4 matched-twin eco
 make phase4-prior-update-codex-replay
 ```
 
-This consumes `outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100/`, filters to `llm_codex_cli_gpt-5.5`, builds respondent-derived household states from the real SCE panel without copying `actual_*` targets into prompts, and compares that LLM-updater economy to the adaptive-expectations twin on the locked FRED proxy mapping. Mapping v2 scores `personal_saving_rate_pct` as month-over-month change in the saving-rate proxy, applied identically to both twins and the target series. The checked-in replay target is labeled retrospective. The first locked mapping-v2 confirmatory score has now been spent by `make macro-confirmatory-v1`, and it is recorded as a negative result in `reports/macro_confirmatory_fred_2026_02_v1_evidence.json`. The default target is the strict one-card run because the banked Codex prior-update ecology has two periods; `--ecology-period-policy hold_last` is available only as an explicitly labeled extrapolation ablation.
+This consumes `outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100/`, filters to `llm_codex_cli_gpt-5.5`, builds respondent-derived household states from the real SCE panel without copying `actual_*` targets into prompts, and compares that LLM-updater economy to the adaptive-expectations twin on the locked FRED proxy mapping. Mapping v2 scores `personal_saving_rate_pct` as month-over-month change in the saving-rate proxy, applied identically to both twins and the target series. The checked-in replay target is labeled retrospective. The first mapping-v2 held-out score date has now been spent by `make macro-confirmatory-v1`; its negative result is preserved in `reports/macro_confirmatory_fred_2026_02_v1_evidence.json`, but the integrity review downgraded it from confirmatory because its FRED inputs were current-vintage rather than frozen as-of observations. The default target is the strict one-card run because the banked Codex prior-update ecology has two periods; `--ecology-period-policy hold_last` is available only as an explicitly labeled extrapolation ablation.
 
 Run the same Phase 4 replay with the GPT-5.5 policy-schedule behavior executor:
 
@@ -577,13 +584,13 @@ make macro-performance-fixture
 
 This writes `outputs/macro_performance_gate_fixture/` with `macro_performance_report.md`. The verdict `macro_lab_performance_ready` means the belief-demand economy clears accounting, transfer MPC, liquidity/income heterogeneity, monetary-shock, precautionary-saving, belief-feedback, and IRF-shape targets in a zero-cost fixture run. The stronger verdict `macro_empirical_oos_ready` is reserved for non-fixture gate runs backed by non-fixture scored vintage OOS artifacts and no blocking LLM-belief target gaps.
 
-Replay the verified GPT-5.5 belief payloads through the current demand-economy mechanisms and run the macro-validity bridge scorecard:
+Replay the verified GPT-5.5 belief payloads through the legacy mechanism-readiness scorecard:
 
 ```bash
 make macro-validity-scorecard
 ```
 
-This writes `outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5/` and `outputs/macro_validity_scorecard/`. The replay spends zero new LLM calls: it uses the prior GPT-5.5 live belief payloads and reruns the deterministic structural economy. The current mechanism layer includes transfer windfall allocation across consumption, debt repayment, and liquid saving; debt-stock accounting; decaying buffer-relief support; and gradual rate pass-through. The scorecard separates three gates: micro behavior evidence, scenario-minus-baseline impulse-response shape, and vintage data readiness. Use the macro performance gate when the question is whether the whole simulation clears an executable lab/OOS target catalog.
+This writes `outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5/` and `outputs/macro_validity_scorecard/` with zero new LLM calls. The legacy scorecard is retained for historical reproduction, but its vintage-readiness rows are static gaps and cannot recognize a completed OOS artifact. Use `make macro-performance-fixture` and `macro_performance_gate.py` for the executable lab/OOS contract.
 
 Run the contamination-clean post-cutoff household behavior proxy gate:
 

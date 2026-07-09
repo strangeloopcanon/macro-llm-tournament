@@ -46,9 +46,10 @@
     }
   ],
   "claim_scope": "exploratory_development_search_only",
+  "current_status": "historical_v1_development_incumbent_not_current_best",
   "evidence_version": "macro_incumbent_v1_evidence",
   "max_live_calls": 0,
-  "normalized_spec_sha256": "1f67825c7cd1f5eae7c39334c4f0465a8ef7d59a96e3866076bf639d6e4b0676",
+  "normalized_spec_sha256": "893e35845f8122099a348477b687d4ad26c6f003c6d00d580fbe42999c7acec0",
   "run_id": "macro_incumbent_v1",
   "schema_version": "macro_economy_tournament_v1",
   "scoring_label": "retrospective",
@@ -62,7 +63,7 @@
     "macro_tournament_report.md"
   ],
   "spec_path": "configs/macro_tournament/incumbent_v1.json",
-  "spec_sha256": "d199eac6fc74396609401e4d7601c4b56c0fb2eaf018bfd4de8eb85a627f0986",
+  "spec_sha256": "af8aefcfa5dcfc58edcda9c331ddc434b6417d1583bb3afd2cb6c223cb8ba41f",
   "winner": {
     "behavior_mechanism": "empirical_bridge_v5_stabilized",
     "belief_gain_global": 1.5,

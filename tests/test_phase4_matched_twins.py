@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -18,6 +19,7 @@ from macro_llm_tournament.phase4_matched_twins import (
     mapped_period_value,
     normalized_mapping_payload,
     phase4_scoring_targets,
+    validate_args,
 )
 from macro_llm_tournament.phase4_v4_diagnostics import (
     OUTPUT_FILES,
@@ -48,6 +50,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Phase4MatchedTwinsTests(unittest.TestCase):
+    def test_standalone_phase4_rejects_confirmatory_scoring_label(self):
+        with self.assertRaisesRegex(ValueError, "confirmatory scoring is disabled"):
+            validate_args(SimpleNamespace(scoring_label="confirmatory"))
+
     def test_phase4_mapping_hash_is_canonical(self):
         payload = normalized_mapping_payload(default_output_mapping())
         round_tripped = json.loads(json.dumps(payload, sort_keys=True))

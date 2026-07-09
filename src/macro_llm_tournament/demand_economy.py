@@ -354,7 +354,12 @@ class DemandEconomyClient:
     @property
     def source(self) -> str:
         if self.variant in LLM_VARIANTS:
-            prefix = "fixture" if self.mode == "fixture" else "raw_replay" if self.mode == "raw_replay" else self.provider
+            prefix = {
+                "fixture": "fixture",
+                "raw_replay": "raw_replay",
+                "replay": f"replay_{self.provider}",
+                "live": f"live_{self.provider}",
+            }[self.mode]
             suffix = "_calibrated" if self.belief_calibration_profile else ""
             return f"{self.variant}_{prefix}_{self.model}{suffix}"
         return self.variant
@@ -442,12 +447,12 @@ class DemandEconomyClient:
         return normalized
 
     def _raw_replay_payload(self, scenario: DemandScenario, period_state: dict[str, Any]) -> dict[str, Any]:
-        key = (self.variant, scenario.scenario_id, int(period_state["period_index"]))
+        key = (self.provider, self.model, self.variant, scenario.scenario_id, int(period_state["period_index"]))
         record = self._raw_replay_records.get(key)
         if record is None:
             raise LLMUnavailable(
-                f"Raw replay record missing for variant={self.variant}, scenario={scenario.scenario_id}, "
-                f"period={int(period_state['period_index'])}"
+                f"Raw replay record missing for provider={self.provider}, model={self.model}, "
+                f"variant={self.variant}, scenario={scenario.scenario_id}, period={int(period_state['period_index'])}"
             )
         return {
             "provider": record.get("provider", self.provider),
@@ -743,18 +748,26 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str, int], dict[str, Any]]:
-    mapped: dict[tuple[str, str, int], dict[str, Any]] = {}
+def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, int], dict[str, Any]]:
+    mapped: dict[tuple[str, str, str, str, int], dict[str, Any]] = {}
     for record in records:
+        provider = str(record.get("provider", ""))
+        model = str(record.get("model", ""))
         variant = str(record.get("variant", ""))
         scenario_id = str(record.get("scenario_id", ""))
         try:
             period_index = int(record.get("period_index"))
         except (TypeError, ValueError):
             continue
-        if not variant or not scenario_id:
+        if not provider or not model or not variant or not scenario_id:
             continue
-        mapped[(variant, scenario_id, period_index)] = record
+        key = (provider, model, variant, scenario_id, period_index)
+        if key in mapped:
+            raise ValueError(
+                "Duplicate raw replay record for "
+                f"provider={provider}, model={model}, variant={variant}, scenario={scenario_id}, period={period_index}"
+            )
+        mapped[key] = record
     return mapped
 
 
@@ -1746,9 +1759,12 @@ def classify_demand_economy_evidence(validation: pd.DataFrame, ablations: pd.Dat
     )
     full_lab_passed = bool(all_passed and all_required_present and full_lab_metric_surface_present)
     if full_lab_passed:
-        verdict = "hank_lite_belief_lab_ready"
-        if mode == "fixture":
-            verdict = "fixture_hank_lite_belief_lab_ready"
+        verdict = {
+            "fixture": "fixture_hank_lite_belief_lab_ready",
+            "raw_replay": "raw_replay_hank_lite_belief_lab_ready",
+            "replay": "cache_replay_hank_lite_belief_lab_ready",
+            "live": "live_hank_lite_belief_lab_ready",
+        }.get(mode, "hank_lite_belief_lab_ready")
     elif all_passed:
         if mode == "live" and "llm_belief" in present_variants:
             verdict = "live_hank_lite_belief_canary_ready"

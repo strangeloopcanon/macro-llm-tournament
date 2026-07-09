@@ -248,6 +248,11 @@ def main() -> int:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.scoring_label == "confirmatory":
+        raise ValueError(
+            "Standalone Phase 4 confirmatory scoring is disabled; use the macro tournament only after "
+            "a frozen-vintage loader and pre-score reservation are available."
+        )
     if args.belief_source == "fixture" and args.mode != "fixture":
         raise ValueError("Phase 4 live/replay is blocked for fixture belief source; use --mode fixture.")
     if args.belief_source == "persona_ecology_replay" and args.mode != "replay":

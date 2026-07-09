@@ -2,12 +2,16 @@ import json
 import subprocess
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 
+import macro_llm_tournament.macro_tournament as tournament_module
 from macro_llm_tournament.macro_tournament import (
     CONFIRMATORY_LOCK_ERROR,
     RETROSPECTIVE_ONLY_ERROR,
@@ -16,6 +20,7 @@ from macro_llm_tournament.macro_tournament import (
     expand_candidates,
     filter_surface_targets_for_score_dates,
     is_promoted_incumbent,
+    run_tournament,
     select_winner,
     validate_spec,
 )
@@ -147,9 +152,13 @@ class MacroTournamentTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             spec = _locked_confirmatory_spec(root)
-            args = SimpleNamespace(mode="replay", max_live_calls=0)
+            args = SimpleNamespace(mode="replay", max_live_calls=0, allow_test_unfrozen_confirmatory=True)
 
-            validate_spec(spec, args=args)
+            with patch(
+                "macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY",
+                Path(spec["confirmatory_spent_registry_path"]),
+            ):
+                validate_spec(spec, args=args)
 
             registry = {
                 "schema_version": "macro_tournament_confirmatory_registry_v1",
@@ -158,8 +167,406 @@ class MacroTournamentTests(unittest.TestCase):
             }
             Path(spec["confirmatory_spent_registry_path"]).write_text(json.dumps(registry), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "surface already spent"):
-                validate_spec(spec, args=args)
+            with patch(
+                "macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY",
+                Path(spec["confirmatory_spent_registry_path"]),
+            ):
+                with self.assertRaisesRegex(ValueError, "surface already spent"):
+                    validate_spec(spec, args=args)
+
+    def test_confirmatory_score_key_cannot_be_bypassed_by_surface_rename_or_history_change(self):
+        with TemporaryDirectory() as temp_dir:
+            spec = _locked_confirmatory_spec(Path(temp_dir))
+            renamed = json.loads(json.dumps(spec))
+            renamed["surfaces"][0]["surface_id"] = "renamed_surface"
+            renamed["surfaces"][0]["asof_start"] = "2026-01-15"
+
+            self.assertEqual(confirmatory_surface_keys(spec), confirmatory_surface_keys(renamed))
+
+    def test_confirmatory_spec_rejects_noncanonical_registry_path(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            canonical = root / "canonical_registry.json"
+            spec = _locked_confirmatory_spec(root)
+            spec["confirmatory_spent_registry_path"] = str(root / "alternate_registry.json")
+            args = SimpleNamespace(mode="replay", max_live_calls=0, allow_test_unfrozen_confirmatory=True)
+
+            with patch("macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY", canonical):
+                with self.assertRaisesRegex(ValueError, CONFIRMATORY_LOCK_ERROR):
+                    validate_spec(spec, args=args)
+
+    def test_confirmatory_spec_requires_declared_target_contract(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            canonical = root / "registry.json"
+            spec = _locked_confirmatory_spec(root)
+            del spec["required_target_names"]
+            args = SimpleNamespace(mode="replay", max_live_calls=0, allow_test_unfrozen_confirmatory=True)
+
+            with patch("macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY", canonical):
+                with self.assertRaisesRegex(ValueError, CONFIRMATORY_LOCK_ERROR):
+                    validate_spec(spec, args=args)
+
+    def test_confirmatory_spec_rejects_all_as_declared_target(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            spec = _locked_confirmatory_spec(root)
+            spec["required_target_names"].append("ALL")
+            args = SimpleNamespace(mode="replay", max_live_calls=0, allow_test_unfrozen_confirmatory=True)
+
+            with patch("macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY", root / "registry.json"):
+                with self.assertRaisesRegex(ValueError, CONFIRMATORY_LOCK_ERROR):
+                    validate_spec(spec, args=args)
+
+    def test_confirmatory_current_fred_execution_is_disabled_until_frozen_loader(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            canonical = root / "registry.json"
+            spec = _locked_confirmatory_spec(root)
+            args = SimpleNamespace(mode="replay", max_live_calls=0)
+
+            with patch("macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY", canonical):
+                with self.assertRaisesRegex(ValueError, "frozen vintage inputs"):
+                    validate_spec(spec, args=args)
+
+    def test_confirmatory_target_contract_rejects_missing_target(self):
+        validator = getattr(tournament_module, "validate_confirmatory_target_set", None)
+        self.assertIsNotNone(validator)
+        spec = {"required_target_names": ["pce_mom_pct", "real_pce_mom_pct"]}
+        targets = pd.DataFrame(
+            [
+                {
+                    "target_name": "pce_mom_pct",
+                    "target_available": True,
+                    "target_value": 0.5,
+                    "as_of_date": "2026-02-15",
+                },
+                {
+                    "target_name": "real_pce_mom_pct",
+                    "target_available": False,
+                    "target_value": float("nan"),
+                    "as_of_date": "2026-02-15",
+                },
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing required targets"):
+            validator(targets, spec)
+
+    def test_confirmatory_target_contract_rejects_undeclared_target(self):
+        spec = {"required_target_names": ["pce_mom_pct", "real_pce_mom_pct"]}
+        targets = _confirmatory_targets(spec["required_target_names"])
+        targets.loc[len(targets)] = {
+            "target_name": "undeclared_extra",
+            "target_available": True,
+            "target_value": 0.1,
+            "as_of_date": "2026-02-15",
+        }
+
+        with self.assertRaisesRegex(ValueError, "undeclared=undeclared_extra"):
+            tournament_module.validate_confirmatory_target_set(targets, spec)
+
+    def test_confirmatory_scoring_inputs_drop_undeclared_forecast_before_all_score(self):
+        spec = {"required_target_names": ["pce_mom_pct", "real_pce_mom_pct"]}
+        targets = _confirmatory_targets(spec["required_target_names"])
+        forecasts = pd.DataFrame(
+            {"target_name": ["pce_mom_pct", "real_pce_mom_pct", "undeclared_extra"]}
+        )
+
+        locked_forecasts, locked_targets = tournament_module.locked_confirmatory_scoring_inputs(
+            forecasts,
+            targets,
+            spec,
+        )
+
+        self.assertEqual(
+            set(locked_forecasts["target_name"]),
+            set(spec["required_target_names"]),
+        )
+        self.assertEqual(
+            set(locked_targets["target_name"]),
+            set(spec["required_target_names"]),
+        )
+
+    def test_confirmatory_score_rows_require_each_target_for_both_sources_and_candidates(self):
+        validator = getattr(tournament_module, "validate_confirmatory_score_results", None)
+        self.assertIsNotNone(validator)
+        spec = {
+            "required_target_names": ["pce_mom_pct", "real_pce_mom_pct"],
+            "candidate_list": [{"candidate_id": "candidate_a"}, {"candidate_id": "candidate_b"}],
+        }
+        scores = pd.DataFrame(
+            [
+                {
+                    "candidate_id": candidate_id,
+                    "source": source,
+                    "target_name": target_name,
+                    "rmse_scaled": 1.0,
+                    "n": 0,
+                }
+                for candidate_id in ["candidate_a", "candidate_b"]
+                for source in ["adaptive", "llm"]
+                for target_name in ["pce_mom_pct"]
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "score target contract mismatch"):
+            validator(scores, spec)
+
+    def test_confirmatory_score_rows_reject_undeclared_target_and_validate_all_count(self):
+        spec = {
+            "required_target_names": ["pce_mom_pct", "real_pce_mom_pct"],
+            "candidate_list": [{"candidate_id": "candidate_a"}, {"candidate_id": "candidate_b"}],
+        }
+        scores = _valid_confirmatory_score_rows(spec)
+        tournament_module.validate_confirmatory_score_results(scores, spec)
+
+        scores.loc[len(scores)] = {
+            "candidate_id": "candidate_a",
+            "source": "llm",
+            "target_name": "undeclared_extra",
+            "rmse_scaled": 0.1,
+            "n": 1,
+        }
+        with self.assertRaisesRegex(ValueError, "score target contract mismatch"):
+            tournament_module.validate_confirmatory_score_results(scores, spec)
+
+        scores = _valid_confirmatory_score_rows(spec)
+        scores.loc[
+            (scores["candidate_id"] == "candidate_a")
+            & (scores["source"] == "llm")
+            & (scores["target_name"] == "ALL"),
+            "n",
+        ] = 3
+        with self.assertRaisesRegex(ValueError, "incomplete score rows"):
+            tournament_module.validate_confirmatory_score_results(scores, spec)
+
+    def test_confirmatory_result_rejects_partial_candidate_comparison(self):
+        validator = getattr(tournament_module, "validate_confirmatory_candidate_results", None)
+        self.assertIsNotNone(validator)
+        candidates = pd.DataFrame(
+            [
+                {"candidate_id": "candidate_a", "disqualified": False, "surface_count": 1},
+                {"candidate_id": "candidate_b", "disqualified": True, "surface_count": 0},
+            ]
+        )
+        spec = {"candidate_list": [{}, {}], "surfaces": [{}]}
+
+        with self.assertRaisesRegex(ValueError, "incomplete candidate comparison"):
+            validator(candidates, spec)
+
+    def test_confirmatory_surface_is_reserved_before_candidate_scoring(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry_path = root / "registry.json"
+            spec = _locked_confirmatory_spec(root)
+            args = SimpleNamespace(mode="replay", max_live_calls=0, allow_test_unfrozen_confirmatory=True)
+            reserved_during_score: list[bool] = []
+            prepared = {
+                "surface_id": "fred_confirmatory_2026_02",
+                "surface_spec": spec["surfaces"][0],
+                "scored_asof_dates": ["2026-02-15"],
+                "mapping_sha256": "mapping",
+                "input_hashes": {},
+            }
+
+            def fake_score(candidate, _surfaces, *, spec, behavior_profile_cache):
+                del behavior_profile_cache
+                registry = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.exists() else {}
+                reserved_during_score.append(
+                    bool(set(registry.get("spent_surface_keys", [])) & set(confirmatory_surface_keys(spec)))
+                )
+                return {
+                    "summary": {
+                        **candidate.payload,
+                        "is_incumbent": False,
+                        "is_promoted_incumbent": False,
+                        "surface_count": 1,
+                        "mean_llm_rmse_scaled": 1.0,
+                        "mean_llm_direction_accuracy": 0.5,
+                        "mean_adaptive_rmse_scaled": 1.0,
+                        "llm_minus_adaptive_rmse_scaled": 0.0,
+                        "empirical_bridge_clipped_inputs": 0,
+                        "max_accounting_abs_residual": 0.0,
+                        "simplicity_score": 1.0,
+                        "disqualified": False,
+                        "disqualification_reason": "",
+                    },
+                    "scores": [
+                        {
+                            "candidate_id": candidate.candidate_id,
+                            "source": source,
+                            "target_name": target_name,
+                            "rmse_scaled": 1.0,
+                            "n": (
+                                len(spec["required_target_names"])
+                                if target_name == "ALL"
+                                else 1
+                            ),
+                        }
+                        for source in ["adaptive", "llm"]
+                        for target_name in [*spec["required_target_names"], "ALL"]
+                    ],
+                    "accounting": [],
+                }
+
+            with (
+                patch("macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY", registry_path),
+                patch("macro_llm_tournament.macro_tournament.prepare_surface", return_value=prepared),
+                patch("macro_llm_tournament.macro_tournament.preload_behavior_profiles", return_value={}),
+                patch("macro_llm_tournament.macro_tournament.score_candidate", side_effect=fake_score),
+                patch("macro_llm_tournament.macro_tournament.build_report", return_value="report"),
+            ):
+                run_tournament(spec, args=args, output_dir=root / "out")
+
+            self.assertEqual(reserved_during_score, [True, True])
+
+    def test_confirmatory_reservation_completion_is_persisted(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            spec = _locked_confirmatory_spec(root)
+            manifest = _confirmatory_manifest(spec)
+            record = tournament_module.reserve_confirmatory_surfaces(
+                spec,
+                output_dir=root / "out",
+                manifest=manifest,
+            )
+            result = _confirmatory_result(manifest, record)
+
+            completed = tournament_module.complete_confirmatory_reservation(record, result)
+            registry = tournament_module.load_confirmatory_registry(root / "registry.json")
+
+            self.assertEqual(completed["status"], "completed")
+            self.assertIn("completed_at_utc", completed)
+            self.assertEqual(registry["records"][0]["status"], "completed")
+            self.assertEqual(registry["records"][0]["winner_candidate_id"], "candidate_a")
+
+    def test_confirmatory_reservation_records_scoring_and_output_failures(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            spec = _locked_confirmatory_spec(root)
+            manifest = _confirmatory_manifest(spec)
+            record = tournament_module.reserve_confirmatory_surfaces(
+                spec,
+                output_dir=root / "scoring_failure",
+                manifest=manifest,
+            )
+
+            tournament_module.fail_confirmatory_reservation(
+                record,
+                status="failed_after_reservation",
+                error="candidate scoring failed",
+            )
+            registry = tournament_module.load_confirmatory_registry(root / "registry.json")
+            self.assertEqual(registry["records"][0]["status"], "failed_after_reservation")
+            self.assertEqual(registry["records"][0]["error"], "candidate scoring failed")
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "output_failure"
+            output_dir.mkdir()
+            spec = _locked_confirmatory_spec(root)
+            manifest = _confirmatory_manifest(spec)
+            record = tournament_module.reserve_confirmatory_surfaces(
+                spec,
+                output_dir=output_dir,
+                manifest=manifest,
+            )
+            result = _confirmatory_result(manifest, record)
+
+            with patch.object(pd.DataFrame, "to_csv", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    tournament_module.write_tournament_outputs(output_dir, result)
+
+            registry = tournament_module.load_confirmatory_registry(root / "registry.json")
+            self.assertEqual(registry["records"][0]["status"], "output_incomplete")
+            self.assertEqual(registry["records"][0]["error"], "disk full")
+
+    def test_run_tournament_marks_reserved_surface_failed_when_scoring_raises(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry_path = root / "registry.json"
+            spec = _locked_confirmatory_spec(root)
+            args = SimpleNamespace(mode="replay", max_live_calls=0, allow_test_unfrozen_confirmatory=True)
+            prepared = {
+                "surface_id": "fred_confirmatory_2026_02",
+                "surface_spec": spec["surfaces"][0],
+                "scored_asof_dates": ["2026-02-15"],
+                "mapping_sha256": "mapping",
+                "input_hashes": {},
+            }
+
+            with (
+                patch("macro_llm_tournament.macro_tournament.DEFAULT_CONFIRMATORY_REGISTRY", registry_path),
+                patch("macro_llm_tournament.macro_tournament.prepare_surface", return_value=prepared),
+                patch("macro_llm_tournament.macro_tournament.preload_behavior_profiles", return_value={}),
+                patch(
+                    "macro_llm_tournament.macro_tournament.score_candidate",
+                    side_effect=RuntimeError("scoring exploded"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "scoring exploded"):
+                    run_tournament(spec, args=args, output_dir=root / "out")
+
+            registry = tournament_module.load_confirmatory_registry(registry_path)
+            self.assertEqual(registry["records"][0]["status"], "failed_after_reservation")
+            self.assertEqual(registry["records"][0]["error"], "scoring exploded")
+
+    def test_confirmatory_registry_rejects_malformed_and_duplicate_reservations(self):
+        with TemporaryDirectory() as temp_dir:
+            registry_path = Path(temp_dir) / "registry.json"
+            registry_path.write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Malformed confirmatory registry"):
+                tournament_module.load_confirmatory_registry(registry_path)
+
+            duplicate = {
+                "schema_version": "macro_tournament_confirmatory_registry_v1",
+                "spent_surface_keys": [],
+                "records": [
+                    {"reservation_id": "same", "status": "reserved_before_scoring"},
+                    {"reservation_id": "same", "status": "reserved_before_scoring"},
+                ],
+            }
+            registry_path.write_text(json.dumps(duplicate), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate reservation_id"):
+                tournament_module.load_confirmatory_registry(registry_path)
+
+    def test_confirmatory_score_date_reservation_is_atomic_under_concurrency(self):
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            spec = _locked_confirmatory_spec(root)
+            manifest = _confirmatory_manifest(spec)
+            barrier = Barrier(2)
+
+            def reserve_once(index: int):
+                barrier.wait()
+                return tournament_module.reserve_confirmatory_surfaces(
+                    spec,
+                    output_dir=root / f"out_{index}",
+                    manifest=manifest,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(reserve_once, index) for index in range(2)]
+                outcomes = []
+                for future in futures:
+                    try:
+                        outcomes.append(future.result())
+                    except ValueError as exc:
+                        outcomes.append(exc)
+
+            successes = [value for value in outcomes if isinstance(value, dict)]
+            failures = [value for value in outcomes if isinstance(value, ValueError)]
+            registry = tournament_module.load_confirmatory_registry(root / "registry.json")
+
+            self.assertEqual(len(successes), 1)
+            self.assertEqual(len(failures), 1)
+            self.assertIn("surface already spent", str(failures[0]))
+            self.assertEqual(len(registry["records"]), 1)
+            self.assertEqual(
+                set(registry["spent_surface_keys"]),
+                set(confirmatory_surface_keys(spec)),
+            )
 
     def test_score_asof_date_filter_keeps_alignment_history_out_of_scoring(self):
         targets = pd.DataFrame(
@@ -225,6 +632,95 @@ class MacroTournamentTests(unittest.TestCase):
             self.assertIn("candidate_id", winner)
             self.assertIn("Adaptive and persistence-style baselines are diagnostics", report)
             self.assertFalse(candidates["disqualified"].astype(bool).all())
+            self.assertIn("git", manifest)
+            self.assertIn("input_hashes_by_surface", manifest)
+            input_hashes = manifest["input_hashes_by_surface"]["fixture_surface"]
+            self.assertIn("proxy_frames_sha256", input_hashes)
+            self.assertIn("persona_ecology_manifest_sha256", input_hashes)
+            self.assertIn("persona_ecology_panel_sha256", input_hashes)
+            self.assertIn("persona_ecology_predictions_sha256", input_hashes)
+
+
+def _confirmatory_targets(target_names: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "target_name": target_name,
+                "target_available": True,
+                "target_value": 0.1 * index,
+                "as_of_date": "2026-02-15",
+            }
+            for index, target_name in enumerate(target_names, start=1)
+        ]
+    )
+
+
+def _valid_confirmatory_score_rows(spec: dict[str, object]) -> pd.DataFrame:
+    candidate_ids = [str(candidate["candidate_id"]) for candidate in spec["candidate_list"]]
+    target_names = [str(target_name) for target_name in spec["required_target_names"]]
+    rows = [
+        {
+            "candidate_id": candidate_id,
+            "source": source,
+            "target_name": target_name,
+            "rmse_scaled": 0.1,
+            "n": 1,
+        }
+        for candidate_id in candidate_ids
+        for source in ["adaptive", "llm"]
+        for target_name in target_names
+    ]
+    rows.extend(
+        {
+            "candidate_id": candidate_id,
+            "source": source,
+            "target_name": "ALL",
+            "rmse_scaled": 0.1,
+            "n": len(target_names),
+        }
+        for candidate_id in candidate_ids
+        for source in ["adaptive", "llm"]
+    )
+    return pd.DataFrame(rows)
+
+
+def _confirmatory_manifest(spec: dict[str, object]) -> dict[str, object]:
+    surface = spec["surfaces"][0]
+    return {
+        "run_id": spec["run_id"],
+        "spec_path": "configs/test_confirmatory.json",
+        "spec_sha256": "spec_sha256",
+        "normalized_spec_sha256": "normalized_spec_sha256",
+        "confirmatory_spent_registry_path": str(spec["confirmatory_spent_registry_path"]),
+        "confirmatory_surface_keys": confirmatory_surface_keys(spec),
+        "surface_ids": [surface["surface_id"]],
+        "scored_asof_dates_by_surface": {
+            surface["surface_id"]: surface["score_asof_dates"],
+        },
+        "mapping_sha256_by_surface": {surface["surface_id"]: "mapping_sha256"},
+        "input_hashes_by_surface": {surface["surface_id"]: {}},
+        "behavior_profiles_by_candidate": {},
+        "git": {"commit": "test", "branch": "test", "dirty": False},
+        "winner_candidate_id": "candidate_a",
+        "winner_mean_llm_rmse_scaled": 0.1,
+        "scoring_label": "confirmatory",
+    }
+
+
+def _confirmatory_result(
+    manifest: dict[str, object],
+    record: dict[str, object],
+) -> dict[str, object]:
+    result_manifest = {**manifest, "confirmatory_registry_record": record}
+    return {
+        "normalized_spec": {"schema_version": "macro_economy_tournament_v1"},
+        "manifest": result_manifest,
+        "candidate_table": pd.DataFrame([{"candidate_id": "candidate_a"}]),
+        "score_table": pd.DataFrame([{"candidate_id": "candidate_a"}]),
+        "accounting_table": pd.DataFrame([{"candidate_id": "candidate_a"}]),
+        "winner": {"candidate_id": "candidate_a"},
+        "report": "report\n",
+    }
 
 
 def _tiny_spec_dict(ecology_dir: Path | None = None, bridge_path: Path | None = None) -> dict[str, object]:
@@ -298,6 +794,13 @@ def _locked_confirmatory_spec(root: Path) -> dict[str, object]:
         "scoring_label": "confirmatory",
         "confirmatory_lock": True,
         "confirmatory_spent_registry_path": str(root / "registry.json"),
+        "required_target_names": [
+            "pce_mom_pct",
+            "real_pce_mom_pct",
+            "retail_sales_mom_pct",
+            "personal_saving_rate_pct",
+            "revolving_credit_mom_pct",
+        ],
         "profiles": {
             "empirical_bridge_v4": str(root / "bridge_v4.json"),
             "empirical_bridge_v5_stabilized": str(root / "bridge_v5.json"),

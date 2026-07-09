@@ -2,7 +2,7 @@
 
 This file is the clean entry point for the current state of the repo.
 
-## Current Best Economy
+## Replayable Development Incumbent
 
 Run:
 
@@ -10,7 +10,7 @@ Run:
 make macro-incumbent-v1
 ```
 
-That replays the promoted current-best economy from:
+That replays the v1 development incumbent from:
 
 ```text
 configs/macro_tournament/incumbent_v1.json
@@ -34,17 +34,26 @@ The canonical reader-facing report is:
 reports/macro_simulation_report.md
 ```
 
-## Confirmatory Surface
+This target depends on ignored local `work/` and `outputs/` artifacts. It is
+runnable in the research workspace, not from a clean clone. The later v3
+development search selected a different candidate after the December panel was
+rebuilt; no candidate is currently promoted as a validated best economy.
 
-The first locked fresh FRED confirmatory score has been spent:
+## Held-Out February Diagnostic
+
+The `2026-02-15` score date has been spent and must not be rerun:
 
 ```bash
 make macro-confirmatory-v1
 ```
 
-The rerun guard now blocks that target as already spent. The result is negative:
-both locked LLM-economy candidates lose to the adaptive diagnostic on the
-`2026-02-15` as-of surface. The compact tracked evidence bundle is:
+The result is negative: both LLM-economy candidates lose to their adaptive
+twins. A July 2026 integrity review found that this run used revised current
+FRED observations rather than frozen February vintages, held December 2024
+beliefs forward, and scored four available targets with one observation each.
+The spec, lock code, registry, and result also entered git together. It is
+therefore a one-shot held-out current-vintage diagnostic, not independently
+pre-registered confirmatory evidence. The compact tracked evidence bundle is:
 
 ```text
 reports/macro_confirmatory_fred_2026_02_v1_evidence.json
@@ -55,6 +64,10 @@ The spent-surface registry is:
 ```text
 reports/macro_tournament_confirmatory_registry.json
 ```
+
+Future confirmatory runs must use frozen, hashed vintage inputs; declare a
+complete target contract; reserve the score date atomically before scoring; and
+record a clean pre-result commit.
 
 ## Search Lane
 

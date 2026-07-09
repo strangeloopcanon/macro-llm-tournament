@@ -3,7 +3,7 @@
   "run_id": "macro_incumbent_v1",
   "scoring_label": "retrospective",
   "promoted_candidate_id": "cand_1623eb882b6a",
-  "confirmatory_surface_policy": "This spec locks the promoted exploratory incumbent for replay only; the next newly scoreable FRED month remains reserved for future confirmatory scoring.",
+  "confirmatory_surface_policy": "This spec locks the v1 development incumbent for replay only. The February 2026 score date is spent as a held-out current-vintage diagnostic. Any future confirmation requires a new frozen-vintage surface and a clean pre-result lock.",
   "provider": "codex_cli",
   "model": "gpt-5.5",
   "profiles": {
