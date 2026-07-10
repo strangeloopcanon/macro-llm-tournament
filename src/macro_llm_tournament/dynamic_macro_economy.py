@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ import pandas as pd
 
 from .agent_common import WORK_ROOT, markdown_table
 from .demand_economy import (
+    DEMAND_ECONOMY_PROMPT_VERSION,
     DemandEconomyClient,
     DemandScenario,
     run_demand_economy,
@@ -78,6 +80,7 @@ OUTPUT_FILES = (
     "normalized_spec.json",
     "manifest.json",
     "households.csv",
+    "final_household_states.csv",
     "prompt_cards.csv",
     "beliefs.csv",
     "decisions.csv",
@@ -120,6 +123,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Select by first-release availability, strict post-cutoff event date, or explicit all-target scoring.",
     )
     parser.add_argument("--max-live-calls", type=int, default=0)
+    parser.add_argument("--max-households-per-call", type=int, default=100)
     parser.add_argument("--fresh-cache", action="store_true")
     parser.add_argument(
         "--seed-cache-dir",
@@ -281,6 +285,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         behavior_profile
     )
     gains = belief_gains_from_args(args)
+    execution_source = build_source_contract(Path(__file__).resolve().parents[2])
     raw_replay_records = (
         load_raw_records(Path(args.raw_records_json)) if args.raw_records_json else None
     )
@@ -319,6 +324,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
             replay_prefix_period_count=int(args.replay_prefix_period_count),
             max_live_calls=int(args.max_live_calls),
             semantic_retry_limit=int(args.semantic_retry_limit),
+            max_households_per_call=int(args.max_households_per_call),
             execution_cwd=provider_cwd,
             journal_dir=journal_dir,
         )
@@ -337,6 +343,8 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
             max_live_calls=args.max_live_calls,
             raw_replay_records=raw_replay_records,
             execution_cwd=provider_cwd,
+            max_households_per_call=int(args.max_households_per_call),
+            semantic_retry_limit=int(args.semantic_retry_limit),
         )
         if args.mode == "live":
             llm_base = JournaledLiveDemandClient(
@@ -371,6 +379,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "accounting": [],
     }
     prompt_rows: list[dict[str, Any]] = []
+    final_state_frames: list[pd.DataFrame] = []
     for candidate, client in (("llm", llm_client), ("adaptive", adaptive_client)):
         initial, beliefs, decisions, periods, accounting, prompts = run_demand_economy(
             households,
@@ -382,6 +391,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
             periods_per_year=PERIODS_PER_YEAR,
             period_overrides=period_overrides,
             initial_environment_override=initial_environment_anchor,
+            max_households_per_call=int(args.max_households_per_call),
         )
         for frame_name, frame in (
             ("initial", initial),
@@ -395,12 +405,20 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
             result_frames[frame_name].append(tagged)
         for row in prompts:
             prompt_rows.append({"candidate": candidate, **row})
+        final_states = pd.DataFrame(
+            getattr(client, "final_household_states", {}).get(scenario.scenario_id, [])
+        )
+        if final_states.empty:
+            raise DynamicMacroError("Demand economy did not expose final household states")
+        final_states.insert(0, "candidate", candidate)
+        final_state_frames.append(final_states)
 
     initial_frame = pd.concat(result_frames["initial"], ignore_index=True)
     beliefs_frame = pd.concat(result_frames["beliefs"], ignore_index=True)
     decisions_frame = pd.concat(result_frames["decisions"], ignore_index=True)
     periods_frame = pd.concat(result_frames["periods"], ignore_index=True)
     accounting_frame = pd.concat(result_frames["accounting"], ignore_index=True)
+    final_household_states_frame = pd.concat(final_state_frames, ignore_index=True)
     attach_origin_identity(beliefs_frame, bundle.origins)
     attach_origin_identity(decisions_frame, bundle.origins)
     attach_origin_identity(periods_frame, bundle.origins)
@@ -445,6 +463,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         contamination_coverage=contamination_coverage,
         score_origin_contract=score_origin_contract,
         seed_cache_provenance=seed_cache_provenance,
+        execution_source=execution_source,
     )
     spec_sha256 = _sha256_json(spec)
     prompt_frame = prompt_rows_to_frame(prompt_rows)
@@ -453,6 +472,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         spec=spec,
         households=households,
         prompts=prompt_frame,
+        final_household_states=final_household_states_frame,
         beliefs=beliefs_frame,
         decisions=decisions_frame,
         periods=periods_frame,
@@ -485,6 +505,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "household_flow_anchor": household_flow_anchor,
         "behavior_policy_content_sha256": behavior_profile_content_sha256,
         "household_count": int(len(households)),
+        "max_households_per_call": int(args.max_households_per_call),
         "live_call_count": int(llm_client.live_call_count),
         "cache_hit_count": llm_client.cache_hit_count,
         "replayed_record_count": llm_client.replayed_record_count,
@@ -494,7 +515,11 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "max_accounting_abs_residual": _max_accounting_residual(accounting_frame),
         "macro_scores": macro_scores,
         "llm_minus_adaptive": macro_scores["llm"] - macro_scores["adaptive"],
-        "execution_source": build_source_contract(Path(__file__).resolve().parents[2]),
+        "execution_source": execution_source,
+        "execution_source_tree_sha256": execution_source["tree_sha256"],
+        "source_contract_sha256": _sha256_json(execution_source),
+        "prompt_version": DEMAND_ECONOMY_PROMPT_VERSION,
+        "provider_reasoning_effort": os.environ.get("CODEX_CLI_REASONING_EFFORT"),
         "origin_block_bootstrap": bootstrap,
         "adaptive_role": "diagnostic_only_not_a_selection_veto",
         "output_contract": list(OUTPUT_FILES),
@@ -907,6 +932,7 @@ def normalized_spec(
     contamination_coverage: dict[str, Any],
     score_origin_contract: dict[str, Any],
     seed_cache_provenance: dict[str, Any] | None,
+    execution_source: dict[str, Any],
 ) -> dict[str, Any]:
     mappings = []
     for spec in bundle.target_specs:
@@ -918,6 +944,10 @@ def normalized_spec(
         "mode": args.mode,
         "provider": args.provider,
         "model": args.model,
+        "prompt_version": DEMAND_ECONOMY_PROMPT_VERSION,
+        "provider_reasoning_effort": os.environ.get("CODEX_CLI_REASONING_EFFORT"),
+        "execution_source_tree_sha256": execution_source["tree_sha256"],
+        "source_contract_sha256": _sha256_json(execution_source),
         "provider_execution_isolation": provider_execution_isolation(args.mode),
         "periods_per_year": PERIODS_PER_YEAR,
         "feedback_mode": args.feedback_mode,
@@ -925,6 +955,7 @@ def normalized_spec(
         "policy_rate_smoothing": float(args.policy_rate_smoothing),
         "policy_state_mode": str(args.policy_state_mode),
         "policy_state_weight": float(args.policy_state_weight),
+        "max_households_per_call": int(args.max_households_per_call),
         "belief_gains": gains,
         "initial_environment_anchor": initial_environment_anchor,
         "initial_environment_anchor_origin": bundle.origins[0],
@@ -987,6 +1018,7 @@ def write_outputs(
     spec: dict[str, Any],
     households: pd.DataFrame,
     prompts: pd.DataFrame,
+    final_household_states: pd.DataFrame,
     beliefs: pd.DataFrame,
     decisions: pd.DataFrame,
     periods: pd.DataFrame,
@@ -1004,6 +1036,7 @@ def write_outputs(
     )
     for filename, frame in (
         ("households.csv", households),
+        ("final_household_states.csv", final_household_states),
         ("prompt_cards.csv", prompts),
         ("beliefs.csv", beliefs),
         ("decisions.csv", decisions),
@@ -1117,6 +1150,8 @@ def load_raw_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if int(args.max_households_per_call) <= 0:
+        raise DynamicMacroError("--max-households-per-call must be positive")
     if args.mode == "live" and int(args.max_live_calls) <= 0:
         raise DynamicMacroError("--max-live-calls must be positive in live mode")
     if args.mode == "replay_live" and int(args.max_live_calls) < 0:

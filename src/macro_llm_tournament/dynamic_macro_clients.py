@@ -23,6 +23,8 @@ from .demand_economy import (
     adaptive_belief_payload,
     belief_module_prompt_payload,
     normalize_belief_payload,
+    household_state_batches,
+    household_type_ids_sha256,
 )
 from .dynamic_macro_common import (
     DynamicMacroError,
@@ -32,7 +34,8 @@ from .dynamic_macro_common import (
 from .llm_common import LLMUnavailable
 
 
-LIVE_ATTEMPT_SCHEMA_VERSION = "dynamic_macro_live_attempt_v1"
+LIVE_ATTEMPT_SCHEMA_VERSION = "dynamic_macro_live_attempt_v2"
+_LEGACY_LIVE_ATTEMPT_SCHEMA_VERSION = "dynamic_macro_live_attempt_v1"
 _LIVE_ATTEMPT_STATUSES = frozenset({"started", "accepted", "failed"})
 _ATTEMPT_FILE_RE = re.compile(r"attempt_(\d{4,})\.json")
 
@@ -72,7 +75,7 @@ def validate_live_attempt_ledger(
     """Validate the serialized ledger without consulting private cache files."""
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise DynamicMacroError("Live-attempt ledger must be a JSON list of objects")
-    required = {
+    legacy_required = {
         "schema_version",
         "attempt_number",
         "attempt_id",
@@ -87,11 +90,22 @@ def validate_live_attempt_ledger(
         "error_sha256",
         "journal_sha256",
     }
+    v2_required = legacy_required | {
+        "batch_index",
+        "batch_count",
+        "household_type_ids",
+        "household_type_ids_sha256",
+        "prompt_payload_sha256",
+        "provider_called",
+        "response_sha256",
+    }
     for expected_number, row in enumerate(rows, start=1):
+        schema = row.get("schema_version")
+        required = legacy_required if schema == _LEGACY_LIVE_ATTEMPT_SCHEMA_VERSION else v2_required
         if set(row) != required:
             raise DynamicMacroError("Live-attempt ledger row has an invalid schema")
         if (
-            row["schema_version"] != LIVE_ATTEMPT_SCHEMA_VERSION
+            schema not in {_LEGACY_LIVE_ATTEMPT_SCHEMA_VERSION, LIVE_ATTEMPT_SCHEMA_VERSION}
             or row["attempt_number"] != expected_number
             or row["attempt_id"] != f"live_attempt_{expected_number:04d}"
             or not isinstance(row["provider"], str)
@@ -121,6 +135,23 @@ def validate_live_attempt_ledger(
             raise DynamicMacroError("Live-attempt ledger cache hash is invalid")
         if row["error_sha256"] is not None and not _is_sha256(row["error_sha256"]):
             raise DynamicMacroError("Live-attempt ledger error hash is invalid")
+        if schema == LIVE_ATTEMPT_SCHEMA_VERSION:
+            ids = row["household_type_ids"]
+            if (
+                not isinstance(row["batch_index"], int)
+                or not isinstance(row["batch_count"], int)
+                or row["batch_index"] < 0
+                or row["batch_count"] <= row["batch_index"]
+                or not isinstance(ids, list)
+                or not ids
+                or ids != sorted(ids)
+                or not all(isinstance(type_id, str) and type_id for type_id in ids)
+                or not _is_sha256(row["household_type_ids_sha256"])
+                or not _is_sha256(row["prompt_payload_sha256"])
+                or not isinstance(row["provider_called"], bool)
+                or (row["response_sha256"] is not None and not _is_sha256(row["response_sha256"]))
+            ):
+                raise DynamicMacroError("Live-attempt v2 batch metadata is invalid")
     return list(rows)
 
 
@@ -129,7 +160,7 @@ def _canonical_live_attempt_row(
 ) -> dict[str, Any]:
     if not isinstance(journal, dict):
         raise DynamicMacroError("Live-attempt journal must be a JSON object")
-    required = {
+    legacy_required = {
         "schema_version",
         "attempt_number",
         "attempt_id",
@@ -143,6 +174,16 @@ def _canonical_live_attempt_row(
         "cache_file_sha256",
         "error_sha256",
     }
+    schema = journal.get("schema_version")
+    required = legacy_required | {
+        "batch_index",
+        "batch_count",
+        "household_type_ids",
+        "household_type_ids_sha256",
+        "prompt_payload_sha256",
+        "provider_called",
+        "response_sha256",
+    } if schema == LIVE_ATTEMPT_SCHEMA_VERSION else legacy_required
     if set(journal) != required:
         raise DynamicMacroError("Live-attempt journal has an invalid schema")
     return {key: journal[key] for key in sorted(required)}
@@ -160,7 +201,16 @@ class LiveAttemptJournal:
         self.provider = provider
         self.model = model
 
-    def start(self, period_state: Mapping[str, Any], cache_path: Path) -> Path:
+    def start(
+        self,
+        period_state: Mapping[str, Any],
+        cache_path: Path,
+        *,
+        batch_index: int = 0,
+        batch_count: int = 1,
+        household_type_ids: list[str] | None = None,
+        prompt_payload_sha256: str | None = None,
+    ) -> Path:
         self.journal_dir.mkdir(parents=True, exist_ok=True)
         existing = list(self.journal_dir.iterdir())
         numbers: list[int] = []
@@ -173,6 +223,10 @@ class LiveAttemptJournal:
             raise DynamicMacroError("Live-attempt journal sequence is not contiguous")
         attempt_number = len(numbers) + 1
         path = self.journal_dir / f"attempt_{attempt_number:04d}.json"
+        household_type_ids = sorted(household_type_ids or ["legacy_single_batch"])
+        prompt_payload_sha256 = prompt_payload_sha256 or hashlib.sha256(
+            b"legacy_single_batch"
+        ).hexdigest()
         _write_durable_json(
             path,
             {
@@ -188,12 +242,19 @@ class LiveAttemptJournal:
                 "cache_file": _cache_file_label(cache_path),
                 "cache_file_sha256": None,
                 "error_sha256": None,
+                "batch_index": int(batch_index),
+                "batch_count": int(batch_count),
+                "household_type_ids": household_type_ids,
+                "household_type_ids_sha256": _sha256_json(household_type_ids),
+                "prompt_payload_sha256": prompt_payload_sha256,
+                "provider_called": False,
+                "response_sha256": None,
             },
         )
         return path
 
     def finish_for_cache(
-        self, path: Path, cache_path: Path, *, status: str, error: str | None = None
+        self, path: Path, cache_path: Path, *, status: str, error: str | None = None, response: Any | None = None
     ) -> None:
         if status not in {"accepted", "failed"}:
             raise DynamicMacroError("Live-attempt journal has an invalid completion status")
@@ -218,6 +279,10 @@ class LiveAttemptJournal:
                     if error is not None
                     else None
                 ),
+                "provider_called": True,
+                "response_sha256": (
+                    _sha256_json(response) if response is not None else None
+                ),
             }
         )
         _write_durable_json(path, journal)
@@ -241,6 +306,8 @@ class JournaledLiveDemandClient:
     def __init__(self, base: DemandEconomyClient, journal: LiveAttemptJournal) -> None:
         self._base = base
         self._journal = journal
+        if hasattr(base, "set_live_attempt_journal"):
+            base.set_live_attempt_journal(journal)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
@@ -259,6 +326,10 @@ class JournaledLiveDemandClient:
         period_state: dict[str, Any],
         household_states: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        # DemandEconomyClient journals each concrete batch. Preserve the legacy
+        # wrapper path for clients without that capability.
+        if hasattr(self._base, "set_live_attempt_journal"):
+            return self._base.belief_panel(scenario, period_state, household_states)
         cache_path = self.belief_cache_path(scenario, period_state, household_states)
         attempt_path = (
             None if cache_path.is_file() else self._journal.start(period_state, cache_path)
@@ -349,6 +420,7 @@ class ReplayThenLiveDemandClient:
         replay_prefix_period_count: int,
         max_live_calls: int,
         semantic_retry_limit: int,
+        max_households_per_call: int = 100,
         execution_cwd: Path | None,
         journal_dir: Path | None = None,
     ) -> None:
@@ -361,6 +433,7 @@ class ReplayThenLiveDemandClient:
         self.provider = provider
         self.model = model
         self.replay_prefix_period_count = int(replay_prefix_period_count)
+        self.final_household_states: dict[str, list[dict[str, Any]]] = {}
         self.semantic_retry_limit = int(semantic_retry_limit)
         self.cache_dir = cache_dir
         self._replay = DemandEconomyClient(
@@ -370,6 +443,7 @@ class ReplayThenLiveDemandClient:
             mode="raw_replay",
             variant=self.variant,
             raw_replay_records=replay_records,
+            max_households_per_call=max_households_per_call,
         )
         if max_live_calls > 0:
             self._live: Any = JournaledLiveDemandClient(
@@ -381,6 +455,8 @@ class ReplayThenLiveDemandClient:
                     variant=self.variant,
                     max_live_calls=max_live_calls,
                     execution_cwd=execution_cwd,
+                    max_households_per_call=max_households_per_call,
+                    semantic_retry_limit=semantic_retry_limit,
                 ),
                 LiveAttemptJournal(
                     journal_dir or cache_dir / "live_attempts",
@@ -391,6 +467,8 @@ class ReplayThenLiveDemandClient:
         else:
             self._live = _DisabledLiveDemandClient(provider, model, cache_dir)
         self._raw_records: list[dict[str, Any]] = []
+        self.last_call_records: list[dict[str, Any]] = []
+        self.last_prompt_batches: list[dict[str, Any]] = []
         self._replayed_record_count = 0
         self._semantic_retry_count = 0
         self._rejected_semantic_payloads: list[dict[str, Any]] = []
@@ -398,6 +476,16 @@ class ReplayThenLiveDemandClient:
     @property
     def source(self) -> str:
         return f"llm_belief_replay_live_{self.provider}_{self.model}"
+
+    @property
+    def max_households_per_call(self) -> int:
+        return int(self._replay.max_households_per_call)
+
+    @max_households_per_call.setter
+    def max_households_per_call(self, value: int) -> None:
+        self._replay.max_households_per_call = int(value)
+        if hasattr(self._live, "_base"):
+            self._live._base.max_households_per_call = int(value)
 
     @property
     def live_call_count(self) -> int:
@@ -413,11 +501,15 @@ class ReplayThenLiveDemandClient:
 
     @property
     def semantic_retry_count(self) -> int:
-        return self._semantic_retry_count
+        return self._semantic_retry_count + int(
+            getattr(self._live, "semantic_retry_count", 0)
+        )
 
     @property
     def rejected_semantic_payloads(self) -> list[dict[str, Any]]:
-        return list(self._rejected_semantic_payloads)
+        return list(self._rejected_semantic_payloads) + list(
+            getattr(self._live, "rejected_semantic_payloads", [])
+        )
 
     @property
     def raw_records(self) -> list[dict[str, Any]]:
@@ -434,15 +526,15 @@ class ReplayThenLiveDemandClient:
             if int(period_state["period_index"]) < self.replay_prefix_period_count
             else self._live
         )
+        panel = client.belief_panel(scenario, period_state, household_states)
+        records = list(getattr(client, "last_call_records", []))
+        if not records:
+            records = [dict(client.raw_records[-1])]
         if client is self._replay:
-            panel = client.belief_panel(scenario, period_state, household_states)
-        else:
-            panel = self._live_belief_panel_with_semantic_retry(
-                scenario, period_state, household_states
-            )
-        if client is self._replay:
-            self._replayed_record_count += 1
-        self._raw_records.append(dict(client.raw_records[-1]))
+            self._replayed_record_count += len(records)
+        self.last_call_records = records
+        self.last_prompt_batches = list(getattr(client, "last_prompt_batches", []))
+        self._raw_records.extend(records)
         return panel
 
     def _live_belief_panel_with_semantic_retry(
@@ -455,12 +547,25 @@ class ReplayThenLiveDemandClient:
             cache_path = self._live.belief_cache_path(
                 scenario, period_state, household_states
             )
+            journal_path = (
+                self._live._journal.start(period_state, cache_path)
+                if not cache_path.is_file()
+                else None
+            )
             try:
                 panel = self._live.belief_panel(
                     scenario, period_state, household_states
                 )
+                if journal_path is not None:
+                    self._live._journal.finish_for_cache(
+                        journal_path, cache_path, status="accepted", response=panel
+                    )
                 return panel
             except LLMUnavailable as exc:
+                if journal_path is not None:
+                    self._live._journal.finish_for_cache(
+                        journal_path, cache_path, status="failed", error=str(exc)
+                    )
                 if attempt >= self.semantic_retry_limit:
                     raise
                 if not cache_path.is_file():
@@ -548,10 +653,16 @@ def validate_replay_prefix_records(
     except (KeyError, TypeError, ValueError) as exc:
         raise DynamicMacroError("Replay prefix records have malformed period indexes") from exc
     expected = list(range(prefix_period_count))
-    if sorted(periods) != expected or len(periods) != len(set(periods)):
+    if sorted(set(periods)) != expected:
         raise DynamicMacroError(
             f"Replay prefix must contain exactly periods {expected}; found {sorted(periods)}"
         )
+    for period_index in expected:
+        batch_rows = [row for row in matching if int(row["period_index"]) == period_index]
+        batch_count = int(batch_rows[0].get("batch_count", 1))
+        indexes = [int(row.get("batch_index", 0)) for row in batch_rows]
+        if batch_count <= 0 or sorted(indexes) != list(range(batch_count)):
+            raise DynamicMacroError("Replay prefix has incomplete batch coverage")
     for row in matching:
         identity = row.get("cache_identity")
         if not isinstance(identity, dict) or not identity.get("state_identity_sha256"):
@@ -576,6 +687,7 @@ class GainAdjustedDemandClient:
         self.gains = dict(gains)
         self.requested_mode = requested_mode
         self.replay_prefix_period_count = int(replay_prefix_period_count)
+        self.final_household_states: dict[str, list[dict[str, Any]]] = {}
         self._replay_by_key = {
             (
                 str(row.get("provider")),
@@ -583,6 +695,7 @@ class GainAdjustedDemandClient:
                 str(row.get("variant", "llm_belief")),
                 str(row.get("scenario_id")),
                 int(row["period_index"]),
+                int(row.get("batch_index", 0)),
             ): row
             for row in (replay_records or [])
         }
@@ -590,6 +703,18 @@ class GainAdjustedDemandClient:
     @property
     def source(self) -> str:
         return self.base.source
+
+    @property
+    def max_households_per_call(self) -> int:
+        return int(self.base.max_households_per_call)
+
+    @max_households_per_call.setter
+    def max_households_per_call(self, value: int) -> None:
+        self.base.max_households_per_call = int(value)
+
+    @property
+    def last_prompt_batches(self) -> list[dict[str, Any]]:
+        return list(getattr(self.base, "last_prompt_batches", []))
 
     @property
     def live_call_count(self) -> int:
@@ -621,43 +746,55 @@ class GainAdjustedDemandClient:
         period_state: dict[str, Any],
         household_states: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        prompt = belief_module_prompt_payload(
-            scenario, period_state, household_states, variant="llm_belief"
+        batches = household_state_batches(
+            household_states,
+            max_households_per_call=int(getattr(self.base, "max_households_per_call", 100)),
         )
-        identity = cache_identity(
-            provider=self.base.provider,
-            model=self.base.model,
-            candidate="llm_belief",
-            scenario_id=scenario.scenario_id,
-            period_index=int(period_state["period_index"]),
-            prompt_payload=prompt,
-        )
-        if self._replay_by_key:
-            key = (
-                self.base.provider,
-                self.base.model,
-                "llm_belief",
-                scenario.scenario_id,
-                int(period_state["period_index"]),
+        identities = []
+        for batch_states in batches:
+            prompt = belief_module_prompt_payload(
+                scenario, period_state, batch_states, variant="llm_belief"
             )
-            record = self._replay_by_key.get(key)
+            identities.append(
+                cache_identity(
+                    provider=self.base.provider,
+                    model=self.base.model,
+                    candidate="llm_belief",
+                    scenario_id=scenario.scenario_id,
+                    period_index=int(period_state["period_index"]),
+                    prompt_payload=prompt,
+                )
+            )
+        if self._replay_by_key:
             replay_required = (
                 self.requested_mode == "replay"
                 or int(period_state["period_index"]) < self.replay_prefix_period_count
             )
-            if replay_required and (
-                record is None or record.get("cache_identity") != identity
-            ):
-                raise DynamicMacroError(
-                    "Replay identity mismatch for "
-                    f"provider={key[0]}, model={key[1]}, candidate={key[2]}, scenario={key[3]}, period={key[4]}"
-                )
+            if replay_required:
+                for batch_index, identity in enumerate(identities):
+                    key = (
+                        self.base.provider,
+                        self.base.model,
+                        "llm_belief",
+                        scenario.scenario_id,
+                        int(period_state["period_index"]),
+                        batch_index,
+                    )
+                    record = self._replay_by_key.get(key)
+                    if record is None or record.get("cache_identity") != identity:
+                        raise DynamicMacroError(
+                            "Replay identity mismatch for "
+                            f"provider={key[0]}, model={key[1]}, candidate={key[2]}, scenario={key[3]}, period={key[4]}, batch={batch_index}"
+                        )
         panel = self.base.belief_panel(scenario, period_state, household_states)
-        latest_record: dict[str, Any] = self.base.raw_records[-1]
-        self._validate_cache_record(latest_record, identity, prompt)
-        latest_record["cache_identity"] = identity
-        latest_record["state_identity_sha256"] = identity["state_identity_sha256"]
-        latest_record["candidate"] = "llm_belief"
+        records = list(getattr(self.base, "last_call_records", []))
+        if len(records) != len(identities):
+            raise DynamicMacroError("Demand client did not return one raw record per batch")
+        for record, identity in zip(records, identities, strict=True):
+            self._validate_cache_record(record, identity, {})
+            record["cache_identity"] = identity
+            record["state_identity_sha256"] = identity["state_identity_sha256"]
+            record["candidate"] = "llm_belief"
         return apply_belief_gains(panel, household_states, self.gains)
 
     def decision_panel(
@@ -705,6 +842,9 @@ class ObservedSignalAdaptiveClient:
 
     def __init__(self) -> None:
         self.raw_records: list[dict[str, Any]] = []
+        self.final_household_states: dict[str, list[dict[str, Any]]] = {}
+        self.max_households_per_call = 100
+        self.last_prompt_batches: list[dict[str, Any]] = []
 
     @property
     def live_call_count(self) -> int:
@@ -720,6 +860,24 @@ class ObservedSignalAdaptiveClient:
         period_state: dict[str, Any],
         household_states: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        batches = household_state_batches(
+            household_states, max_households_per_call=self.max_households_per_call
+        )
+        self.last_prompt_batches = []
+        for batch_index, batch_states in enumerate(batches):
+            prompt_payload = belief_module_prompt_payload(
+                scenario, period_state, batch_states, variant=self.variant
+            )
+            self.last_prompt_batches.append(
+                {
+                    "batch_index": batch_index,
+                    "batch_count": len(batches),
+                    "household_type_ids": [str(row["type_id"]) for row in batch_states],
+                    "household_type_ids_sha256": household_type_ids_sha256(batch_states),
+                    "prompt_payload_sha256": _sha256_json(prompt_payload),
+                    "prompt_payload": prompt_payload,
+                }
+            )
         payload = observed_signal_adaptive_payload(
             scenario,
             period_state,

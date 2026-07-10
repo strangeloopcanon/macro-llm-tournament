@@ -1,0 +1,102 @@
+{
+  "schema_version": "dynamic_macro_household_scale_comparison_v1",
+  "claim_scope": "developmental_retrospective_only",
+  "run_id": "dynamic_macro_household_scale_81_vs_200_2026_01_2026_05_v1",
+  "origins": [
+    "2026-01-01",
+    "2026-02-01",
+    "2026-03-01",
+    "2026-04-01",
+    "2026-05-01"
+  ],
+  "score_origins": [
+    "2026-02-01",
+    "2026-03-01",
+    "2026-04-01",
+    "2026-05-01"
+  ],
+  "historical_evidence": {
+    "path": "reports/dynamic_macro_development_v1_evidence.json",
+    "sha256": "cfc1452d79c612aaa20e94c62565818ba4e57e7de87996922173301cfe01e1e1"
+  },
+  "cohort_manifest": {
+    "path": "work/persona_beliefs/persistent_household_scale_v1/manifest.json",
+    "sha256": "0d3b4edc13c90443a6728613ab0dd7fc07574b9f247f870f8052a3964c71471d"
+  },
+  "locks": {
+    "provider": "codex_cli",
+    "model": "gpt-5.5",
+    "provider_reasoning_effort": "high",
+    "execution_source_tree_sha256": "fe16993ca1d1b6d0e58d9ff74ba8abcdc05452a77a077675acf324b307f80cd8",
+    "prompt_version": "hank_lite_belief_module_v5",
+    "bundle_sha256": "69a7dcabbda300bd1ce9e1f687d77351d65aa62a6167273f125816c0209d5fdd",
+    "mechanism_fields": [
+      "behavior_policy_mode",
+      "behavior_policy_content_sha256",
+      "feedback_mode",
+      "feedback_gain",
+      "policy_rate_smoothing",
+      "policy_state_mode",
+      "policy_state_weight",
+      "max_households_per_call",
+      "belief_gains",
+      "periods_per_year"
+    ],
+    "mechanism_values": {
+      "behavior_policy_mode": "empirical_bridge",
+      "behavior_policy_content_sha256": "52471353726c8c0e3c516785501bdba45fbf356f0ba16039be245c26f7f5d7d9",
+      "feedback_mode": "closed_loop",
+      "feedback_gain": 1.0,
+      "policy_rate_smoothing": 0.85,
+      "policy_state_mode": "origin_visible",
+      "policy_state_weight": 1.0,
+      "max_households_per_call": 100,
+      "belief_gains": {
+        "confidence": 1.0,
+        "global": 3.0,
+        "income": 0.5,
+        "inflation": 1.5,
+        "unemployment": 1.0
+      },
+      "periods_per_year": 12.0
+    }
+  },
+  "runs": {
+    "corrected81": {
+      "path": "outputs/dynamic_macro_household_scale_81_gpt55_live_v1",
+      "household_count": 81,
+      "households_sha256": "6e532e309a8cb52a5e98992516554d21e8bf68e01a4734bc28f151d47236ff4b",
+      "accepted_live_calls": 5,
+      "maximum_live_calls": 15,
+      "raw_record_batch_counts": {
+        "adaptive": 5,
+        "llm_belief": 5
+      }
+    },
+    "corrected200": {
+      "path": "outputs/dynamic_macro_household_scale_200_gpt55_live_v1",
+      "household_count": 200,
+      "households_sha256": "c2673a58e75fe7bc177d6d700f037a78457f8ea74a5febbebf8fcdd4c6c01c9f",
+      "accepted_live_calls": 10,
+      "maximum_live_calls": 30,
+      "raw_record_batch_counts": {
+        "adaptive": 5,
+        "llm_belief": 10
+      }
+    }
+  },
+  "relative_gap_tolerance": 0.01,
+  "selection_rule": {
+    "primary": "lower absolute LLM family-equal MacroScore",
+    "near_tie": "prefer corrected200 when the relative score gap is at most 1 percent",
+    "adaptive_role": "strong diagnostic benchmark, not a promotion veto"
+  },
+  "information_boundary": {
+    "development_bundle": "January-May 2026 only",
+    "warmup_origin": "2026-01-01",
+    "scored_origins": "February-May 2026",
+    "next_month_status": "unspent and excluded",
+    "population_weights_visible_to_model": false,
+    "future_survey_completion_used_for_sampling": false
+  }
+}

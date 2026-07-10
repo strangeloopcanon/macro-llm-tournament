@@ -347,6 +347,9 @@ class DemandEconomyClient:
         raw_replay_records: list[dict[str, Any]] | None = None,
         belief_calibration_profile: dict[str, Any] | None = None,
         execution_cwd: Path | None = None,
+        max_households_per_call: int = 100,
+        semantic_retry_limit: int = 0,
+        live_attempt_journal: Any | None = None,
     ):
         if mode not in BELIEF_MODES:
             raise ValueError(f"Unsupported demand-economy mode: {mode}")
@@ -359,6 +362,16 @@ class DemandEconomyClient:
         self.variant = variant
         self.belief_calibration_profile = belief_calibration_profile if variant == "llm_belief" else None
         self.raw_records: list[dict[str, Any]] = []
+        self.last_call_records: list[dict[str, Any]] = []
+        self.last_prompt_batches: list[dict[str, Any]] = []
+        self.final_household_states: dict[str, list[dict[str, Any]]] = {}
+        self.max_households_per_call = _validated_max_households_per_call(
+            max_households_per_call
+        )
+        self.semantic_retry_limit = max(0, int(semantic_retry_limit))
+        self.semantic_retry_count = 0
+        self.rejected_semantic_payloads: list[dict[str, Any]] = []
+        self.live_attempt_journal = live_attempt_journal
         self._raw_replay_records = _raw_replay_record_map(raw_replay_records or [])
         llm_mode = mode if variant in LLM_VARIANTS else "fixture"
         self._llm = ForecastLLMClient(
@@ -414,12 +427,80 @@ class DemandEconomyClient:
         )
         return self._llm.cache_path(cache_name)
 
+    def set_live_attempt_journal(self, journal: Any) -> None:
+        self.live_attempt_journal = journal
+
     def belief_panel(
         self,
         scenario: DemandScenario,
         period_state: dict[str, Any],
         household_states: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        batches = household_state_batches(
+            household_states, max_households_per_call=self.max_households_per_call
+        )
+        merged_beliefs: dict[str, dict[str, Any]] = {}
+        merged_actions: dict[str, dict[str, Any]] = {}
+        records: list[dict[str, Any]] = []
+        prompt_batches: list[dict[str, Any]] = []
+        for batch_index, batch_states in enumerate(batches):
+            panel, record, prompt_payload = self._belief_batch(
+                scenario,
+                period_state,
+                batch_states,
+                batch_index=batch_index,
+                batch_count=len(batches),
+            )
+            prompt_batches.append(
+                {
+                    "batch_index": batch_index,
+                    "batch_count": len(batches),
+                    "household_type_ids": [str(row["type_id"]) for row in batch_states],
+                    "household_type_ids_sha256": household_type_ids_sha256(batch_states),
+                    "prompt_payload_sha256": _sha256_payload(prompt_payload),
+                    "prompt_payload": prompt_payload,
+                }
+            )
+            overlap = set(merged_beliefs).intersection(panel["beliefs_by_type"])
+            if overlap:
+                raise LLMUnavailable("Demand economy batches returned duplicate household type_ids")
+            merged_beliefs.update(panel["beliefs_by_type"])
+            merged_actions.update(panel.get("direct_actions_by_type", {}))
+            records.append(record)
+        expected_ids = [str(row["type_id"]) for row in sorted(household_states, key=lambda row: str(row["type_id"]))]
+        if sorted(merged_beliefs) != expected_ids:
+            raise LLMUnavailable("Demand economy merged batch payload does not cover every household type_id exactly once")
+        self.last_prompt_batches = prompt_batches
+        self.last_call_records = records
+        self.raw_records.extend(records)
+        normalized = {
+            "prompt_version": (
+                NAIVE_PERSONA_PROMPT_VERSION
+                if self.variant == "naive_persona"
+                else DEMAND_ECONOMY_PROMPT_VERSION
+            ),
+            "beliefs_by_type": merged_beliefs,
+            "direct_actions_by_type": merged_actions,
+        }
+        if self.belief_calibration_profile and self.variant == "llm_belief":
+            normalized = apply_belief_calibration_profile(
+                normalized,
+                scenario,
+                period_state,
+                household_states,
+                self.belief_calibration_profile,
+            )
+        return normalized
+
+    def _belief_batch(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+        *,
+        batch_index: int,
+        batch_count: int,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         if self.variant == "representative":
             data = {
                 "provider": self.provider,
@@ -463,47 +544,126 @@ class DemandEconomyClient:
                     "cache_path": None,
                 }
             elif self.mode == "raw_replay":
-                data = self._raw_replay_payload(scenario, period_state)
+                data = self._raw_replay_payload(
+                    scenario,
+                    period_state,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    household_states=household_states,
+                    prompt_payload=prompt_payload,
+                )
             else:
                 prompt_text = belief_module_prompt(scenario, period_state, household_states, variant=self.variant)
                 cache_name = f"demand_belief_{cache_key({'provider': self.provider, 'model': self.model, 'prompt': prompt_payload})}"
-                data = self._llm.json_call(prompt_text, cache_name, instructions=_demand_instructions())
+                data = self._json_call_with_semantic_retry(
+                    prompt_text,
+                    cache_name,
+                    scenario=scenario,
+                    period_state=period_state,
+                    household_states=household_states,
+                    prompt_payload=prompt_payload,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                )
         normalized = normalize_period_payload(household_states, data, variant=self.variant)
-        if self.belief_calibration_profile and self.variant == "llm_belief":
-            normalized = apply_belief_calibration_profile(
-                normalized,
-                scenario,
-                period_state,
-                household_states,
-                self.belief_calibration_profile,
-            )
-        self.raw_records.append(
-            {
-                "source": self.source,
-                "variant": self.variant,
-                "scenario_id": scenario.scenario_id,
-                "period_id": period_state["period_id"],
-                "period_index": int(period_state["period_index"]),
-                "provider": data.get("provider"),
-                "model": data.get("model"),
-                "cache_hit": bool(data.get("cache_hit", False)),
-                "cache_path": data.get("cache_path"),
-                "belief_calibration_profile_id": (
-                    self.belief_calibration_profile.get("profile_id") if self.belief_calibration_profile else None
-                ),
-                "payload": data.get("payload", data),
-            }
-        )
-        return normalized
+        payload = data.get("payload", data)
+        return normalized, {
+            "source": self.source,
+            "variant": self.variant,
+            "scenario_id": scenario.scenario_id,
+            "period_id": period_state["period_id"],
+            "period_index": int(period_state["period_index"]),
+            "provider": data.get("provider"),
+            "model": data.get("model"),
+            "cache_hit": bool(data.get("cache_hit", False)),
+            "cache_path": data.get("cache_path"),
+            "batch_index": batch_index,
+            "batch_count": batch_count,
+            "household_type_ids": [str(row["type_id"]) for row in household_states],
+            "household_type_ids_sha256": household_type_ids_sha256(household_states),
+            "prompt_payload_sha256": _sha256_payload(prompt_payload),
+            "provider_called": not bool(data.get("cache_hit", False)),
+            "response_sha256": _sha256_payload(payload),
+            "belief_calibration_profile_id": (
+                self.belief_calibration_profile.get("profile_id") if self.belief_calibration_profile else None
+            ),
+            "payload": payload,
+        }, prompt_payload
 
-    def _raw_replay_payload(self, scenario: DemandScenario, period_state: dict[str, Any]) -> dict[str, Any]:
-        key = (self.provider, self.model, self.variant, scenario.scenario_id, int(period_state["period_index"]))
+    def _json_call_with_semantic_retry(
+        self,
+        prompt_text: str,
+        cache_name: str,
+        *,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+        prompt_payload: dict[str, Any],
+        batch_index: int,
+        batch_count: int,
+    ) -> dict[str, Any]:
+        cache_path = self._llm.cache_path(cache_name)
+        for attempt in range(self.semantic_retry_limit + 1):
+            journal_path = None
+            cache_miss = not cache_path.is_file()
+            if cache_miss and self.live_attempt_journal is not None:
+                journal_path = self.live_attempt_journal.start(
+                    period_state,
+                    cache_path,
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    household_type_ids=[str(row["type_id"]) for row in household_states],
+                    prompt_payload_sha256=_sha256_payload(prompt_payload),
+                )
+            try:
+                data = self._llm.json_call(prompt_text, cache_name, instructions=_demand_instructions())
+                normalize_period_payload(household_states, data, variant=self.variant)
+            except LLMUnavailable as exc:
+                if journal_path is not None:
+                    self.live_attempt_journal.finish_for_cache(
+                        journal_path, cache_path, status="failed", error=str(exc)
+                    )
+                if attempt >= self.semantic_retry_limit or not cache_path.is_file():
+                    raise
+                rejected_dir = self.cache_dir / "rejected_semantic"
+                rejected_dir.mkdir(parents=True, exist_ok=True)
+                payload_sha = hashlib.sha256(cache_path.read_bytes()).hexdigest()
+                rejected_path = rejected_dir / f"{cache_path.stem}.batch_{batch_index:04d}.attempt_{attempt + 1}.{payload_sha[:12]}.json"
+                cache_path.replace(rejected_path)
+                self.semantic_retry_count += 1
+                self.rejected_semantic_payloads.append(
+                    {
+                        "period_index": int(period_state["period_index"]),
+                        "batch_index": batch_index,
+                        "payload_sha256": payload_sha,
+                        "relative_path": str(rejected_path.relative_to(self.cache_dir.parent)),
+                        "reason": str(exc)[:500],
+                    }
+                )
+                continue
+            if journal_path is not None:
+                self.live_attempt_journal.finish_for_cache(
+                    journal_path, cache_path, status="accepted", response=data.get("payload", data)
+                )
+            return data
+        raise AssertionError("unreachable semantic retry loop")
+
+    def _raw_replay_payload(self, scenario: DemandScenario, period_state: dict[str, Any], *, batch_index: int, batch_count: int, household_states: list[dict[str, Any]], prompt_payload: dict[str, Any]) -> dict[str, Any]:
+        key = (self.provider, self.model, self.variant, scenario.scenario_id, int(period_state["period_index"]), batch_index)
         record = self._raw_replay_records.get(key)
+        if record is None and batch_count == 1:
+            record = self._raw_replay_records.get((*key[:-1], 0))
         if record is None:
             raise LLMUnavailable(
                 f"Raw replay record missing for provider={self.provider}, model={self.model}, "
-                f"variant={self.variant}, scenario={scenario.scenario_id}, period={int(period_state['period_index'])}"
+                f"variant={self.variant}, scenario={scenario.scenario_id}, period={int(period_state['period_index'])}, batch={batch_index}"
             )
+        if int(record.get("batch_count", 1)) != batch_count:
+            raise LLMUnavailable("Raw replay batch layout mismatch")
+        if record.get("household_type_ids", [str(row["type_id"]) for row in household_states]) != [str(row["type_id"]) for row in household_states]:
+            raise LLMUnavailable("Raw replay household type_id layout mismatch")
+        if record.get("prompt_payload_sha256", _sha256_payload(prompt_payload)) != _sha256_payload(prompt_payload):
+            raise LLMUnavailable("Raw replay prompt payload mismatch")
         return {
             "provider": record.get("provider", self.provider),
             "model": record.get("model", self.model),
@@ -798,8 +958,27 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, int], dict[str, Any]]:
-    mapped: dict[tuple[str, str, str, str, int], dict[str, Any]] = {}
+class _ReplayRecordMap(dict[tuple[Any, ...], dict[str, Any]]):
+    """Batch-keyed map with read-only legacy single-batch key compatibility."""
+
+    @staticmethod
+    def _normalized_key(key: Any) -> Any:
+        return (*key, 0) if isinstance(key, tuple) and len(key) == 5 else key
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(self._normalized_key(key))
+
+    def __getitem__(self, key: tuple[Any, ...]) -> dict[str, Any]:
+        return super().__getitem__(self._normalized_key(key))
+
+    def get(self, key: tuple[Any, ...], default: Any = None) -> Any:
+        return super().get(self._normalized_key(key), default)
+
+
+def _raw_replay_record_map(
+    records: list[dict[str, Any]],
+) -> _ReplayRecordMap:
+    mapped = _ReplayRecordMap()
     for record in records:
         provider = str(record.get("provider", ""))
         model = str(record.get("model", ""))
@@ -811,7 +990,11 @@ def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str
             continue
         if not provider or not model or not variant or not scenario_id:
             continue
-        key = (provider, model, variant, scenario_id, period_index)
+        try:
+            batch_index = int(record.get("batch_index", 0))
+        except (TypeError, ValueError):
+            continue
+        key = (provider, model, variant, scenario_id, period_index, batch_index)
         if key in mapped:
             raise ValueError(
                 "Duplicate raw replay record for "
@@ -819,6 +1002,34 @@ def _raw_replay_record_map(records: list[dict[str, Any]]) -> dict[tuple[str, str
             )
         mapped[key] = record
     return mapped
+
+
+def _validated_max_households_per_call(value: int) -> int:
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_households_per_call must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("max_households_per_call must be a positive integer")
+    return value
+
+
+def household_state_batches(
+    household_states: list[dict[str, Any]], *, max_households_per_call: int
+) -> list[list[dict[str, Any]]]:
+    limit = _validated_max_households_per_call(max_households_per_call)
+    ordered = sorted(household_states, key=lambda row: str(row["type_id"]))
+    return [ordered[index : index + limit] for index in range(0, len(ordered), limit)]
+
+
+def household_type_ids_sha256(household_states: list[dict[str, Any]]) -> str:
+    return _sha256_payload([str(row["type_id"]) for row in household_states])
+
+
+def _sha256_payload(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def build_fixture_demand_households(household_count: int = 24) -> pd.DataFrame:
@@ -986,6 +1197,7 @@ def run_demand_economy(
     periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
     period_overrides: dict[int, dict[str, Any]] | None = None,
     initial_environment_override: dict[str, Any] | None = None,
+    max_households_per_call: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     if feedback_mode not in FEEDBACK_MODES:
         raise ValueError(f"Unsupported feedback mode: {feedback_mode}")
@@ -996,7 +1208,18 @@ def run_demand_economy(
     normalized_period_overrides = _normalize_period_overrides(period_overrides)
     normalized_initial_environment = _normalize_initial_environment_override(initial_environment_override)
     households = normalize_demand_households(households)
+    if max_households_per_call is not None:
+        target = client
+        while not hasattr(target, "max_households_per_call") and hasattr(target, "base"):
+            target = target.base
+        if not hasattr(target, "max_households_per_call"):
+            raise ValueError("Demand client does not support household batching")
+        target.max_households_per_call = _validated_max_households_per_call(
+            max_households_per_call
+        )
     source = client.source
+    if not hasattr(client, "final_household_states"):
+        client.final_household_states = {}
     initial = _initial_household_states(households, source=source, variant=client.variant, periods_per_year=periods_per_year)
     belief_rows: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
@@ -1024,16 +1247,32 @@ def run_demand_economy(
                 period_override=period_override,
             )
             panel = client.belief_panel(scenario, period_state, household_states)
-            prompt_rows.append(
-                {
-                    "source": source,
-                    "variant": client.variant,
-                    "scenario_id": scenario.scenario_id,
-                    "period_id": period_state["period_id"],
-                    "period_index": int(period_index),
-                    "prompt_payload": _prompt_payload_for_variant(client.variant, scenario, period_state, household_states),
-                }
-            )
+            prompt_batches = getattr(client, "last_prompt_batches", [])
+            if not prompt_batches:
+                prompt_payload = _prompt_payload_for_variant(
+                    client.variant, scenario, period_state, household_states
+                )
+                prompt_batches = [
+                    {
+                        "batch_index": 0,
+                        "batch_count": 1,
+                        "household_type_ids": [str(row["type_id"]) for row in household_states],
+                        "household_type_ids_sha256": household_type_ids_sha256(household_states),
+                        "prompt_payload_sha256": _sha256_payload(prompt_payload),
+                        "prompt_payload": prompt_payload,
+                    }
+                ]
+            for prompt_batch in prompt_batches:
+                prompt_rows.append(
+                    {
+                        "source": source,
+                        "variant": client.variant,
+                        "scenario_id": scenario.scenario_id,
+                        "period_id": period_state["period_id"],
+                        "period_index": int(period_index),
+                        **prompt_batch,
+                    }
+                )
             period_beliefs = _belief_rows(panel, household_states, period_state, source=source, variant=client.variant)
             belief_rows.extend(period_beliefs)
             realized = _realize_household_period(
@@ -1073,6 +1312,7 @@ def run_demand_economy(
             period_rows.append(aggregate)
             household_states = next_household_states
             env = next_env
+        client.final_household_states[scenario.scenario_id] = household_states
     return (
         initial,
         pd.DataFrame(belief_rows),
@@ -1250,8 +1490,17 @@ def fixture_belief_payload(
     inflation_gap = float(period_state["inflation_rate"]) - INFLATION_TARGET
     job_shock = float(period_state["job_risk_shock_pp"])
     for row in household_states:
-        high_risk = str(row.get("job_loss_risk_type", "")).lower() == "high"
-        low_liquid = str(row.get("liquidity_group", "")).lower() == "low"
+        # Keep the deterministic fixture as the historical regression seed.
+        # Live prompts receive evolving classifications; the fixture's role is
+        # to catch engine drift, not to silently become a new mechanism.
+        high_risk = (
+            str(row.get("static_job_loss_risk_type", row.get("job_loss_risk_type", ""))).lower()
+            == "high"
+        )
+        low_liquid = (
+            str(row.get("static_liquidity_group", row.get("liquidity_group", ""))).lower()
+            == "low"
+        )
         prior_pi = float(row["inflation_expectation_1y"])
         prior_income = float(row["income_growth_expectation_1y"])
         attention_prices = float(row["attention_weight_prices"])
@@ -2031,6 +2280,9 @@ def _initial_household_states(
                 "income_group": row["income_group"],
                 "liquidity_group": row["liquidity_group"],
                 "job_loss_risk_type": row["job_loss_risk_type"],
+                "static_income_group": row["income_group"],
+                "static_liquidity_group": row["liquidity_group"],
+                "static_job_loss_risk_type": row["job_loss_risk_type"],
                 "employment_status": row["employment_status"],
                 "annual_income": float(row["annual_income"]),
                 "labor_income": _per_period_amount(float(row["annual_income"]), periods_per_year),
@@ -2925,6 +3177,16 @@ def _aggregate_period(
     aggregate_job_loss = _weighted(realized, "job_loss_probability")
     aggregate_confidence = _weighted(realized, "confidence_index")
     aggregate_buffer = _weighted(realized, "liquid_buffer_months_after")
+    total_weight = sum(float(row["population_weight"]) for row in realized)
+    weighted_mean_liquid_buffer_ratio = (
+        sum(
+            float(row["population_weight"])
+            * float(row["liquid_buffer_months_after"])
+            / max(float(row.get("target_buffer_months", 1.0)), 1e-9)
+            for row in realized
+        )
+        / max(total_weight, 1e-9)
+    )
     aggregate_transfer_consumption = _weighted(realized, "transfer_consumption_amount")
     aggregate_transfer_debt_repayment = _weighted(realized, "transfer_debt_repayment_amount")
     aggregate_transfer_liquid_saving = _weighted(realized, "transfer_liquid_saving_amount")
@@ -2959,6 +3221,8 @@ def _aggregate_period(
         "aggregate_job_loss_belief": aggregate_job_loss,
         "aggregate_confidence_index": aggregate_confidence,
         "aggregate_liquid_buffer_months": aggregate_buffer,
+        "weighted_mean_liquid_buffer_ratio": weighted_mean_liquid_buffer_ratio,
+        "aggregate_assets_to_consumption_ratio": aggregate_liquid_assets / aggregate_consumption if aggregate_consumption > 0 else np.nan,
         "aggregate_transfer_consumption": aggregate_transfer_consumption,
         "aggregate_transfer_debt_repayment": aggregate_transfer_debt_repayment,
         "aggregate_transfer_liquid_saving": aggregate_transfer_liquid_saving,
@@ -3044,7 +3308,12 @@ def _next_household_states(
                 "income_group": row["income_group"],
                 "liquidity_group": row["liquidity_group"],
                 "job_loss_risk_type": row["job_loss_risk_type"],
-                "employment_status": str(static.get("employment_status", "unknown")),
+                "static_income_group": row.get("static_income_group", static["income_group"]),
+                "static_liquidity_group": row.get("static_liquidity_group", static["liquidity_group"]),
+                "static_job_loss_risk_type": row.get("static_job_loss_risk_type", static["job_loss_risk_type"]),
+                "employment_status": _employment_status_from_state(
+                    float(labor_income), annual_income, periods_per_year
+                ),
                 "annual_income": annual_income,
                 "labor_income": float(labor_income),
                 "baseline_consumption": baseline_consumption,
@@ -3097,7 +3366,61 @@ def _next_household_states(
                 "transfer_buffer_relief": float(row.get("transfer_buffer_relief_after", 0.0)),
             }
         )
+    for state in rows:
+        state["income_group"] = _income_group_from_state(
+            float(state["labor_income"]), float(state["annual_income"]), periods_per_year
+        )
+        state["liquidity_group"] = _liquidity_group_from_state(
+            float(state["liquid_buffer_months"])
+        )
+        state["job_loss_risk_type"] = _job_risk_group_from_state(
+            float(state["job_loss_probability"])
+        )
+        state["label"] = (
+            f"{state['income_group']} income, {state['liquidity_group']} liquid assets, "
+            f"{state['job_loss_risk_type']} job risk, {state['age_bucket']}"
+        )
     return rows
+
+
+def _income_group_from_state(
+    labor_income: float, annual_income: float, periods_per_year: float
+) -> str:
+    del annual_income
+    annualized_income = labor_income * periods_per_year
+    if annualized_income < 54_000.0:
+        return "low"
+    if annualized_income >= 100_000.0:
+        return "high"
+    return "middle"
+
+
+def _employment_status_from_state(
+    labor_income: float, annual_income: float, periods_per_year: float
+) -> str:
+    baseline = max(annual_income / periods_per_year, 1e-9)
+    ratio = labor_income / baseline
+    if ratio < 0.25:
+        return "unemployed"
+    if ratio < 0.90:
+        return "reduced_hours"
+    return "employed"
+
+
+def _liquidity_group_from_state(liquid_buffer_months: float) -> str:
+    if liquid_buffer_months < 1.5:
+        return "low"
+    if liquid_buffer_months >= 4.0:
+        return "high"
+    return "middle"
+
+
+def _job_risk_group_from_state(job_loss_probability: float) -> str:
+    if job_loss_probability <= 5.75:
+        return "low"
+    if job_loss_probability >= 6.5:
+        return "high"
+    return "middle"
 
 
 def _accounting_rows(realized: list[dict[str, Any]], aggregate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3289,7 +3612,7 @@ def _household_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
         "income_group": row["income_group"],
         "liquidity_group": row["liquidity_group"],
         "job_loss_risk_type": row.get("job_loss_risk_type"),
-        "population_weight": round_or_none(row["population_weight"]),
+        "employment_status": row.get("employment_status"),
         "periods_per_year": round_or_none(row.get("periods_per_year", DEFAULT_PERIODS_PER_YEAR)),
         "period_labor_income": round_or_none(row["labor_income"]),
         "period_baseline_consumption": round_or_none(row["baseline_consumption"]),

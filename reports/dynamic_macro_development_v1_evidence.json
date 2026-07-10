@@ -57,6 +57,22 @@
     "warmup_origin": "2026-01-01"
   },
   "evidence_version": "dynamic_macro_development_v1",
+  "historical_uncorrected81_context": {
+    "adaptive_direction_accuracy": 0.4916666666666667,
+    "adaptive_macro_score": 0.5486674359188668,
+    "cache_hit_count": 0,
+    "effective_weighted_sample_size": 55.34476682942994,
+    "eligible_for_promotion": false,
+    "household_count": 81,
+    "label": "historical_uncorrected81_context_only",
+    "live_call_count": 0,
+    "llm_direction_accuracy": 0.4916666666666667,
+    "llm_macro_score": 0.5497889640842802,
+    "max_accounting_abs_residual": 7.275957614183426e-12,
+    "max_normalized_household_weight": 0.0472132319658739,
+    "replayed_record_count": 5,
+    "semantic_retry_count": 0
+  },
   "hashes": {
     "development_bundle_sha256": "69a7dcabbda300bd1ce9e1f687d77351d65aa62a6167273f125816c0209d5fdd",
     "development_spec_sha256": "d3e1fce8b3284b9b9c910a1fbd639ee8db71235d20f74356440539a1bcb6d232",

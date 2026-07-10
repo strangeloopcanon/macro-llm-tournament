@@ -76,6 +76,73 @@ dynamic-macro-confirmatory-june:
 		--lock configs/dynamic_macro/confirmatory_june_2026_v1.json \
 		--output-dir outputs/dynamic_macro_confirmatory_june_2026_v1
 
+.PHONY: dynamic-macro-household-scale-cohorts dynamic-macro-household-scale-fixture dynamic-macro-household-scale-81-live dynamic-macro-household-scale-200-live dynamic-macro-household-scale-compare
+dynamic-macro-household-scale-cohorts:
+	PYTHONPATH=src python3 -m macro_llm_tournament.persistent_households \
+		--input-csv work/persona_beliefs/sce_real_microdata.csv \
+		--output-dir work/persona_beliefs/persistent_household_scale_v1 \
+		--private-output-dir work/persona_beliefs/persistent_household_scale_v1_private \
+		--cohort-event-date 2025-04-01 \
+		--master-sample-size 200 \
+		--core-sample-size 81 \
+		--sample-seed 20250709
+
+dynamic-macro-household-scale-fixture:
+	rm -rf outputs/dynamic_macro_household_scale_81_fixture_v1 outputs/dynamic_macro_household_scale_200_fixture_v1
+	@for size in 81 200; do \
+		CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
+			--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
+			--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_$$size.csv \
+			--mode fixture --provider codex_cli --model gpt-5.5 \
+			--contamination-policy unavailable_at_cutoff \
+			--score-origin-start 2026-02-01 --score-origin-end 2026-05-01 \
+			--behavior-policy-mode empirical_bridge \
+			--empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
+			--feedback-mode closed_loop --feedback-gain 1.0 \
+			--policy-rate-smoothing 0.85 --policy-state-mode origin_visible --policy-state-weight 1.0 \
+			--belief-gain-global 3.0 --belief-gain-inflation 1.5 \
+			--belief-gain-income 0.5 --belief-gain-unemployment 1.0 \
+			--household-flow-anchor origin_saving_rate --max-households-per-call 100 \
+			--bootstrap-replicates 1000 --bootstrap-seed 20260709 --max-live-calls 0 \
+			--output-dir outputs/dynamic_macro_household_scale_$${size}_fixture_v1 || exit $$?; \
+	done
+
+dynamic-macro-household-scale-81-live:
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
+		--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
+		--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_81.csv \
+		--mode live --provider codex_cli --model gpt-5.5 --contamination-policy unavailable_at_cutoff \
+		--score-origin-start 2026-02-01 --score-origin-end 2026-05-01 \
+		--behavior-policy-mode empirical_bridge --empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
+		--feedback-mode closed_loop --feedback-gain 1.0 --policy-rate-smoothing 0.85 \
+		--policy-state-mode origin_visible --policy-state-weight 1.0 \
+		--belief-gain-global 3.0 --belief-gain-inflation 1.5 --belief-gain-income 0.5 --belief-gain-unemployment 1.0 \
+		--household-flow-anchor origin_saving_rate --max-households-per-call 100 \
+		--semantic-retry-limit 2 --fresh-cache --bootstrap-replicates 1000 --bootstrap-seed 20260709 \
+		--max-live-calls 15 --output-dir outputs/dynamic_macro_household_scale_81_gpt55_live_v1
+
+dynamic-macro-household-scale-200-live:
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
+		--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
+		--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv \
+		--mode live --provider codex_cli --model gpt-5.5 --contamination-policy unavailable_at_cutoff \
+		--score-origin-start 2026-02-01 --score-origin-end 2026-05-01 \
+		--behavior-policy-mode empirical_bridge --empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
+		--feedback-mode closed_loop --feedback-gain 1.0 --policy-rate-smoothing 0.85 \
+		--policy-state-mode origin_visible --policy-state-weight 1.0 \
+		--belief-gain-global 3.0 --belief-gain-inflation 1.5 --belief-gain-income 0.5 --belief-gain-unemployment 1.0 \
+		--household-flow-anchor origin_saving_rate --max-households-per-call 100 \
+		--semantic-retry-limit 2 --fresh-cache --bootstrap-replicates 1000 --bootstrap-seed 20260709 \
+		--max-live-calls 30 --output-dir outputs/dynamic_macro_household_scale_200_gpt55_live_v1
+
+dynamic-macro-household-scale-compare:
+	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_household_scale \
+		--spec configs/dynamic_macro/household_scale_development_v1.json \
+		--historical-evidence reports/dynamic_macro_development_v1_evidence.json \
+		--run-81-dir outputs/dynamic_macro_household_scale_81_gpt55_live_v1 \
+		--run-200-dir outputs/dynamic_macro_household_scale_200_gpt55_live_v1 \
+		--output-dir outputs/dynamic_macro_household_scale_comparison_v1
+
 .PHONY: dynamic-macro-incumbent-replay
 dynamic-macro-incumbent-replay:
 	rm -rf outputs/dynamic_macro_incumbent_replay

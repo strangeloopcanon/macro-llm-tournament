@@ -98,6 +98,104 @@ def build_lock(root: Path, *, bundle: bool) -> Path:
     return path
 
 
+def build_scale_lock(root: Path, *, bundle: bool = True) -> Path:
+    legacy_path = build_lock(root, bundle=bundle)
+    legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    source_contract = json.loads(
+        (root / "configs" / "source_contract.json").read_text(encoding="utf-8")
+    )
+    winner_spec_path = root / "outputs" / "candidate_spec.json"
+    winner_spec = {
+        "mode": "live",
+        "provider": "codex_cli",
+        "model": "gpt-5.5",
+        "provider_reasoning_effort": "high",
+        "prompt_version": "demand_economy_belief_module_v5",
+        "max_households_per_call": 100,
+        "behavior_policy_mode": "empirical_bridge",
+        "behavior_policy_content_sha256": "profile-content",
+        "feedback_mode": "closed_loop",
+        "feedback_gain": 1.0,
+        "policy_rate_smoothing": 0.85,
+        "policy_state_mode": "origin_visible",
+        "policy_state_weight": 1.0,
+        "belief_gains": {
+            "global": 3.0,
+            "inflation": 1.5,
+            "income": 0.5,
+            "unemployment": 1.0,
+        },
+        "household_flow_anchor": {"mode": "origin_saving_rate"},
+        "household_provenance": {
+            "raw_input_file_sha256": sha(root / "work" / "households.csv")
+        },
+    }
+    write_json(winner_spec_path, winner_spec)
+    winner_manifest_path = root / "outputs" / "candidate_manifest.json"
+    winner_manifest = {
+        "status": "complete",
+        "bundle_sha256": "a" * 64,
+        "normalized_spec_sha256": canonical_sha(winner_spec),
+        "behavior_policy_content_sha256": "profile-content",
+        "macro_scores": {"llm": 1.0, "adaptive": 2.0},
+        "execution_source": source_contract,
+    }
+    write_json(winner_manifest_path, winner_manifest)
+    comparison_spec = root / "configs" / "comparison.json"
+    comparison_manifest = root / "outputs" / "comparison_manifest.json"
+    promotion_receipt = root / "outputs" / "promotion_receipt.json"
+    prompt_cards = root / "outputs" / "prompt_cards.csv"
+    live_attempts = root / "outputs" / "live_attempts.json"
+    cohort_manifest = root / "work" / "cohort_manifest.json"
+    write_json(comparison_spec, {"claim_scope": "developmental_retrospective_only"})
+    write_json(
+        comparison_manifest,
+        {
+            "status": "complete",
+            "claim_scope": "developmental_retrospective_only",
+            "winner": "corrected200",
+        },
+    )
+    write_json(
+        promotion_receipt,
+        {"status": "complete", "winner": "corrected200"},
+    )
+    prompt_cards.write_text("candidate,period_index,batch_index,batch_count\n", encoding="utf-8")
+    write_json(live_attempts, [])
+    write_json(cohort_manifest, {"counts": {"master_200": 200}})
+    legacy.update(
+        {
+            "schema_version": confirmation.SCALE_SCHEMA_VERSION,
+            "development": {
+                "winner_cohort": "corrected200",
+                "winner_scores": {"llm": 1.0, "adaptive": 2.0},
+                "prompt_version": "demand_economy_belief_module_v5",
+                "comparison_spec": locked(root, comparison_spec),
+                "comparison_manifest": locked(root, comparison_manifest),
+                "promotion_receipt": locked(root, promotion_receipt),
+                "winner_manifest": locked(root, winner_manifest_path),
+                "winner_spec": locked(root, winner_spec_path),
+            },
+            "inputs": {
+                **legacy["inputs"],
+                "prompt_cards": locked(root, prompt_cards),
+                "live_attempts": locked(root, live_attempts),
+                "cohort_manifest": locked(root, cohort_manifest),
+            },
+            "confirmation": {
+                **legacy["confirmation"],
+                "provider_reasoning_effort": "high",
+                "max_households_per_call": 100,
+                "llm_batches_per_period": 2,
+                "expected_accepted_live_calls": 2,
+                "max_live_calls": 6,
+            },
+        }
+    )
+    write_json(legacy_path, legacy)
+    return legacy_path
+
+
 def write_child_output(root: Path, output: Path) -> None:
     output.mkdir(parents=True)
     spec = {"mode": "replay_live", "provider": "codex_cli", "model": "gpt-5.5", "behavior_policy_content_sha256": "profile-content", "household_provenance": {"raw_input_file_sha256": sha(root / "work" / "households.csv")}, "replay_provenance": {"raw_records_sha256": sha(root / "work" / "replay.json"), "replay_prefix_period_count": 5}}
@@ -163,7 +261,97 @@ def write_child_output(root: Path, output: Path) -> None:
     write_json(output / "manifest.json", manifest)
 
 
+def rewrite_child_as_two_batch_scale_output(root: Path, output: Path) -> None:
+    spec_path = output / "normalized_spec.json"
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec.update(
+        provider_reasoning_effort="high",
+        max_households_per_call=100,
+        prompt_version="demand_economy_belief_module_v5",
+    )
+    write_json(spec_path, spec)
+    records = [
+        {
+            "candidate": "llm_belief",
+            "period_index": period,
+            "batch_index": batch,
+            "batch_count": 2,
+            "cache_identity": {"period_index": period},
+            "cache_hit": period < 5,
+        }
+        for period in range(6)
+        for batch in range(2)
+    ] + [
+        {"candidate": "adaptive", "period_index": period, "cache_hit": True}
+        for period in range(6)
+    ]
+    write_json(output / "raw_records.json", records)
+    attempts = []
+    for batch in range(2):
+        number = batch + 1
+        attempts.append(
+            {
+                "schema_version": "dynamic_macro_live_attempt_v2",
+                "attempt_number": number,
+                "attempt_id": f"live_attempt_{number:04d}",
+                "provider": "codex_cli",
+                "model": "gpt-5.5",
+                "period_index": 5,
+                "status": "accepted",
+                "started_at_utc": "2026-07-09T12:00:00+00:00",
+                "finished_at_utc": "2026-07-09T12:00:01+00:00",
+                "cache_file": f"demand_belief_{batch}.json",
+                "cache_file_sha256": "c" * 64,
+                "error_sha256": None,
+                "batch_index": batch,
+                "batch_count": 2,
+                "household_type_ids": [f"h{batch}"],
+                "household_type_ids_sha256": canonical_sha([f"h{batch}"]),
+                "prompt_payload_sha256": "e" * 64,
+                "provider_called": True,
+                "response_sha256": "f" * 64,
+                "journal_sha256": "d" * 64,
+            }
+        )
+    write_json(output / "live_attempts.json", attempts)
+    pd.DataFrame(
+        [
+            {"candidate": "llm", "period_index": 5, "batch_index": batch, "batch_count": 2}
+            for batch in range(2)
+        ]
+    ).to_csv(output / "prompt_cards.csv", index=False)
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(
+        normalized_spec_sha256=canonical_sha(spec),
+        replayed_record_count=10,
+        live_call_count=2,
+    )
+    manifest["outputs"] = {
+        name: sha(output / name) for name in OUTPUT_FILES if name != "manifest.json"
+    }
+    write_json(manifest_path, manifest)
+
+
 class DynamicMacroConfirmatoryTests(unittest.TestCase):
+    def test_scale_lock_and_two_batch_output_validate(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lock_path = build_scale_lock(root, bundle=True)
+            output = root / "outputs" / "scale_run"
+            write_child_output(root, output)
+            rewrite_child_as_two_batch_scale_output(root, output)
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            with patch.object(confirmation, "PROJECT_ROOT", root):
+                confirmation._validate_lock(lock)
+                candidate = confirmation._validate_development(lock)
+                self.assertEqual(candidate["belief_gain_global"], 3.0)
+                result = confirmation._validate_output(
+                    lock, {"bundle_sha256": "b" * 64, "score_target_names": [f"target_{i}" for i in range(10)]}, output
+                )
+            self.assertEqual(result["replayed_record_count"], 10)
+            self.assertEqual(result["live_attempt_count"], 2)
+
     def test_missing_bundle_fails_before_receipt(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

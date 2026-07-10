@@ -29,6 +29,7 @@ from .source_provenance import SourceProvenanceError, validate_source_contract
 
 
 SCHEMA_VERSION = "dynamic_macro_confirmatory_lock_v1"
+SCALE_SCHEMA_VERSION = "dynamic_macro_confirmatory_lock_v2"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ORIGINS = tuple(f"2026-{month:02d}-01" for month in range(1, 7))
 ROWS_PER_ORIGIN = 10
@@ -67,7 +68,7 @@ def run_confirmation(args: argparse.Namespace) -> dict[str, Any]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise DynamicMacroConfirmatoryError("Confirmatory output directory must be absent or empty")
     receipt = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": lock["schema_version"],
         "status": "started",
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "lock_sha256": _sha(lock_path),
@@ -92,7 +93,8 @@ def run_confirmation(args: argparse.Namespace) -> dict[str, Any]:
 
 def _validate_lock(lock: dict[str, Any]) -> dict[str, Any]:
     confirmation = lock.get("confirmation")
-    if lock.get("schema_version") != SCHEMA_VERSION:
+    schema = lock.get("schema_version")
+    if schema not in {SCHEMA_VERSION, SCALE_SCHEMA_VERSION}:
         raise DynamicMacroConfirmatoryError("Unsupported confirmatory lock schema")
     if lock.get("claim_scope") != "future_confirmatory_only":
         raise DynamicMacroConfirmatoryError("Retrospective work cannot be called confirmatory")
@@ -104,13 +106,27 @@ def _validate_lock(lock: dict[str, Any]) -> dict[str, Any]:
         raise DynamicMacroConfirmatoryError("Confirmatory origins must be January-June with June scored")
     if int(confirmation.get("replay_prefix_period_count", -1)) != 5 or int(confirmation.get("target_rows_per_origin", -1)) != ROWS_PER_ORIGIN:
         raise DynamicMacroConfirmatoryError("Confirmatory replay or target contract changed")
+    expected_batches = int(confirmation.get("llm_batches_per_period", 1))
+    expected_accepted = int(
+        confirmation.get("expected_accepted_live_calls", expected_batches)
+    )
+    expected_max_calls = expected_batches * 3
     if (
         confirmation.get("provider") != "codex_cli"
         or confirmation.get("model") != "gpt-5.5"
         or int(confirmation.get("semantic_retry_limit", -1)) != 2
-        or int(confirmation.get("max_live_calls", 0)) != 3
+        or expected_batches not in {1, 2}
+        or expected_accepted != expected_batches
+        or int(confirmation.get("max_live_calls", 0)) != expected_max_calls
     ):
         raise DynamicMacroConfirmatoryError("Confirmatory provider/model/live-call contract changed")
+    if schema == SCALE_SCHEMA_VERSION and (
+        confirmation.get("provider_reasoning_effort") != "high"
+        or int(confirmation.get("max_households_per_call", 0)) != 100
+    ):
+        raise DynamicMacroConfirmatoryError(
+            "Scale confirmatory reasoning or batch-size contract changed"
+        )
     source_lock = lock.get("execution_source")
     _locked_file(source_lock, "execution source contract")
     try:
@@ -120,6 +136,8 @@ def _validate_lock(lock: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_development(lock: dict[str, Any]) -> dict[str, Any]:
+    if lock.get("schema_version") == SCALE_SCHEMA_VERSION:
+        return _validate_scale_development(lock)
     development = lock.get("development")
     inputs = lock.get("inputs")
     if not isinstance(development, dict) or not isinstance(inputs, dict):
@@ -162,6 +180,97 @@ def _validate_development(lock: dict[str, Any]) -> dict[str, Any]:
     if candidate_spec.get("household_provenance", {}).get("raw_input_file_sha256") != inputs["households"]["sha256"]:
         raise DynamicMacroConfirmatoryError("Development household provenance changed")
     return candidate
+
+
+def _validate_scale_development(lock: dict[str, Any]) -> dict[str, Any]:
+    development = lock.get("development")
+    inputs = lock.get("inputs")
+    if not isinstance(development, dict) or not isinstance(inputs, dict):
+        raise DynamicMacroConfirmatoryError(
+            "Scale confirmatory development lock is incomplete"
+        )
+    for name in (
+        "comparison_spec",
+        "comparison_manifest",
+        "promotion_receipt",
+        "winner_manifest",
+        "winner_spec",
+    ):
+        _locked_file(development.get(name), name)
+    for name in (
+        "bundle_manifest",
+        "households",
+        "profile",
+        "replay_records",
+        "prompt_cards",
+        "live_attempts",
+        "cohort_manifest",
+    ):
+        _locked_file(inputs.get(name), name)
+
+    comparison = _read_json(_path(development["comparison_manifest"]))
+    receipt = _read_json(_path(development["promotion_receipt"]))
+    winner_manifest = _read_json(_path(development["winner_manifest"]))
+    winner_spec = _read_json(_path(development["winner_spec"]))
+    winner = str(development.get("winner_cohort", ""))
+    if (
+        comparison.get("status") != "complete"
+        or comparison.get("claim_scope") != "developmental_retrospective_only"
+        or comparison.get("winner") != winner
+        or receipt.get("status") != "complete"
+        or receipt.get("winner") != winner
+    ):
+        raise DynamicMacroConfirmatoryError(
+            "Household-scale promotion does not match the locked winner"
+        )
+    if winner_manifest.get("status") != "complete":
+        raise DynamicMacroConfirmatoryError("Locked winner run is incomplete")
+    if _canonical_sha(winner_spec) != winner_manifest.get("normalized_spec_sha256"):
+        raise DynamicMacroConfirmatoryError("Locked winner normalized spec is invalid")
+    if (
+        winner_spec.get("household_provenance", {}).get("raw_input_file_sha256")
+        != inputs["households"]["sha256"]
+    ):
+        raise DynamicMacroConfirmatoryError("Locked winner household input changed")
+    if winner_spec.get("prompt_version") != development.get("prompt_version"):
+        raise DynamicMacroConfirmatoryError("Locked winner prompt version changed")
+    source_contract = _read_json(_path(lock["execution_source"]))
+    if winner_manifest.get("execution_source") != source_contract:
+        raise DynamicMacroConfirmatoryError("Locked winner executable source changed")
+    scores = development.get("winner_scores")
+    recorded_scores = winner_manifest.get("macro_scores")
+    if not isinstance(scores, dict) or not isinstance(recorded_scores, dict) or any(
+        not math.isclose(
+            float(recorded_scores.get(key, math.nan)),
+            float(expected),
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        )
+        for key, expected in scores.items()
+    ):
+        raise DynamicMacroConfirmatoryError("Locked winner scores changed")
+    bundle_manifest = _read_json(_path(inputs["bundle_manifest"]))
+    if winner_manifest.get("bundle_sha256") != bundle_manifest.get("bundle_sha256"):
+        raise DynamicMacroConfirmatoryError("Locked winner development bundle changed")
+
+    gains = winner_spec.get("belief_gains", {})
+    required_gains = {"global", "inflation", "income", "unemployment"}
+    if not isinstance(gains, dict) or not required_gains.issubset(gains):
+        raise DynamicMacroConfirmatoryError("Locked winner belief gains are incomplete")
+    return {
+        "behavior_policy_mode": winner_spec["behavior_policy_mode"],
+        "hybrid_state_weight": float(winner_spec.get("hybrid_state_weight", 1.0)),
+        "feedback_mode": winner_spec["feedback_mode"],
+        "feedback_gain": float(winner_spec["feedback_gain"]),
+        "policy_rate_smoothing": float(winner_spec["policy_rate_smoothing"]),
+        "policy_state_mode": winner_spec["policy_state_mode"],
+        "policy_state_weight": float(winner_spec["policy_state_weight"]),
+        "belief_gain_global": float(gains["global"]),
+        "belief_gain_inflation": float(gains["inflation"]),
+        "belief_gain_income": float(gains["income"]),
+        "belief_gain_unemployment": float(gains["unemployment"]),
+        "household_flow_anchor": winner_spec["household_flow_anchor"]["mode"],
+    }
 
 
 def _validate_bundle(lock: dict[str, Any]) -> dict[str, Any]:
@@ -274,12 +383,17 @@ def _run_child(lock: dict[str, Any], candidate: dict[str, Any], output_dir: Path
         str(c["semantic_retry_limit"]),
         "--max-live-calls",
         str(c["max_live_calls"]),
+        "--max-households-per-call",
+        str(c.get("max_households_per_call", 100)),
         "--fresh-cache",
         "--output-dir",
         str(output_dir),
     ]
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
+    env["CODEX_CLI_REASONING_EFFORT"] = str(
+        c.get("provider_reasoning_effort", "high")
+    )
     result = subprocess.run(command, cwd=PROJECT_ROOT, env=env, text=True, capture_output=True, check=False)
     if result.returncode:
         raise DynamicMacroConfirmatoryError(f"Confirmatory child failed: {(result.stderr or result.stdout).strip()[:1000]}")
@@ -297,6 +411,14 @@ def _validate_output(lock: dict[str, Any], bundle: dict[str, Any], root: Path) -
         raise DynamicMacroConfirmatoryError("Confirmatory child manifest identity is invalid")
     if spec.get("mode") != "replay_live" or spec.get("provider") != "codex_cli" or spec.get("model") != "gpt-5.5":
         raise DynamicMacroConfirmatoryError("Confirmatory child provider mode changed")
+    if lock.get("schema_version") == SCALE_SCHEMA_VERSION and (
+        spec.get("provider_reasoning_effort") != "high"
+        or int(spec.get("max_households_per_call", 0)) != 100
+        or spec.get("prompt_version") != lock["development"].get("prompt_version")
+    ):
+        raise DynamicMacroConfirmatoryError(
+            "Confirmatory child reasoning, batching, or prompt contract changed"
+        )
     expected_source = _read_json(_path(lock["execution_source"]))
     if manifest.get("execution_source") != expected_source:
         raise DynamicMacroConfirmatoryError("Confirmatory executable source provenance changed")
@@ -305,18 +427,32 @@ def _validate_output(lock: dict[str, Any], bundle: dict[str, Any], root: Path) -
     replay = spec.get("replay_provenance", {})
     if replay.get("raw_records_sha256") != lock["inputs"]["replay_records"]["sha256"] or replay.get("replay_prefix_period_count") != 5:
         raise DynamicMacroConfirmatoryError("Confirmatory replay provenance changed")
-    development_profile_sha = _read_json(_path(lock["development"]["candidate_manifest"])).get("behavior_policy_content_sha256")
+    if lock.get("schema_version") == SCALE_SCHEMA_VERSION:
+        development_profile_sha = _read_json(
+            _path(lock["development"]["winner_spec"])
+        ).get("behavior_policy_content_sha256")
+    else:
+        development_profile_sha = _read_json(
+            _path(lock["development"]["candidate_manifest"])
+        ).get("behavior_policy_content_sha256")
     if not development_profile_sha or spec.get("behavior_policy_content_sha256") != development_profile_sha:
         raise DynamicMacroConfirmatoryError("Confirmatory behavior profile provenance changed")
     contract = manifest.get("score_origin_contract", {})
     if contract.get("scored_origins") != ["2026-06-01"] or contract.get("scored_origin_count") != 1 or manifest.get("scored_target_row_count") != 10:
         raise DynamicMacroConfirmatoryError("Confirmatory child must score only June and ten rows")
     live_call_count = manifest.get("live_call_count")
+    expected_batches = int(lock["confirmation"].get("llm_batches_per_period", 1))
+    expected_replayed = 5 * expected_batches
+    expected_accepted = int(
+        lock["confirmation"].get("expected_accepted_live_calls", expected_batches)
+    )
     if (
-        manifest.get("replayed_record_count") != 5
+        manifest.get("replayed_record_count") != expected_replayed
         or not isinstance(live_call_count, int)
         or isinstance(live_call_count, bool)
-        or not 1 <= live_call_count <= int(lock["confirmation"]["max_live_calls"])
+        or not expected_accepted
+        <= live_call_count
+        <= int(lock["confirmation"]["max_live_calls"])
     ):
         raise DynamicMacroConfirmatoryError("Confirmatory replay/live accounting is invalid")
     accounting = pd.read_csv(root / "accounting.csv")
@@ -358,31 +494,78 @@ def _validate_output(lock: dict[str, Any], bundle: dict[str, Any], root: Path) -
         )
     accepted_attempts = [row for row in attempts if row["status"] == "accepted"]
     if (
-        len(accepted_attempts) != 1
-        or accepted_attempts[0]["period_index"] != 5
-        or accepted_attempts[0]["provider"] != "codex_cli"
-        or accepted_attempts[0]["model"] != "gpt-5.5"
+        len(accepted_attempts) != expected_accepted
+        or any(row["period_index"] != 5 for row in accepted_attempts)
+        or any(row["provider"] != "codex_cli" for row in accepted_attempts)
+        or any(row["model"] != "gpt-5.5" for row in accepted_attempts)
+        or sorted(int(row.get("batch_index", 0)) for row in accepted_attempts)
+        != list(range(expected_batches))
+        or any(
+            int(row.get("batch_count", 1)) != expected_batches
+            for row in accepted_attempts
+        )
     ):
         raise DynamicMacroConfirmatoryError(
-            "Confirmatory live-attempt ledger must contain one accepted June payload"
+            "Confirmatory live-attempt ledger must contain every accepted June batch"
         )
     llm_records = [row for row in records if row.get("candidate") == "llm_belief"]
     adaptive_records = [row for row in records if row.get("candidate") == "adaptive"]
-    llm_periods = [
-        row.get("cache_identity", {}).get("period_index") for row in llm_records
+    llm_layout = [
+        (
+            row.get("cache_identity", {}).get("period_index"),
+            int(row.get("batch_index", 0)),
+        )
+        for row in llm_records
+    ]
+    expected_llm_layout = [
+        (period, batch)
+        for period in range(6)
+        for batch in range(expected_batches)
+    ]
+    replay_records = [
+        row
+        for row in llm_records
+        if int(row.get("cache_identity", {}).get("period_index", row.get("period_index")))
+        < 5
+    ]
+    june_records = [
+        row
+        for row in llm_records
+        if int(row.get("cache_identity", {}).get("period_index", row.get("period_index")))
+        == 5
     ]
     if (
-        len(records) != 12
-        or len(llm_records) != 6
+        len(records) != 6 * expected_batches + 6
+        or len(llm_records) != 6 * expected_batches
         or len(adaptive_records) != 6
-        or llm_periods != list(range(6))
-        or any(row.get("cache_hit") is not True for row in llm_records[:5])
-        or llm_records[5].get("cache_hit") is not False
+        or llm_layout != expected_llm_layout
+        or any(row.get("cache_hit") is not True for row in replay_records)
+        or any(row.get("cache_hit") is not False for row in june_records)
         or any(row.get("cache_hit") is not True for row in adaptive_records)
     ):
         raise DynamicMacroConfirmatoryError(
-            "Confirmatory run must replay five LLM periods, accept one June LLM payload, and retain six adaptive audit records"
+            "Confirmatory run must replay five LLM periods, accept every June batch, and retain six adaptive audit records"
         )
+    if lock.get("schema_version") == SCALE_SCHEMA_VERSION:
+        prompt_cards = pd.read_csv(root / "prompt_cards.csv")
+        required_prompt_columns = {"candidate", "period_index", "batch_index", "batch_count"}
+        if not required_prompt_columns.issubset(prompt_cards.columns):
+            raise DynamicMacroConfirmatoryError(
+                "Confirmatory prompt cards lack batch provenance"
+            )
+        june_prompts = prompt_cards[
+            prompt_cards["candidate"].astype(str).eq("llm")
+            & pd.to_numeric(prompt_cards["period_index"], errors="coerce").eq(5)
+        ]
+        if (
+            len(june_prompts) != expected_batches
+            or sorted(june_prompts["batch_index"].astype(int))
+            != list(range(expected_batches))
+            or set(june_prompts["batch_count"].astype(int)) != {expected_batches}
+        ):
+            raise DynamicMacroConfirmatoryError(
+                "Confirmatory June prompt batches do not match the lock"
+            )
     output_contract = manifest.get("output_contract")
     expected_contract = set(ECONOMY_OUTPUT_FILES)
     if (
@@ -468,7 +651,7 @@ def _validate_output(lock: dict[str, Any], bundle: dict[str, Any], root: Path) -
         "macro_scores": macro_scores,
         "llm_minus_adaptive": score_delta,
         "max_accounting_abs_residual": residual,
-        "replayed_record_count": 5,
+        "replayed_record_count": expected_replayed,
         "scored_origin_month": "2026-06-01",
         "scored_target_row_count": 10,
     }
