@@ -138,17 +138,13 @@ class ReplayThenLiveDemandClient:
                     scenario, period_state, household_states
                 )
             except LLMUnavailable as exc:
-                if not str(exc).startswith("Demand economy belief payload"):
-                    raise
                 if attempt >= self.semantic_retry_limit:
                     raise
                 cache_path = self._live.belief_cache_path(
                     scenario, period_state, household_states
                 )
                 if not cache_path.is_file():
-                    raise DynamicMacroError(
-                        "Structurally invalid live payload has no cache artifact to quarantine"
-                    ) from exc
+                    raise
                 rejected_dir = self.cache_dir / "rejected_semantic"
                 rejected_dir.mkdir(parents=True, exist_ok=True)
                 payload_sha = hashlib.sha256(cache_path.read_bytes()).hexdigest()
@@ -595,4 +591,3 @@ def belief_gains_from_args(args: argparse.Namespace) -> dict[str, float]:
     if any(not math.isfinite(value) or value < 0.0 for value in gains.values()):
         raise DynamicMacroError("Belief gains must be finite and non-negative")
     return gains
-

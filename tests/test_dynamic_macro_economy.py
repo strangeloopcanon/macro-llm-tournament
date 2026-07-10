@@ -448,7 +448,7 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                     "belief_panel",
                     side_effect=[
                         LLMUnavailable(
-                            "Demand economy belief payload missing household type_ids: h"
+                            "Duplicate demand economy household type_id: h"
                         ),
                         valid,
                     ],
@@ -466,6 +466,49 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                 len(list((root / ".cache" / "rejected_semantic").glob("*.json"))),
                 1,
             )
+
+    def test_replay_live_does_not_reclassify_provider_failure_as_semantic(self) -> None:
+        records = [
+            {
+                "provider": "codex_cli",
+                "model": "gpt-5.5",
+                "variant": "llm_belief",
+                "scenario_id": "recursive_monthly_path",
+                "period_index": 0,
+                "cache_identity": {"state_identity_sha256": "state-0"},
+            }
+        ]
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            client = ReplayThenLiveDemandClient(
+                "codex_cli",
+                "gpt-5.5",
+                root / ".cache",
+                replay_records=records,
+                replay_prefix_period_count=1,
+                max_live_calls=3,
+                semantic_retry_limit=1,
+                execution_cwd=root / "provider_cwd",
+            )
+            with (
+                patch.object(
+                    client._live,
+                    "belief_panel",
+                    side_effect=LLMUnavailable("provider unavailable"),
+                ),
+                patch.object(
+                    client._live,
+                    "belief_cache_path",
+                    return_value=root / "missing.json",
+                ),
+            ):
+                with self.assertRaisesRegex(LLMUnavailable, "provider unavailable"):
+                    client._live_belief_panel_with_semantic_retry(
+                        DemandScenario("recursive_monthly_path", "test"),
+                        {"period_index": 1},
+                        [],
+                    )
+            self.assertEqual(client.semantic_retry_count, 0)
 
     def test_score_origin_range_keeps_warmup_path_but_excludes_it_from_scores(self) -> None:
         bundle = fixture_bundle()
