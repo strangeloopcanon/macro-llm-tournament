@@ -1028,6 +1028,18 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                     assert_no_prompt_target_leakage(
                         [{"prompt_payload": {"nested": [{forbidden: 1.0}]}}]
                     )
+        for forbidden in (
+            "actual_expected_inflation_1y",
+            "first_release_denominator_hidden",
+            "latest_revision_hidden",
+            "forecast_error_scaled",
+            "target_realized_path",
+        ):
+            with self.subTest(forbidden_prefix=forbidden):
+                with self.assertRaisesRegex(DynamicMacroError, forbidden):
+                    assert_no_prompt_target_leakage(
+                        [{"prompt_payload": {"nested": [{forbidden: 1.0}]}}]
+                    )
 
     def test_raw_record_replay_is_deterministic_and_identity_checked(self) -> None:
         with (

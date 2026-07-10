@@ -35,6 +35,13 @@ FORBIDDEN_PROMPT_KEYS = frozenset(
         "first_release_denominator_value",
     }
 )
+FORBIDDEN_PROMPT_PREFIXES = (
+    "actual_",
+    "first_release_",
+    "latest_revision_",
+    "forecast_error_",
+    "target_realized_",
+)
 
 
 class DynamicMacroError(ValueError):

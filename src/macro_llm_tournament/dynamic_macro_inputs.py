@@ -24,6 +24,7 @@ from .demand_economy import (
 from .dynamic_macro_common import (
     BundleView,
     DynamicMacroError,
+    FORBIDDEN_PROMPT_PREFIXES,
     FORBIDDEN_PROMPT_KEYS,
     _first_column,
     _first_finite,
@@ -1140,7 +1141,13 @@ def load_behavior_profile(args: argparse.Namespace) -> dict[str, Any] | None:
 def assert_no_prompt_target_leakage(prompt_rows: Iterable[dict[str, Any]]) -> None:
     def walk(value: Any) -> None:
         if isinstance(value, dict):
-            leaked = FORBIDDEN_PROMPT_KEYS.intersection(map(str, value.keys()))
+            keys = tuple(map(str, value.keys()))
+            leaked = set(FORBIDDEN_PROMPT_KEYS.intersection(keys))
+            leaked.update(
+                key
+                for key in keys
+                if key.startswith(FORBIDDEN_PROMPT_PREFIXES)
+            )
             if leaked:
                 raise DynamicMacroError(
                     f"Prompt target leakage detected: {', '.join(sorted(leaked))}"
