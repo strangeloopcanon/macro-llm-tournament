@@ -45,6 +45,9 @@ class DynamicMacroIntegrationTests(unittest.TestCase):
             "dynamic-macro-policy-tournament-fixture",
             "dynamic-macro-policy-tournament-live",
             "dynamic-macro-policy-tournament-resume",
+            "dynamic-macro-policy-partial-fixture",
+            "dynamic-macro-policy-partial-live",
+            "dynamic-macro-policy-partial-resume",
         ):
             self.assertRegex(makefile, rf"(?m)^{re.escape(target)}:[^\n]*$")
 

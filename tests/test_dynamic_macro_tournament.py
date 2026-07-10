@@ -76,6 +76,7 @@ def fake_child(spec, candidate, *, mode, output_dir):
         "feedback_gain": candidate["feedback_gain"],
         "policy_rate_smoothing": candidate["policy_rate_smoothing"],
         "policy_state_mode": candidate["policy_state_mode"],
+        "policy_state_weight": candidate["policy_state_weight"],
         "behavior_policy_mode": candidate["behavior_policy_mode"],
         "belief_gains": {
             "global": candidate["belief_gain_global"],
@@ -150,6 +151,7 @@ class DynamicMacroTournamentTests(unittest.TestCase):
                 all(
                     candidate["policy_rate_smoothing"] == 0.0
                     and candidate["policy_state_mode"] == "recursive"
+                    and candidate["policy_state_weight"] == 1.0
                     for candidate in first["candidates"]
                 )
             )
@@ -294,6 +296,67 @@ class DynamicMacroTournamentTests(unittest.TestCase):
             self.assertTrue(bool(scores.loc["candidate_a", "resumed_existing_result"]))
             self.assertEqual(scores.loc["candidate_b", "prior_failed_live_call_count"], 1)
             self.assertTrue((output / "failed_attempts" / "candidate_b_attempt_1").is_dir())
+
+    def test_live_multi_resume_fails_before_exceeding_candidate_cap(self) -> None:
+        def write_live_calls(directory: Path, count: int) -> None:
+            cache = directory / ".cache" / "codex_cli"
+            cache.mkdir(parents=True)
+            for index in range(count):
+                (cache / f"call_{index}.json").write_text(
+                    json.dumps(
+                        {
+                            "provider": "codex_cli",
+                            "model": "gpt-5.5",
+                            "cache_hit": False,
+                            "response_created_utc": f"2026-07-09T00:00:0{index}+00:00",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+        with TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            spec_path = write_inputs(root)
+            normalized = normalize_spec(
+                json.loads(spec_path.read_text()), spec_path=spec_path
+            )
+            output = root / "out"
+            output.mkdir()
+            (output / "normalized_spec.json").write_text(
+                json.dumps(normalized, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            write_live_calls(
+                output / "failed_attempts" / "candidate_a_attempt_1", 2
+            )
+            write_live_calls(
+                output / "failed_attempts" / "candidate_a_attempt_2", 2
+            )
+            write_live_calls(output / "candidates" / "candidate_a", 2)
+            args = parse_args(
+                [
+                    "--spec",
+                    str(spec_path),
+                    "--mode",
+                    "live",
+                    "--max-live-calls",
+                    "12",
+                    "--output-dir",
+                    str(output),
+                    "--resume",
+                ]
+            )
+            with patch(
+                "macro_llm_tournament.dynamic_macro_tournament._run_candidate"
+            ) as run_child:
+                with self.assertRaisesRegex(
+                    DynamicMacroTournamentError, "exhausted its cumulative live-call cap"
+                ):
+                    run_tournament(args)
+            run_child.assert_not_called()
+            self.assertTrue(
+                (output / "failed_attempts" / "candidate_a_attempt_3").is_dir()
+            )
 
 
 if __name__ == "__main__":

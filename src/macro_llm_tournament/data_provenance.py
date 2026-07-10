@@ -86,6 +86,11 @@ PACKAGED_DATA_FILES: dict[str, dict[str, str]] = {
         "source": "tracked_configuration",
         "notes": "Locked policy-inertia mechanism comparison on the corrected development surface.",
     },
+    "configs/dynamic_macro/development_policy_partial_v4.json": {
+        "dataset": "dynamic_macro_development_spec",
+        "source": "tracked_configuration",
+        "notes": "Locked partial policy-state assimilation comparison on the corrected development surface.",
+    },
     "configs/behavior_profiles/empirical_bridge_v4.json": {
         "dataset": "dynamic_macro_behavior_profile",
         "source": "tracked_configuration",

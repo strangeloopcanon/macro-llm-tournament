@@ -94,12 +94,20 @@ def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
     family_frames: list[pd.DataFrame] = []
     origin_frames: list[pd.DataFrame] = []
     used_live_calls = 0
-    failed_live_calls = 0
-    failed_attempts: list[dict[str, Any]] = []
+    failed_attempts = _load_failed_candidate_attempts(output_dir) if args.resume else []
+    failed_live_calls = sum(int(row["live_call_count"]) for row in failed_attempts)
+    if failed_live_calls > int(args.max_live_calls):
+        raise DynamicMacroTournamentError(
+            "Archived failed calls exceed the tournament authorization"
+        )
     for index, candidate in enumerate(spec["candidates"], start=1):
         candidate_id = candidate["candidate_id"]
         candidate_dir = output_dir / "candidates" / candidate_id
-        prior_failed_for_candidate = 0
+        prior_failed_for_candidate = sum(
+            int(row["live_call_count"])
+            for row in failed_attempts
+            if row["candidate_id"] == candidate_id
+        )
         try:
             if args.resume and _candidate_output_is_complete(candidate_dir):
                 resumed_existing = True
@@ -109,12 +117,28 @@ def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
                     archived = _archive_failed_candidate_attempt(
                         output_dir, candidate_id, candidate_dir
                     )
-                    prior_failed_for_candidate = int(archived["live_call_count"])
-                    failed_live_calls += prior_failed_for_candidate
                     failed_attempts.append(archived)
+                    newly_failed = int(archived["live_call_count"])
+                    prior_failed_for_candidate += newly_failed
+                    failed_live_calls += newly_failed
+                remaining_candidate_calls = int(candidate["max_live_calls"]) - int(
+                    prior_failed_for_candidate
+                )
+                if args.mode == "live" and remaining_candidate_calls <= 0:
+                    raise DynamicMacroTournamentError(
+                        f"Candidate {candidate_id} exhausted its cumulative live-call cap"
+                    )
+                candidate_for_run = {
+                    **candidate,
+                    "max_live_calls": (
+                        remaining_candidate_calls
+                        if args.mode == "live"
+                        else int(candidate["max_live_calls"])
+                    ),
+                }
                 _run_candidate(
                     spec,
-                    candidate,
+                    candidate_for_run,
                     mode=args.mode,
                     output_dir=candidate_dir,
                 )
@@ -289,6 +313,9 @@ def normalize_spec(raw: dict[str, Any], *, spec_path: Path) -> dict[str, Any]:
             "policy_state_mode": str(
                 raw_candidate.get("policy_state_mode", "recursive")
             ),
+            "policy_state_weight": float(
+                raw_candidate.get("policy_state_weight", 1.0)
+            ),
             "belief_gain_global": float(raw_candidate.get("belief_gain_global", 1.0)),
             "belief_gain_inflation": float(raw_candidate.get("belief_gain_inflation", 1.0)),
             "belief_gain_income": float(raw_candidate.get("belief_gain_income", 1.0)),
@@ -301,6 +328,7 @@ def normalize_spec(raw: dict[str, Any], *, spec_path: Path) -> dict[str, Any]:
             candidate["hybrid_state_weight"],
             candidate["feedback_gain"],
             candidate["policy_rate_smoothing"],
+            candidate["policy_state_weight"],
             candidate["belief_gain_global"],
             candidate["belief_gain_inflation"],
             candidate["belief_gain_income"],
@@ -311,6 +339,10 @@ def normalize_spec(raw: dict[str, Any], *, spec_path: Path) -> dict[str, Any]:
         if candidate["policy_rate_smoothing"] > 1.0:
             raise DynamicMacroTournamentError(
                 f"Candidate {candidate_id} policy_rate_smoothing must not exceed one"
+            )
+        if candidate["policy_state_weight"] > 1.0:
+            raise DynamicMacroTournamentError(
+                f"Candidate {candidate_id} policy_state_weight must not exceed one"
             )
         if candidate["policy_state_mode"] not in {"recursive", "origin_visible"}:
             raise DynamicMacroTournamentError(
@@ -389,6 +421,8 @@ def _run_candidate(spec: dict[str, Any], candidate: dict[str, Any], *, mode: str
         str(candidate["policy_rate_smoothing"]),
         "--policy-state-mode",
         candidate["policy_state_mode"],
+        "--policy-state-weight",
+        str(candidate["policy_state_weight"]),
         "--belief-gain-global",
         str(candidate["belief_gain_global"]),
         "--belief-gain-inflation",
@@ -601,9 +635,51 @@ def _archive_failed_candidate_attempt(
 ) -> dict[str, Any]:
     failed_root = output_dir / "failed_attempts"
     failed_root.mkdir(parents=True, exist_ok=True)
-    attempt_number = 1 + len(list(failed_root.glob(f"{candidate_id}_attempt_*")))
+    existing_numbers = [
+        int(path.name.rsplit("_", 1)[-1])
+        for path in failed_root.glob(f"{candidate_id}_attempt_*")
+        if path.name.rsplit("_", 1)[-1].isdigit()
+    ]
+    attempt_number = 1 + max(existing_numbers, default=0)
     archived = failed_root / f"{candidate_id}_attempt_{attempt_number}"
     candidate_dir.replace(archived)
+    return _summarize_failed_candidate_attempt(
+        output_dir,
+        candidate_id=candidate_id,
+        attempt_number=attempt_number,
+        archived=archived,
+    )
+
+
+def _load_failed_candidate_attempts(output_dir: Path) -> list[dict[str, Any]]:
+    failed_root = output_dir / "failed_attempts"
+    if not failed_root.is_dir():
+        return []
+    attempts: list[dict[str, Any]] = []
+    for archived in sorted(failed_root.iterdir()):
+        match = re.fullmatch(r"([a-z][a-z0-9_]{2,63})_attempt_(\d+)", archived.name)
+        if not archived.is_dir() or match is None:
+            raise DynamicMacroTournamentError(
+                f"Malformed failed-attempt archive: {archived.name}"
+            )
+        attempts.append(
+            _summarize_failed_candidate_attempt(
+                output_dir,
+                candidate_id=match.group(1),
+                attempt_number=int(match.group(2)),
+                archived=archived,
+            )
+        )
+    return attempts
+
+
+def _summarize_failed_candidate_attempt(
+    output_dir: Path,
+    *,
+    candidate_id: str,
+    attempt_number: int,
+    archived: Path,
+) -> dict[str, Any]:
     live_cache_records: list[dict[str, Any]] = []
     for path in sorted(archived.glob(".cache/**/*.json")):
         try:
@@ -641,6 +717,7 @@ def _assert_child_spec_matches_candidate(
         "feedback_gain": candidate["feedback_gain"],
         "policy_rate_smoothing": candidate["policy_rate_smoothing"],
         "policy_state_mode": candidate["policy_state_mode"],
+        "policy_state_weight": candidate["policy_state_weight"],
         "behavior_policy_mode": candidate["behavior_policy_mode"],
     }
     for key, expected in expected_controls.items():

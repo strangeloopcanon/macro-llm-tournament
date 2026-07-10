@@ -80,6 +80,7 @@ class DemandScenario:
     feedback_gain: float = 1.0
     policy_rate_smoothing: float = 0.0
     policy_state_mode: str = "recursive"
+    policy_state_weight: float = 1.0
     notes: str = ""
 
 
@@ -982,6 +983,8 @@ def run_demand_economy(
             raise ValueError(
                 f"Unsupported policy_state_mode: {scenario.policy_state_mode}"
             )
+        if not 0.0 <= float(scenario.policy_state_weight) <= 1.0:
+            raise ValueError("policy_state_weight must be between 0 and 1")
     periods_per_year = _validated_periods_per_year(periods_per_year)
     normalized_period_overrides = _normalize_period_overrides(period_overrides)
     normalized_initial_environment = _normalize_initial_environment_override(initial_environment_override)
@@ -2142,7 +2145,13 @@ def _environment_for_period(
         raise ValueError(
             "origin_visible policy state requires a finite policy_rate value"
         )
-    return {**env, "policy_rate": policy_rate}
+    weight = float(scenario.policy_state_weight)
+    return {
+        **env,
+        "policy_rate": (
+            weight * policy_rate + (1.0 - weight) * float(env["policy_rate"])
+        ),
+    }
 
 
 def _realize_household_period(

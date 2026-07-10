@@ -279,6 +279,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use the recursive policy state or assimilate the frozen origin-visible FEDFUNDS state each month.",
     )
     parser.add_argument(
+        "--policy-state-weight",
+        type=float,
+        default=1.0,
+        help="Weight on the origin-visible policy observation when policy-state assimilation is enabled.",
+    )
+    parser.add_argument(
         "--household-flow-anchor",
         choices=("origin_saving_rate", "none"),
         default="origin_saving_rate",
@@ -419,6 +425,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         feedback_gain=float(args.feedback_gain),
         policy_rate_smoothing=float(args.policy_rate_smoothing),
         policy_state_mode=str(args.policy_state_mode),
+        policy_state_weight=float(args.policy_state_weight),
         notes="One continuous trajectory; targets are withheld until scoring.",
     )
 
@@ -2568,6 +2575,7 @@ def normalized_spec(
         "feedback_gain": float(args.feedback_gain),
         "policy_rate_smoothing": float(args.policy_rate_smoothing),
         "policy_state_mode": str(args.policy_state_mode),
+        "policy_state_weight": float(args.policy_state_weight),
         "belief_gains": gains,
         "initial_environment_anchor": initial_environment_anchor,
         "initial_environment_anchor_origin": bundle.origins[0],
@@ -2782,6 +2790,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         args.policy_rate_smoothing
     ) <= 1.0:
         raise DynamicMacroError("--policy-rate-smoothing must be between zero and one")
+    if not math.isfinite(float(args.policy_state_weight)) or not 0.0 <= float(
+        args.policy_state_weight
+    ) <= 1.0:
+        raise DynamicMacroError("--policy-state-weight must be between zero and one")
     if (
         not math.isfinite(float(args.hybrid_state_weight))
         or not 0.0 <= float(args.hybrid_state_weight) <= 1.0

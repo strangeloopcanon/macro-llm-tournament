@@ -352,6 +352,68 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                 period_override={},
             )
 
+    def test_partial_policy_assimilation_preserves_recursive_smoothing(self) -> None:
+        initial = {
+            "periods_per_year": 12.0,
+            "policy_rate": 4.25,
+            "employment_rate": 0.956,
+            "inflation_rate": 3.2,
+        }
+        aggregate = {
+            "output_gap_pct": 0.0,
+            "aggregate_consumption": 1.0,
+            "aggregate_job_loss_belief": 8.0,
+            "aggregate_confidence_index": 60.0,
+            "aggregate_liquid_buffer_months": 3.0,
+        }
+        override = {
+            "origin_visible_state_assimilation": {
+                "policy_rate": {
+                    "series_id": "FEDFUNDS",
+                    "observation_date": "2026-01-01",
+                    "value": 3.64,
+                }
+            }
+        }
+        unsmoothed = DemandScenario(
+            "unsmoothed_partial",
+            "unsmoothed partial",
+            policy_rate_smoothing=0.0,
+            policy_state_mode="origin_visible",
+            policy_state_weight=0.5,
+        )
+        smoothed = DemandScenario(
+            "smoothed_partial",
+            "smoothed partial",
+            policy_rate_smoothing=0.85,
+            policy_state_mode="origin_visible",
+            policy_state_weight=0.5,
+        )
+        first_unsmoothed = _environment_for_period(
+            initial, unsmoothed, period_override=override
+        )
+        first_smoothed = _environment_for_period(
+            initial, smoothed, period_override=override
+        )
+        next_unsmoothed = _next_environment(
+            first_unsmoothed, aggregate, unsmoothed, feedback_mode="closed_loop"
+        )
+        next_smoothed = _next_environment(
+            first_smoothed, aggregate, smoothed, feedback_mode="closed_loop"
+        )
+        second_unsmoothed = _environment_for_period(
+            next_unsmoothed, unsmoothed, period_override=override
+        )
+        second_smoothed = _environment_for_period(
+            next_smoothed, smoothed, period_override=override
+        )
+        self.assertNotEqual(
+            second_smoothed["policy_rate"], second_unsmoothed["policy_rate"]
+        )
+        self.assertLess(
+            second_smoothed["policy_rate"], second_unsmoothed["policy_rate"]
+        )
+
     def test_replay_live_semantic_retry_quarantines_bad_cached_payload(self) -> None:
         records = [
             {
