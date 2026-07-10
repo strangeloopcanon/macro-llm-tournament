@@ -4,11 +4,11 @@
 
 The project started with a broad question: can LLM agents simulate the macroeconomy well enough to produce useful forecasts and counterfactuals?
 
-The answer is now narrower, cleaner, and more useful. Frontier LLMs are good macro belief engines. They forecast hidden macro outcomes better than strong statistical baselines, survive direct recall audits, and update beliefs in the right direction when given a person's prior beliefs. They are not, at least in the current evidence, reliable generators of individual household heterogeneity from demographics or backstories. The best behavior interfaces are measured or scheduled functions that deterministic code executes against household state. The real-data bridge gets the Phase 4 economy very close to the adaptive-expectations comparison on the original one-card replay; when the belief-panel horizon is extended and aligned to the scored FRED horizon, the LLM-updater economy wins the first retrospective two-card comparison. A macro-economy tournament searches full-economy variants directly and finds retrospective improvements, but rankings are unstable across the two small scoring surfaces and become visibly surface-fit at the frontier. The December belief-update leg that had failed its persistence gate was diagnosed as an information-set defect (a quarterly-stale environment card), re-elicited under a pre-registered monthly-vintage fix, and now clears its gate at diagnostic status; the aligned Phase 4 win survives that full re-elicitation. A later one-shot February 2026 held-out diagnostic is negative, but it does not qualify as a real-time-vintage confirmation: both LLM-economy candidates lose to adaptive on four current-vintage target rows, using December 2024 beliefs held forward.
+The answer is now narrower, cleaner, and more useful. Frontier LLMs are good macro belief engines. They forecast hidden macro outcomes better than strong statistical baselines, survive direct recall audits, and update beliefs in the right direction when given a person's prior beliefs. They are not reliable generators of individual household heterogeneity from demographics or backstories. The best behavior interfaces are measured or scheduled functions that deterministic code executes against household state. The real-data bridge gets the Phase 4 economy close to adaptive expectations, and horizon-aligned retrospective replays can beat it. The new recursive economy now runs 81 real SCE household states through five post-cutoff monthly origins, feeds simulated state forward, preserves accounting, and scores 10 first-release macro targets per scored origin. Its selected development candidate improves the base recursive LLM economy by `2.61%` but remains `0.2%` behind the adaptive twin (`0.549789` versus `0.548667`), with an uncertainty interval that crosses zero. That exact candidate is frozen for a one-shot June 2026 test once the complete first-release target set exists.
 
 The short version:
 
-**LLMs are belief updaters and policy-function authors, not reliable household simulacra. Individual heterogeneity has to come from data; once it is supplied, the model can partly update beliefs, and measured code has to translate those beliefs into feasible actions.**
+**LLMs are belief updaters and policy-function authors, not reliable household simulacra. Individual heterogeneity has to come from data; once it is supplied, the model can update beliefs inside a recursive, accounting-safe economy. That economy now runs and nearly matches a strong adaptive benchmark, but has not yet beaten it on a fresh frozen-vintage macro test.**
 
 That is not the original maximal claim, but it is a real result. It says where LLMs add signal, where they fail, and what an honest macro-agent architecture should look like next.
 
@@ -34,7 +34,9 @@ That is not the original maximal claim, but it is a real result. It says where L
 | Does full-economy tournament search improve the incumbent? | Yes, modestly and retrospectively. | The v1 runner scored `5,670` candidates across two already-scored Phase 4 surfaces with zero live calls and no disqualifications. Its winner improves mean LLM scaled RMSE from `0.7249` to `0.7208` and is retained as the historical `macro_incumbent_v1` replay. The corrected-panel v3 search later selects a different candidate, so v1 is not the current best economy. |
 | Does extended tournament search find a real optimum? | No stable point optimum. | The v2 grid's best candidate sits at its global-gain boundary (`3.0`, mean `0.7087`). A wider frontier eventually reverses, but cross-surface rankings are already strongly negative within v2/v3 and fall to about `-0.75` at the extreme frontier. The broad preference for stronger inflation updates and damped income updates repeats across December panel draws; the exact candidate does not. |
 | Does the held-out February 2026 diagnostic reproduce the retrospective Phase 4 win? | No. | The one-shot run scores four available targets (`n=1` each) for the `2026-02-15` score date. Unit-gain v5 scores `2.1202`; conservative amplified v4 scores `2.1256`; adaptive is better for both (`2.1019`-`2.1009`). The inputs were revised current FRED observations retrieved in July 2026, not frozen February vintages, and beliefs were held forward from December 2024. The score date remains spent, but this is not independently pre-registered confirmatory evidence. |
-| Is the economy ready as a validated macro simulator? | No. | The accounting-safe demand sandbox works and Phase 4 has retrospective matched-twin wins after horizon alignment. No valid real-time-vintage confirmation has yet run. |
+| Does the recursive 81-household economy work end to end? | Yes. | Five monthly origins run from real SCE states through GPT-5.5 belief updates, empirical spending behavior, deterministic accounting, macro feedback, and 10-target first-release scoring. January is warmup; February-May contribute 40 score rows; max accounting residual is `7.28e-12`. |
+| Does the current recursive LLM economy beat adaptive expectations? | Not yet. | The selected full-policy-state candidate improves the base LLM economy from `0.564533` to `0.549789`, but adaptive scores `0.548667`. The relative gap is `0.2%`, and the origin-block bootstrap interval for LLM minus adaptive is `[-0.00633, 0.00910]`. |
+| Is the economy ready as a validated macro simulator? | No. | It is now a real recursive simulation and a developmental near-tie. The exact winner is frozen for one June 2026 confirmation, which remains unspent until the complete first-release bundle is available. |
 
 ## Finding 1: The Aggregate Belief Engine Works
 
@@ -232,38 +234,39 @@ The right economy architecture now looks different from the early "personas simu
 4. Treat behavior mechanisms as separately validated modules, not as free-form LLM allocation guesses.
 5. Compare the resulting economy to an adaptive-expectations twin: the same demand economy with LLM belief updates swapped out for a standard adaptive baseline.
 
-As a picture, the pipeline that now exists is:
+As a picture, the current recursive pipeline is:
 
 ```text
-real SCE respondents' ---.
-prior survey answers     |
-                         v
-real macro news --> [1. LLM BELIEF UPDATER]        <- the only LLM step
-(as-of vintage)          |                            (banked calls,
-                         | updated household beliefs  replayed at zero cost)
-                         v
-                    [2. DETERMINISTIC BEHAVIOR KERNEL]
-                         |                            <- no LLM: fixed equations,
-                         | consumption / saving /        hard budget constraints
-                         | borrowing decisions
-                         v
-                    [3. ONE-GOOD DEMAND ECONOMY]      <- accounting identities
-                         |                               checked every period
-                         | aggregates via locked,
-                         | sha-pinned output mapping (v2)
-                         v
-real FRED data ---> [4. SCORE AGAINST REALITY]
-(post-cutoff)            :
-                         :  planned, not yet wired: simulated state
-                         :  feeding back into step 1 prompts
-                         :.................> back to step 1
+real SCE household priors -----> [1. GPT-5.5 BELIEF UPDATER]
+as-of monthly vintage --------->              |
+                                               | updated beliefs
+                                               v
+                              [2. EMPIRICAL SPENDING BRIDGE v4]
+                                               |
+                                               | consumption pressure
+                                               v
+                              [3. DETERMINISTIC HOUSEHOLD EXECUTION]
+                                               |
+                                               | consume / save / repay debt
+                                               v
+                              [4. ACCOUNTING-SAFE DEMAND ECONOMY]
+                                               |
+                                               | output, jobs, income,
+                                               | prices, policy, balances
+                                               v
+                                   next-origin state and prompt
+                                               |
+                                               '----------> back to [1]
 
-CONTROL: the identical economy runs twice -- LLM updater vs
-mechanical adaptive-expectations updater in step 1. The LLM
-layer only earns its keep if its twin scores better.
+frozen first-release data ----> [5. TEN-TARGET MACRO SCORE]
+
+CONTROL: the same households, bridge, economy, information, and
+targets run with a mechanical adaptive-expectations updater in [1].
 ```
 
-The LLM never chooses actions (raw LLM allocations lost to a liquidity rule), personas are conditioned on real respondents' prior answers rather than invented from profiles (both profile-only and backstory-only personas failed their gates), and the feedback loop from simulated state into prompts stays unwired until the open-loop economy beats the adaptive twin.
+The LLM does not directly choose household allocations in the current winner. Raw allocations lost to a liquidity rule, while profile-only and backstory-only personas failed their real-data gates. Real respondent priors supply heterogeneity; the LLM updates beliefs; empirical and deterministic layers translate them into feasible actions. Under `closed_loop`, simulated household and macro state enters the next period. The winner also assimilates the observed rolling-origin policy rate before its next smoothed Taylor-rule transition, so this is a recursive economy with partial observed-state assimilation, not a fully endogenous policy path.
+
+The chronology below records the earlier Phase 4 bridges that led to this architecture.
 
 That final comparison now has a fixture harness and an exploratory replay. `outputs/phase4_matched_twins_fixture/` locks the output-to-proxy mapping, runs the LLM-belief and adaptive-expectations twins from the same initial state, preserves accounting, and emits comparable post-cutoff proxy scores. Its verdict is `phase4_matched_twin_fixture_ready`, with max accounting residual `2.91e-11` and zero live calls.
 
@@ -389,9 +392,29 @@ A follow-up frontier probe (`configs/macro_tournament/development_v2b_gain_front
 
 A third run (`configs/macro_tournament/development_v3.json`, same grid as v2) re-scored the search after the December leg was re-elicited under the monthly-vintage fix, using the gated v2 combined panel for the aligned surface. The broad story across the two December draws is similar — v4 bridge, stronger inflation updates, damped income updates — but the preferred unemployment gain flips from `1.5` to `0.5` and the improvement over unit gains shrinks (`0.7240` versus `0.7308`). That supports a regional mechanism hypothesis, not a stable tuned candidate.
 
+### Recursive macro economy: the current development winner
+
+The earlier Phase 4 surfaces replayed a short belief panel through a scoring bridge. The current lane is a genuine recursive simulation. It starts with 81 real SCE households and their supplied priors, balances, demographics, and weights. At each monthly origin, GPT-5.5 updates household inflation, real-income, unemployment-risk, and confidence beliefs from origin-visible information. Empirical bridge v4 converts those changes into consumption pressure. Deterministic code executes consumption, saving, debt repayment, liquidity, income, employment, inflation, and policy-rate transitions, checks accounting, and carries state into the next origin. The adaptive twin changes only the belief updater.
+
+The frozen January-May 2026 bundle uses common-month first-release targets. January is warmup; February-May are scored against 10 targets in five equally weighted families: demand, balance sheets, labor, prices, and income/policy. Every one of the 50 catalogue rows was first released after GPT-5.5's December 1, 2025 cutoff. Prompts contain origin-visible history and simulated state, never target realizations or target aliases.
+
+The corrected seven-candidate tournament selected empirical bridge v4 with global belief gain `3.0`, inflation gain `1.5`, income gain `0.5`, and unemployment-risk gain `1.0`. It scored `0.564533` against adaptive `0.564235`. A bounded policy-state follow-up then compared no assimilation, full origin-visible policy-state assimilation, and a half-weight recursive compromise:
+
+| Recursive candidate | LLM MacroScore | Adaptive | LLM minus adaptive | Result |
+| --- | ---: | ---: | ---: | --- |
+| Base empirical v4 | `0.564533` | `0.564235` | `+0.000297` | Near tie; base candidate. |
+| Full observed policy state, `0.85` smoothing | **`0.549789`** | `0.548667` | `+0.001122` | Best absolute LLM score; selected. |
+| Half observed policy state, `0.85` smoothing | `0.555688` | `0.549828` | `+0.005860` | Preserves more recursive policy state but scores worse. |
+
+Lower is better. The winner improves the base LLM economy by `2.61%`, but adaptive remains `0.2%` better. The four scored origins are too few to call that difference: the circular origin-block bootstrap interval for LLM minus adaptive is `[-0.00633, 0.00910]`. The selected mechanism's gain comes mainly from the income/policy family. Full policy-state assimilation means the observed policy rate is reintroduced at each rolling origin before the next smoothed Taylor-rule transition; it is state estimation, not a claim that the policy path is fully endogenous.
+
+All three candidates pass accounting with a maximum absolute residual of `7.28e-12`. The live partial-assimilation run also exercised the retry machinery: seven failed or malformed attempts were preserved, three valid cached months were reused, and one final live call completed the fifth origin without exceeding the locked cap. Those failures affect cost and provenance, not winner selection.
+
+The mechanism search now stops. The winner, provider, GPT-5.5 model identity, household file, empirical bridge, five replay records, target contract, executable source tree, and hashes are frozen in `configs/dynamic_macro/confirmatory_june_2026_v1.json`. The one-shot runner validates the full bundle before creating an atomic receipt, then permits exactly one accepted June payload with two schema-retry calls. A complete receipt requires the full hashed output contract and independently recomputes the target, family, origin, and macro scores from the joined error rows. It currently fails before the receipt because the June 10-target first-release bundle is incomplete; the final required [BEA Personal Income and Outlays release is scheduled for July 30, 2026](https://www.bea.gov/news/schedule/).
+
 ## What We Can Claim Now
 
-The evidence supports nine positive claims:
+The evidence supports ten positive claims:
 
 1. **Frontier LLMs contain audited macro belief signal.** GPT-5.5 and GPT-5.4 beat strong empirical baselines on a hidden-target vintage macro tournament, and live recall probes do not find realized-value recall.
 2. **Raw GPT-5.5 contains behavior signal in one out-of-domain windfall family.** It generalizes where tuned rules break, but that result does not transfer to predictable income-loss dynamics.
@@ -402,8 +425,9 @@ The evidence supports nine positive claims:
 7. **A horizon-aligned Phase 4 replay can beat the adaptive twin, and the win survives re-elicitation.** On the retrospective two-card aligned run, the LLM-updater economy beats adaptive under both v4 and v5 empirical bridges, and the win holds after the December leg was fully re-elicited under the corrected monthly-vintage information set.
 8. **Full-economy tournament search finds a repeatable regional mechanism, not a stable winner.** Both December panel draws prefer stronger inflation updates and damped income updates, but cross-surface rankings and exact per-target gains are unstable.
 9. **The December gate failure was an information-set defect, not an updater defect.** Under the pre-registered monthly-vintage card fix, the December re-run clears the locked prior-update gate at diagnostic status (`+0.0323` versus the `+0.02` threshold).
+10. **A recursive 81-household macroeconomy now runs over post-cutoff monthly vintages.** It carries beliefs, household balance sheets, demand, labor, prices, income, and policy state through five origins, preserves accounting, and improves its base LLM MacroScore by `2.61%` after policy-state assimilation.
 
-The evidence also supports eleven negative claims:
+The evidence also supports twelve negative claims:
 
 1. **Profile-only personas fail on real SCE microdata.**
 2. **Backstory elicitation fails by caricature rather than rescuing heterogeneity.**
@@ -416,24 +440,23 @@ The evidence also supports eleven negative claims:
 9. **The original December prior-update extension did not clear the locked prior-update gate.** Diagnosis traced this to a quarterly-stale environment card; the pre-registered monthly-vintage re-run clears the gate, but only at diagnostic status, and the inflation target alone still loses to persistence.
 10. **The fresh January 2025 prior-update leg fails its gate.** Under the corrected monthly cards the model over-reacts at the individual level (amplitude ratio `1.27`), losing to persistence on RMSE (`-0.0904`). Per pre-registration, no January surface was built.
 11. **The one-shot February held-out diagnostic fails.** Both LLM-economy candidates lose to adaptive, and the amplified candidate does not beat unit-gain v5. Because the run used revised current-vintage FRED inputs, held December beliefs forward, scored four targets with `n=1` each, and was not independently locked in git before scoring, it is not confirmatory evidence.
+12. **The current recursive winner does not beat adaptive expectations on January-May development data.** It is only `0.2%` behind, and the uncertainty interval crosses zero, but the recorded score is still a loss.
 
 The full claim remains open:
 
-**We have not yet shown confirmatorily that an LLM-based simulated economy predicts real macro behavior better than strong empirical alternatives.** We have shown a retrospective version when horizons are aligned and a negative one-shot held-out diagnostic under revised current-vintage data. The system is a simulatable, accounting-safe macro sandbox with useful belief and behavior modules; it is not a validated macro predictor.
+**We have built a recursive, accounting-safe LLM economy, but have not yet shown confirmatorily that it predicts macro behavior better than a strong adaptive benchmark.** The current development result is a near tie, with adaptive ahead. The next evidence is not another mechanism tweak; it is the locked June run.
 
 ## Recommended Next Work
 
-The next phase should not chase richer personas. It should build from the results that survived: prior-conditioned belief updating, schedule-based behavior elicitation, and the real-data spending bridge.
+The next phase is already specified.
 
-1. Treat the v5 bridge as the current stabilized bridge, not as a target to keep tuning. It passed the hard gates and improved the original replay, but its validation diagnostic still fails.
-2. Fix the individual-level over-reaction exposed by the failed January leg before eliciting more waves: under richer monthly cards the model's update amplitude (`1.27`) overshoots real respondents. A pre-registered amplitude-damping rule in the elicitation (not post-hoc scaling) is the natural candidate.
-3. Treat the `2026-02-15` score date as spent. Do not tune on it or rerun it under a renamed surface.
-4. Keep the aligned two-card result as retrospective evidence only. The next confirmation needs an aligned belief-update panel that clears its own gate, frozen and hashed ALFRED/release-aware inputs, a complete target contract, and a clean pre-result commit.
-5. Keep the Phase 4 v2 output mapping locked unless there is a pre-registered replacement; bind the exact mapping and all input hashes into the pre-score reservation.
-6. Keep the CTC, lottery, UI, and reserved spending-windfall behavior families frozen for mechanism evaluation. Any further behavior promotion needs a new never-scored family.
-7. Keep the post-cutoff forecast gate running in the background as new public data becomes scoreable.
+1. Do not tune another mechanism on January-May. The current winner is frozen.
+2. Build the complete January-June common-month bundle only after all 10 June first releases exist, expected July 30, 2026.
+3. Run `make dynamic-macro-confirmatory-june` once. Five banked periods replay; GPT-5.5 supplies one accepted June update; only June's 10 targets are scored.
+4. Report the outcome at full volume whether the LLM economy wins or loses. The result earns the narrow claim: LLM belief updating does or does not improve an accounting-constrained recursive economy over adaptive expectations on a fresh frozen-vintage month.
+5. Keep the post-cutoff forecast gate accruing in the background. Any later model-building round needs a new development surface, not reuse of June.
 
-Everything else is lower priority. The forecast evidence is already strong. The backstory route is closed. Point-behavior elicitation is closed; the schedule interface is the live route.
+The forecast evidence is already strong. Persona generation and point-behavior elicitation are closed. The current question is now clean: does the locked recursive economy carry its developmental near-tie into one fresh month?
 
 ## Methods Appendix
 
@@ -476,6 +499,12 @@ The prior-update environment-v2 pre-registration is `reports/prior_update_enviro
 
 The historical February tournament spec is `configs/macro_tournament/confirmatory_fred_2026_02_v1.json`; `make macro-confirmatory-v1` spent the `2026-02-15` score date and wrote `outputs/macro_confirmatory_fred_2026_02_v1/`. Its compact tracked evidence is `reports/macro_confirmatory_fred_2026_02_v1_evidence.json`, and its registry is `reports/macro_tournament_confirmatory_registry.json`. The arithmetic is negative: unit-gain v5 scores `2.1202`, conservative v4/moderate-gain scores `2.1256`, and adaptive is better for both (`2.1019`-`2.1009`). The evidence bundle is now explicitly marked as a downgraded held-out current-vintage diagnostic. Future confirmatory code reserves an immutable score-date key before scoring, uses a canonical locked registry, requires a complete target contract and both candidate results, and records code/input hashes.
 
+### Recursive dynamic macro lane
+
+`prepare_dynamic_macro_panel.py` builds the 81-household SCE input with event-date and public-availability provenance. `frozen_vintage_bundle.py` freezes six canonical CSV payloads and validates their full target catalogue, source requests, first-release vintages, contamination labels, and hashes. `dynamic_macro_economy.py` runs the matched twins and emits household, prompt, belief, decision, period, accounting, forecast, error, target, family, origin, replay, and manifest artifacts. `dynamic_macro_tournament.py` applies the locked developmental selection rule and journals live attempts before provider calls so resumes cannot hide spent budget.
+
+The current development output is `outputs/dynamic_macro_policy_partial_gpt55_live_v4/`. Its tracked compact evidence is `reports/dynamic_macro_development_v1_evidence.json`. The winner's five raw records are banked at `work/dynamic_macro/banked_gpt55_development_v1/policy_assimilation_100_smoothing_085_periods_0_4.json`; `make dynamic-macro-incumbent-replay` reproduces the selected score and accounting path with zero provider calls. The June lock is `configs/dynamic_macro/confirmatory_june_2026_v1.json`, with the exact Python source tree frozen in `reports/dynamic_macro_confirmation_source_lock_v1.json`. `dynamic_macro_confirmatory.py` validates every locked development input, the executable source, the complete canonical January-June bundle, and every score artifact before atomically completing the one-shot receipt.
+
 ### Reproducibility notes
 
-The canonical report in the repository is `reports/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The Phase 4 v4 diagnostic artifacts are under `outputs/phase4_v4_diagnostics/`. The research-path retrospective is `reports/research_retrospective.md`. The latest full local contract passed `199` tests. The data-asset event stream (downloads, derivations, run manifests, all timestamped) is `data_provenance/data_events.jsonl`.
+The canonical report in the repository is `reports/macro_simulation_report.md`. The live elicitation campaign artifacts are under `outputs/persona_elicitation_campaign/`. The Phase 4 fixture artifacts are under `outputs/phase4_matched_twins_fixture/`. The Phase 4 v4 diagnostic artifacts are under `outputs/phase4_v4_diagnostics/`. The research-path retrospective is `reports/research_retrospective.md`. The full local contract passes `292` tests. The data-asset event stream (downloads, derivations, run manifests, all timestamped) is `data_provenance/data_events.jsonl`.

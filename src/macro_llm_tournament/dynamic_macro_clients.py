@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
+import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +30,258 @@ from .dynamic_macro_common import (
     _sha256_json,
 )
 from .llm_common import LLMUnavailable
+
+
+LIVE_ATTEMPT_SCHEMA_VERSION = "dynamic_macro_live_attempt_v1"
+_LIVE_ATTEMPT_STATUSES = frozenset({"started", "accepted", "failed"})
+_ATTEMPT_FILE_RE = re.compile(r"attempt_(\d{4,})\.json")
+
+
+def canonical_live_attempts(journal_dir: Path) -> list[dict[str, Any]]:
+    """Return the public ledger derived from durable pre-call journals."""
+    if not journal_dir.exists():
+        return []
+    if not journal_dir.is_dir():
+        raise DynamicMacroError("Live-attempt journal path must be a directory")
+
+    journals: list[tuple[int, Path]] = []
+    for path in sorted(journal_dir.iterdir()):
+        match = _ATTEMPT_FILE_RE.fullmatch(path.name)
+        if match is None or not path.is_file() or path.is_symlink():
+            raise DynamicMacroError(f"Malformed live-attempt journal entry: {path}")
+        journals.append((int(match.group(1)), path))
+    if [number for number, _ in journals] != list(range(1, len(journals) + 1)):
+        raise DynamicMacroError("Live-attempt journal sequence is not contiguous")
+
+    rows: list[dict[str, Any]] = []
+    for attempt_number, path in journals:
+        try:
+            journal = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DynamicMacroError(f"Malformed live-attempt journal: {path}") from exc
+        row = _canonical_live_attempt_row(journal, attempt_number=attempt_number)
+        row["journal_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        rows.append(row)
+    validate_live_attempt_ledger(rows)
+    return rows
+
+
+def validate_live_attempt_ledger(
+    rows: Any, *, allow_started: bool = False
+) -> list[dict[str, Any]]:
+    """Validate the serialized ledger without consulting private cache files."""
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise DynamicMacroError("Live-attempt ledger must be a JSON list of objects")
+    required = {
+        "schema_version",
+        "attempt_number",
+        "attempt_id",
+        "provider",
+        "model",
+        "period_index",
+        "status",
+        "started_at_utc",
+        "finished_at_utc",
+        "cache_file",
+        "cache_file_sha256",
+        "error_sha256",
+        "journal_sha256",
+    }
+    for expected_number, row in enumerate(rows, start=1):
+        if set(row) != required:
+            raise DynamicMacroError("Live-attempt ledger row has an invalid schema")
+        if (
+            row["schema_version"] != LIVE_ATTEMPT_SCHEMA_VERSION
+            or row["attempt_number"] != expected_number
+            or row["attempt_id"] != f"live_attempt_{expected_number:04d}"
+            or not isinstance(row["provider"], str)
+            or not row["provider"]
+            or not isinstance(row["model"], str)
+            or not row["model"]
+            or not isinstance(row["period_index"], int)
+            or row["period_index"] < 0
+            or row["status"] not in _LIVE_ATTEMPT_STATUSES
+            or not isinstance(row["started_at_utc"], str)
+            or not row["started_at_utc"]
+            or not isinstance(row["cache_file"], str)
+            or not row["cache_file"]
+            or not _is_sha256(row["journal_sha256"])
+        ):
+            raise DynamicMacroError("Live-attempt ledger row is invalid")
+        if row["status"] == "started":
+            if not allow_started or row["finished_at_utc"] is not None:
+                raise DynamicMacroError("Live-attempt ledger contains an unfinished call")
+        elif not isinstance(row["finished_at_utc"], str) or not row["finished_at_utc"]:
+            raise DynamicMacroError("Live-attempt ledger row lacks a completion timestamp")
+        if row["status"] == "accepted" and not _is_sha256(row["cache_file_sha256"]):
+            raise DynamicMacroError("Accepted live-attempt ledger row lacks its cache hash")
+        if row["status"] == "failed" and not _is_sha256(row["error_sha256"]):
+            raise DynamicMacroError("Failed live-attempt ledger row lacks its error hash")
+        if row["cache_file_sha256"] is not None and not _is_sha256(row["cache_file_sha256"]):
+            raise DynamicMacroError("Live-attempt ledger cache hash is invalid")
+        if row["error_sha256"] is not None and not _is_sha256(row["error_sha256"]):
+            raise DynamicMacroError("Live-attempt ledger error hash is invalid")
+    return list(rows)
+
+
+def _canonical_live_attempt_row(
+    journal: Any, *, attempt_number: int
+) -> dict[str, Any]:
+    if not isinstance(journal, dict):
+        raise DynamicMacroError("Live-attempt journal must be a JSON object")
+    required = {
+        "schema_version",
+        "attempt_number",
+        "attempt_id",
+        "provider",
+        "model",
+        "period_index",
+        "status",
+        "started_at_utc",
+        "finished_at_utc",
+        "cache_file",
+        "cache_file_sha256",
+        "error_sha256",
+    }
+    if set(journal) != required:
+        raise DynamicMacroError("Live-attempt journal has an invalid schema")
+    return {key: journal[key] for key in sorted(required)}
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+class LiveAttemptJournal:
+    """Durably record every cache-miss call before it reaches the provider."""
+
+    def __init__(self, journal_dir: Path, *, provider: str, model: str) -> None:
+        self.journal_dir = journal_dir
+        self.provider = provider
+        self.model = model
+
+    def start(self, period_state: Mapping[str, Any], cache_path: Path) -> Path:
+        self.journal_dir.mkdir(parents=True, exist_ok=True)
+        existing = list(self.journal_dir.iterdir())
+        numbers: list[int] = []
+        for path in existing:
+            match = _ATTEMPT_FILE_RE.fullmatch(path.name)
+            if match is None or not path.is_file() or path.is_symlink():
+                raise DynamicMacroError(f"Malformed live-attempt journal entry: {path}")
+            numbers.append(int(match.group(1)))
+        if sorted(numbers) != list(range(1, len(numbers) + 1)):
+            raise DynamicMacroError("Live-attempt journal sequence is not contiguous")
+        attempt_number = len(numbers) + 1
+        path = self.journal_dir / f"attempt_{attempt_number:04d}.json"
+        _write_durable_json(
+            path,
+            {
+                "schema_version": LIVE_ATTEMPT_SCHEMA_VERSION,
+                "attempt_number": attempt_number,
+                "attempt_id": f"live_attempt_{attempt_number:04d}",
+                "provider": self.provider,
+                "model": self.model,
+                "period_index": int(period_state["period_index"]),
+                "status": "started",
+                "started_at_utc": datetime.now(timezone.utc).isoformat(),
+                "finished_at_utc": None,
+                "cache_file": _cache_file_label(cache_path),
+                "cache_file_sha256": None,
+                "error_sha256": None,
+            },
+        )
+        return path
+
+    def finish_for_cache(
+        self, path: Path, cache_path: Path, *, status: str, error: str | None = None
+    ) -> None:
+        if status not in {"accepted", "failed"}:
+            raise DynamicMacroError("Live-attempt journal has an invalid completion status")
+        try:
+            journal = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DynamicMacroError(f"Malformed live-attempt journal: {path}") from exc
+        _canonical_live_attempt_row(journal, attempt_number=int(journal.get("attempt_number", 0)))
+        if journal["status"] != "started":
+            raise DynamicMacroError("Live-attempt journal was already completed")
+        journal.update(
+            {
+                "status": status,
+                "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                "cache_file_sha256": (
+                    hashlib.sha256(cache_path.read_bytes()).hexdigest()
+                    if cache_path.is_file()
+                    else None
+                ),
+                "error_sha256": (
+                    hashlib.sha256(error.encode("utf-8")).hexdigest()
+                    if error is not None
+                    else None
+                ),
+            }
+        )
+        _write_durable_json(path, journal)
+
+
+def _cache_file_label(path: Path) -> str:
+    return path.name
+
+
+def _write_durable_json(path: Path, value: dict[str, Any]) -> None:
+    serialized = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(serialized)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+class JournaledLiveDemandClient:
+    """Add pre-call audit journals to the live DemandEconomyClient path."""
+
+    def __init__(self, base: DemandEconomyClient, journal: LiveAttemptJournal) -> None:
+        self._base = base
+        self._journal = journal
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def belief_cache_path(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> Path:
+        return self._base.belief_cache_path(scenario, period_state, household_states)
+
+    def belief_panel(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        cache_path = self.belief_cache_path(scenario, period_state, household_states)
+        attempt_path = (
+            None if cache_path.is_file() else self._journal.start(period_state, cache_path)
+        )
+        try:
+            panel = self._base.belief_panel(scenario, period_state, household_states)
+        except Exception as exc:
+            if attempt_path is not None:
+                self._journal.finish_for_cache(
+                    attempt_path, cache_path, status="failed", error=str(exc)
+                )
+            raise
+        if attempt_path is not None:
+            self._journal.finish_for_cache(attempt_path, cache_path, status="accepted")
+        return panel
+
+    def decision_panel(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self.belief_panel(scenario, period_state, household_states)
 
 
 def seed_live_cache(
@@ -95,6 +350,7 @@ class ReplayThenLiveDemandClient:
         max_live_calls: int,
         semantic_retry_limit: int,
         execution_cwd: Path | None,
+        journal_dir: Path | None = None,
     ) -> None:
         validate_replay_prefix_records(
             replay_records,
@@ -115,15 +371,25 @@ class ReplayThenLiveDemandClient:
             variant=self.variant,
             raw_replay_records=replay_records,
         )
-        self._live = DemandEconomyClient(
-            provider,
-            model,
-            cache_dir,
-            mode="live",
-            variant=self.variant,
-            max_live_calls=max_live_calls,
-            execution_cwd=execution_cwd,
-        )
+        if max_live_calls > 0:
+            self._live: Any = JournaledLiveDemandClient(
+                DemandEconomyClient(
+                    provider,
+                    model,
+                    cache_dir,
+                    mode="live",
+                    variant=self.variant,
+                    max_live_calls=max_live_calls,
+                    execution_cwd=execution_cwd,
+                ),
+                LiveAttemptJournal(
+                    journal_dir or cache_dir / "live_attempts",
+                    provider=provider,
+                    model=model,
+                ),
+            )
+        else:
+            self._live = _DisabledLiveDemandClient(provider, model, cache_dir)
         self._raw_records: list[dict[str, Any]] = []
         self._replayed_record_count = 0
         self._semantic_retry_count = 0
@@ -189,25 +455,12 @@ class ReplayThenLiveDemandClient:
             cache_path = self._live.belief_cache_path(
                 scenario, period_state, household_states
             )
-            attempt_path = (
-                None
-                if cache_path.is_file()
-                else self._start_live_attempt(period_state, cache_path)
-            )
             try:
                 panel = self._live.belief_panel(
                     scenario, period_state, household_states
                 )
-                if attempt_path is not None:
-                    self._finish_live_attempt(attempt_path, status="complete")
                 return panel
             except LLMUnavailable as exc:
-                if attempt_path is not None:
-                    self._finish_live_attempt(
-                        attempt_path,
-                        status="failed",
-                        error=str(exc),
-                    )
                 if attempt >= self.semantic_retry_limit:
                     raise
                 if not cache_path.is_file():
@@ -232,42 +485,6 @@ class ReplayThenLiveDemandClient:
                 )
         raise AssertionError("unreachable semantic retry loop")
 
-    def _start_live_attempt(
-        self, period_state: dict[str, Any], cache_path: Path
-    ) -> Path:
-        attempt_dir = self.cache_dir / "live_attempts"
-        attempt_dir.mkdir(parents=True, exist_ok=True)
-        sequence = 1 + len(list(attempt_dir.glob("attempt_*.json")))
-        path = attempt_dir / f"attempt_{sequence:04d}.json"
-        payload = {
-            "schema_version": "dynamic_macro_live_attempt_v1",
-            "status": "started",
-            "provider": self.provider,
-            "model": self.model,
-            "period_index": int(period_state["period_index"]),
-            "cache_file": cache_path.name,
-            "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return path
-
-    @staticmethod
-    def _finish_live_attempt(
-        path: Path,
-        *,
-        status: str,
-        error: str | None = None,
-    ) -> None:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload.update(
-            {
-                "status": status,
-                "finished_at_utc": datetime.now(timezone.utc).isoformat(),
-                "error": error[:500] if error else None,
-            }
-        )
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
     def decision_panel(
         self,
         scenario: DemandScenario,
@@ -275,6 +492,38 @@ class ReplayThenLiveDemandClient:
         household_states: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self.belief_panel(scenario, period_state, household_states)
+
+
+class _DisabledLiveDemandClient:
+    """Fail closed if a full-prefix zero-call replay unexpectedly needs a provider."""
+
+    variant = "llm_belief"
+
+    def __init__(self, provider: str, model: str, cache_dir: Path) -> None:
+        self.provider = provider
+        self.model = model
+        self.cache_dir = cache_dir
+        self.live_call_count = 0
+        self.cache_hit_count = 0
+        self.raw_records: list[dict[str, Any]] = []
+
+    def belief_cache_path(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> Path:
+        del scenario, period_state, household_states
+        return self.cache_dir / "disabled_live_call.json"
+
+    def belief_panel(
+        self,
+        scenario: DemandScenario,
+        period_state: dict[str, Any],
+        household_states: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        del scenario, period_state, household_states
+        raise LLMUnavailable("Live calls are disabled for this full-prefix replay")
 
 
 def validate_replay_prefix_records(

@@ -1,0 +1,38 @@
+{
+  "schema_version": "dynamic_macro_confirmatory_lock_v1",
+  "claim_scope": "future_confirmatory_only",
+  "execution_source": {
+    "path": "reports/dynamic_macro_confirmation_source_lock_v1.json",
+    "sha256": "edce8166b54a68066214945df6ee7f475ff21e82f2bc49f7f278b2fc29d32449"
+  },
+  "development": {
+    "winner_candidate_id": "empirical_v4_moderate_policy_full_100_smooth_085",
+    "bundle_sha256": "69a7dcabbda300bd1ce9e1f687d77351d65aa62a6167273f125816c0209d5fdd",
+    "candidate_normalized_spec_sha256": "d621ea44b2c3ef1d3e4b57d60e8adb4a645270031182e135f971f90b394db835",
+    "winner_scores": {"llm_macro_score": 0.5497889640842802, "adaptive_macro_score": 0.5486674359188668},
+    "spec": {"path": "configs/dynamic_macro/development_policy_partial_v4.json", "sha256": "d3e1fce8b3284b9b9c910a1fbd639ee8db71235d20f74356440539a1bcb6d232"},
+    "manifest": {"path": "outputs/dynamic_macro_policy_partial_gpt55_live_v4/manifest.json", "sha256": "8be0510183a1a45ebbe57a692f93b9a3083c98082f4f574c455e536a4d518412"},
+    "winner_manifest": {"path": "outputs/dynamic_macro_policy_partial_gpt55_live_v4/winner_manifest.json", "sha256": "c8aaa31b67b35ad80a984c89fe5a0b41d6cf689420f405f5426822b555391b04"},
+    "candidate_manifest": {"path": "outputs/dynamic_macro_policy_partial_gpt55_live_v4/candidates/empirical_v4_moderate_policy_full_100_smooth_085/manifest.json", "sha256": "21d637fd397822c12f1a32d0189981ed51a2ce1ebd783364a26fbd6595702c86"},
+    "candidate_spec": {"path": "outputs/dynamic_macro_policy_partial_gpt55_live_v4/candidates/empirical_v4_moderate_policy_full_100_smooth_085/normalized_spec.json", "sha256": "3ebd9c509c40f7e111c24033684598f9ea408a86c40c162ad3af8a092437823b"},
+    "candidate": {"behavior_policy_mode": "empirical_bridge", "behavior_policy_profile": null, "behavior_policy_state_profile_json": null, "belief_gain_global": 3.0, "belief_gain_income": 0.5, "belief_gain_inflation": 1.5, "belief_gain_unemployment": 1.0, "candidate_id": "empirical_v4_moderate_policy_full_100_smooth_085", "empirical_bridge_json": {"path": "configs/behavior_profiles/empirical_bridge_v4.json", "sha256": "e3816045f1f0b576a156809559d8330de5e27e2243a5681f324ec3999922ec82"}, "feedback_gain": 1.0, "feedback_mode": "closed_loop", "household_flow_anchor": "origin_saving_rate", "hybrid_state_weight": 1.0, "max_live_calls": 1, "mechanism_complexity": 3, "policy_rate_smoothing": 0.85, "policy_state_mode": "origin_visible", "policy_state_weight": 1.0, "replay_prefix_period_count": 5, "replay_prefix_raw_records_json": {"path": "work/dynamic_macro/banked_gpt55_development_v1/policy_assimilation_100_smoothing_085_periods_0_4.json", "sha256": "939b5873365a87b4271918e7a72213f487e6ed3ac4abb8b1f94954d55f5e286d"}}
+  },
+  "inputs": {
+    "bundle_manifest": {"path": "work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1/manifest.json", "sha256": "7a26a77327799cdea9247d62f7613aa3f4f8c56937f58e363c54ad77ab8e4b7a"},
+    "households": {"path": "work/persona_beliefs/dynamic_macro_panel_gpt55_realtime/initial_households.csv", "sha256": "a73f9bb14ce1a78b127a861a2e6ee6769d2573cd756198887e12ce27ec3623f7"},
+    "profile": {"path": "configs/behavior_profiles/empirical_bridge_v4.json", "sha256": "e3816045f1f0b576a156809559d8330de5e27e2243a5681f324ec3999922ec82"},
+    "replay_records": {"path": "work/dynamic_macro/banked_gpt55_development_v1/policy_assimilation_100_smoothing_085_periods_0_4.json", "sha256": "939b5873365a87b4271918e7a72213f487e6ed3ac4abb8b1f94954d55f5e286d"}
+  },
+  "confirmation": {
+    "bundle_dir": "work/dynamic_macro/frozen_2026_01_2026_06_common_month_v1",
+    "origins": ["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01", "2026-05-01", "2026-06-01"],
+    "target_rows_per_origin": 10,
+    "score_origin_month": "2026-06-01",
+    "replay_prefix_period_count": 5,
+    "provider": "codex_cli",
+    "model": "gpt-5.5",
+    "semantic_retry_limit": 2,
+    "max_live_calls": 3,
+    "receipt_path": "work/dynamic_macro/confirmatory_june_2026_v1_receipt.json"
+  }
+}

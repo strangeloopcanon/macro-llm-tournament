@@ -6,72 +6,54 @@ Start with [`CURRENT.md`](CURRENT.md) for the current runnable surface. The repo
 
 ## How the simulated economy works
 
-The end state of the project is the Phase 4 matched-twin pipeline. Real survey respondents' beliefs, updated by an LLM, drive a deterministic toy economy, and that economy is scored against real macro data with a no-LLM twin as the control:
+The current system is a recursive, rolling-origin matched-twin economy. Real
+household data supplies the heterogeneity; GPT-5.5 updates beliefs; measured
+code converts beliefs into actions and owns feasibility; the simulated macro
+state becomes part of the next period's information set.
 
-```text
- REAL WORLD                          SIMULATION
- ..........                          ..........
-
- NY Fed SCE panel ------.
- (real respondents'     |
-  prior survey answers) v
-                    +------------------------------+
- real macro news -->|  1. LLM BELIEF UPDATER       |  the only LLM step
- (as-of vintage,    |  "This person believed X     |  (GPT-5.5 via Codex
-  leakage-audited)  |   last wave. Given this      |   CLI; calls banked,
-                    |   news, what do they         |   then replayed at
-                    |   believe now?"              |   zero cost)
-                    +---------------+--------------+
-                                    | updated beliefs per household
-                                    | (inflation, job-loss risk,
-                                    |  income growth, rates)
-                                    v
-                    +------------------------------+
-                    |  2. DETERMINISTIC BEHAVIOR   |  no LLM here: fixed
-                    |     KERNEL                   |  equations turn
-                    |  beliefs -> consumption,     |  beliefs into actions
-                    |  saving, borrowing under     |  (raw LLM actions lost
-                    |  hard budget constraints     |  to a liquidity rule)
-                    +---------------+--------------+
-                                    | household decisions
-                                    v
-                    +------------------------------+
-                    |  3. ONE-GOOD DEMAND ECONOMY  |  accounting identities
-                    |  sums decisions into         |  checked every period
-                    |  aggregate consumption,      |
-                    |  saving, debt, income        |
-                    +---------------+--------------+
-                                    | locked output mapping
-                                    | (schema v2, sha-pinned
-                                    |  before any scoring)
-                                    v
-                    +------------------------------+
- real FRED data --->|  4. SCORE AGAINST REALITY    |
- (post-cutoff       |  simulated aggregates vs     |
-  target dates)     |  PCE growth, saving-rate     |
-                    |  change, retail sales,       |
-                    |  revolving credit            |
-                    +------------------------------+
-                          :
-                          : planned, not yet wired: feed simulated
-                          : state back into step 1 prompts to close
-                          : the loop
-                          :..............> back to step 1
-
- CONTROL: the same households, economy, and mapping run twice --
- once with the LLM updater in step 1, once with a mechanical
- adaptive-expectations updater. The LLM layer only earns its keep
- if its twin scores better. (Current one-month verdict: it does not.)
+```mermaid
+flowchart LR
+  A["81 real SCE households<br/>priors, balances, demographics, weights"] --> B["GPT-5.5 belief update<br/>inflation, income, job risk, confidence"]
+  V["As-of monthly vintage<br/>origin-visible macro information"] --> B
+  B --> C["Empirical spending bridge v4<br/>belief changes to consumption pressure"]
+  C --> D["Deterministic household execution<br/>consume, save, repay debt, preserve liquidity"]
+  D --> E["Accounting-safe demand economy<br/>output, jobs, income, inflation, policy rate"]
+  E --> F["Next-origin state and prompt"]
+  F --> B
+  O["Observed rolling-origin state<br/>including policy-rate assimilation"] --> E
+  E --> S["Frozen first-release score<br/>10 targets across 5 families"]
 ```
 
-Design decisions baked into the diagram: the LLM never chooses actions (that was tested and lost to a simple liquidity rule); personas are conditioned on real respondents' prior answers, not invented from demographic profiles (profile-only and backstory-only personas both failed their gates); and the output mapping is locked and hashed before scoring so results cannot be tuned after the fact.
+The control replaces only the GPT belief updater with adaptive expectations.
+It uses the same households, bridge, economy, information, accounting, and
+targets. Adaptive is therefore a strong dumb benchmark: any difference isolates
+the value of LLM belief updating inside the simulated economy.
 
-Evidence status: the February 2026 score is a one-shot held-out
-**current-vintage diagnostic**, not a valid real-time-vintage confirmation. The
-run used FRED observations retrieved in July 2026, held the last December 2024
-belief update forward, and scored four available targets (`n=1` each). Its
-negative arithmetic is preserved, but a future confirmatory run must freeze and
-hash ALFRED/release-aware inputs before scoring.
+Raw LLM actions are not used. Direct allocations lost to a liquidity rule, and
+profile-only or backstory personas failed on real SCE heterogeneity. The LLM is
+used where the experiments found signal: updating supplied beliefs and authoring
+bounded policy schedules. Deterministic code executes the consequences.
+
+### Current recursive result
+
+The January-May 2026 development run starts from 81 SCE households, uses
+January as a warmup month, and scores February-May on 40 post-cutoff,
+first-release target rows. The selected full-assimilation candidate scores
+`0.549789`; adaptive scores `0.548667`. Lower is better. The LLM economy is
+`0.2%` behind, statistically indistinguishable on this four-origin sample, but
+`2.61%` better than the base recursive LLM economy.
+
+This is a working simulatable macroeconomy and a developmental near-tie, not a
+confirmed predictive win. The exact winner is frozen for a one-shot June 2026
+test. That command remains blocked until the complete 10-target first-release
+bundle is available, expected with the [BEA June Personal Income and Outlays
+release on July 30, 2026](https://www.bea.gov/news/schedule/).
+
+Replay the selected January-May economy without provider calls:
+
+```bash
+make dynamic-macro-incumbent-replay
+```
 
 ## What is in the repo
 
@@ -94,6 +76,11 @@ hash ALFRED/release-aware inputs before scoring.
 - `src/macro_llm_tournament/belief_calibration.py` fits validation-only belief-dynamics calibration, scores the locked transform on held-out vintage cards, and emits a bounded behavior-economy calibration profile.
 - `src/macro_llm_tournament/macro_playground.py` wraps the demand kernel in a branchable scenario sandbox with bounded household, firm, policy/narrative, and critic actor payloads.
 - `src/macro_llm_tournament/macro_tournament.py` runs retrospective full-economy candidate tournaments and replays the promoted incumbent without spending fresh score surfaces.
+- `src/macro_llm_tournament/prepare_dynamic_macro_panel.py` builds the leakage-audited 81-household SCE state used by the recursive economy.
+- `src/macro_llm_tournament/frozen_vintage_bundle.py` freezes and validates rolling-origin first-release FRED/ALFRED bundles.
+- `src/macro_llm_tournament/dynamic_macro_economy.py` runs the recursive matched twins, feedback, accounting, and common-month macro scoring.
+- `src/macro_llm_tournament/dynamic_macro_tournament.py` compares complete recursive economies on locked developmental surfaces and preserves live-call/replay provenance.
+- `src/macro_llm_tournament/dynamic_macro_confirmatory.py` owns the fail-closed, one-shot June confirmation lock and receipt.
 - `src/macro_llm_tournament/macro_performance_gate.py` scores the macro lab and vintage OOS artifacts against an executable target catalog without promoting fixture runs to empirical validity.
 - `src/macro_llm_tournament/macro_validity.py` is the legacy mechanism-readiness scorecard; its OOS rows are static gaps. Use `macro_performance_gate.py` for executable OOS readiness.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
@@ -252,7 +239,7 @@ Run Phase 4 with that state-conditioned profile as the shared behavior layer:
 make phase4-prior-update-state-schedule-replay
 ```
 
-This is the current "natural household behavior" bridge: real SCE heterogeneity supplies household state, the LLM-updater supplies beliefs, an LLM-authored policy profile maps state and belief gaps to behavior schedules, and deterministic code executes the schedules and aggregates the macro economy.
+This is the historical Phase 4 state-schedule bridge: real SCE heterogeneity supplies household state, the LLM-updater supplies beliefs, an LLM-authored policy profile maps state and belief gaps to behavior schedules, and deterministic code executes the schedules and aggregates the macro economy. The current recursive winner instead uses empirical bridge v4; see `CURRENT.md`.
 
 Run the zero-cost forecast audit fixture:
 

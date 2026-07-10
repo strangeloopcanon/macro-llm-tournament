@@ -21,6 +21,7 @@ from macro_llm_tournament.dynamic_macro_economy import (
     anchor_household_flows,
     apply_belief_gains,
     assert_no_prompt_target_leakage,
+    canonical_live_attempts,
     canonical_behavior_profile_sha256,
     filter_bundle_targets,
     mapped_value,
@@ -31,6 +32,7 @@ from macro_llm_tournament.dynamic_macro_economy import (
     seed_live_cache,
     select_score_origins,
     validate_replay_prefix_records,
+    _validate_replay_live_horizon,
 )
 from macro_llm_tournament.demand_economy import (
     DemandScenario,
@@ -291,6 +293,25 @@ def prompt_payloads(output_dir: Path, candidate: str) -> list[dict]:
 
 
 class DynamicMacroEconomyTests(unittest.TestCase):
+    def test_zero_call_replay_live_requires_a_full_horizon_prefix(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            panel = root / "sce_panel.csv"
+            write_sce_panel(panel)
+            replay = root / "replay.json"
+            replay.write_text("[]\n", encoding="utf-8")
+            args = runner_args(
+                root,
+                panel,
+                mode="replay_live",
+                raw_records=replay,
+                replay_prefix_period_count=3,
+            )
+            args.max_live_calls = 0
+            _validate_replay_live_horizon(args, origin_count=3)
+            with self.assertRaisesRegex(DynamicMacroError, "positive --max-live-calls"):
+                _validate_replay_live_horizon(args, origin_count=4)
+
     def test_policy_state_assimilation_and_rate_smoothing_are_explicit(self) -> None:
         env = {
             "periods_per_year": 12.0,
@@ -439,20 +460,35 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                 execution_cwd=root / "provider_cwd",
             )
             bad_cache = root / ".cache" / "codex_cli" / "bad.json"
-            bad_cache.parent.mkdir(parents=True, exist_ok=True)
-            bad_cache.write_text('{"payload":{"beliefs":[]}}', encoding="utf-8")
             valid = {"prompt_version": "test", "beliefs_by_type": {}}
+            call_count = 0
+
+            def live_belief(*_args: object, **_kwargs: object) -> dict:
+                nonlocal call_count
+                call_count += 1
+                bad_cache.parent.mkdir(parents=True, exist_ok=True)
+                if call_count == 1:
+                    bad_cache.write_text(
+                        '{"payload":{"beliefs":[]}}', encoding="utf-8"
+                    )
+                    raise LLMUnavailable(
+                        "Duplicate demand economy household type_id: h"
+                    )
+                bad_cache.write_text(
+                    '{"payload":{"beliefs_by_type":{}}}', encoding="utf-8"
+                )
+                return valid
+
             with (
-                patch.object(client._live, "belief_cache_path", return_value=bad_cache),
                 patch.object(
-                    client._live,
+                    client._live._base,
+                    "belief_cache_path",
+                    return_value=bad_cache,
+                ),
+                patch.object(
+                    client._live._base,
                     "belief_panel",
-                    side_effect=[
-                        LLMUnavailable(
-                            "Duplicate demand economy household type_id: h"
-                        ),
-                        valid,
-                    ],
+                    side_effect=live_belief,
                 ),
             ):
                 result = client._live_belief_panel_with_semantic_retry(
@@ -462,10 +498,76 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                 )
             self.assertEqual(result, valid)
             self.assertEqual(client.semantic_retry_count, 1)
-            self.assertFalse(bad_cache.exists())
+            self.assertEqual(call_count, 2)
+            self.assertTrue(bad_cache.is_file())
             self.assertEqual(
                 len(list((root / ".cache" / "rejected_semantic").glob("*.json"))),
                 1,
+            )
+            ledger = canonical_live_attempts(root / ".cache" / "live_attempts")
+            self.assertEqual([row["status"] for row in ledger], ["failed", "accepted"])
+            self.assertEqual([row["period_index"] for row in ledger], [1, 1])
+            self.assertIsNotNone(ledger[0]["error_sha256"])
+            self.assertIsNotNone(ledger[1]["cache_file_sha256"])
+
+    def test_live_attempt_ledger_records_one_accepted_cache_miss(self) -> None:
+        records = [
+            {
+                "provider": "codex_cli",
+                "model": "gpt-5.5",
+                "variant": "llm_belief",
+                "scenario_id": "recursive_monthly_path",
+                "period_index": 0,
+                "cache_identity": {"state_identity_sha256": "state-0"},
+            }
+        ]
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            client = ReplayThenLiveDemandClient(
+                "codex_cli",
+                "gpt-5.5",
+                root / ".cache",
+                replay_records=records,
+                replay_prefix_period_count=1,
+                max_live_calls=3,
+                semantic_retry_limit=0,
+                execution_cwd=root / "provider_cwd",
+            )
+            cache_path = root / ".cache" / "codex_cli" / "accepted.json"
+            valid = {"prompt_version": "test", "beliefs_by_type": {}}
+
+            def accepted_belief(*_args: object, **_kwargs: object) -> dict:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text('{"payload":{"beliefs_by_type":{}}}', encoding="utf-8")
+                return valid
+
+            with (
+                patch.object(
+                    client._live._base,
+                    "belief_cache_path",
+                    return_value=cache_path,
+                ),
+                patch.object(
+                    client._live._base,
+                    "belief_panel",
+                    side_effect=accepted_belief,
+                ),
+            ):
+                self.assertEqual(
+                    client._live_belief_panel_with_semantic_retry(
+                        DemandScenario("recursive_monthly_path", "test"),
+                        {"period_index": 1},
+                        [],
+                    ),
+                    valid,
+                )
+            ledger = canonical_live_attempts(root / ".cache" / "live_attempts")
+            self.assertEqual(len(ledger), 1)
+            self.assertEqual(ledger[0]["status"], "accepted")
+            self.assertEqual(ledger[0]["period_index"], 1)
+            self.assertEqual(
+                ledger[0]["cache_file_sha256"],
+                hashlib.sha256(cache_path.read_bytes()).hexdigest(),
             )
 
     def test_replay_live_does_not_reclassify_provider_failure_as_semantic(self) -> None:
@@ -493,12 +595,12 @@ class DynamicMacroEconomyTests(unittest.TestCase):
             )
             with (
                 patch.object(
-                    client._live,
+                    client._live._base,
                     "belief_panel",
                     side_effect=LLMUnavailable("provider unavailable"),
                 ),
                 patch.object(
-                    client._live,
+                    client._live._base,
                     "belief_cache_path",
                     return_value=root / "missing.json",
                 ),
@@ -513,6 +615,10 @@ class DynamicMacroEconomyTests(unittest.TestCase):
             journals = list((root / ".cache" / "live_attempts").glob("*.json"))
             self.assertEqual(len(journals), 1)
             self.assertEqual(json.loads(journals[0].read_text())["status"], "failed")
+            ledger = canonical_live_attempts(root / ".cache" / "live_attempts")
+            self.assertEqual(len(ledger), 1)
+            self.assertEqual(ledger[0]["status"], "failed")
+            self.assertEqual(ledger[0]["provider"], "codex_cli")
 
     def test_seed_live_cache_validates_identity_and_copies_records(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1044,6 +1150,11 @@ class DynamicMacroEconomyTests(unittest.TestCase):
             )
             self.assertEqual(len(provenance["normalized_household_state_sha256"]), 64)
             self.assertIsNone(manifest["behavior_policy_content_sha256"])
+            self.assertEqual(json.loads((output / "live_attempts.json").read_text()), [])
+            self.assertEqual(
+                manifest["outputs"]["live_attempts.json"],
+                hashlib.sha256((output / "live_attempts.json").read_bytes()).hexdigest(),
+            )
 
     def test_prompt_leakage_guard_rejects_nested_target_aliases(self) -> None:
         for forbidden in (
@@ -1097,6 +1208,7 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                 "family_scores.csv",
                 "origin_scores.csv",
                 "raw_records.json",
+                "live_attempts.json",
                 "normalized_spec.json",
             ]
             outputs = []
@@ -1209,15 +1321,47 @@ class DynamicMacroEconomyTests(unittest.TestCase):
             future = pd.read_csv(panel)
             future["source_estimated_public_availability_date"] = "2026-01-01"
             future.to_csv(panel, index=False)
-            args = runner_args(root, panel, mode="replay")
+            for mode in ("replay", "replay_live"):
+                args = runner_args(root, panel, mode=mode)
+                args.output_dir = str(root / f"out_{mode}")
+                if mode == "replay_live":
+                    replay = root / "replay.json"
+                    replay.write_text("[]\n", encoding="utf-8")
+                    args.raw_records_json = str(replay)
+                    args.replay_prefix_period_count = 1
+                    args.max_live_calls = 1
+                with patch(
+                    "macro_llm_tournament.dynamic_macro_economy.load_bundle_view",
+                    return_value=fixture_bundle(),
+                ):
+                    with self.assertRaisesRegex(
+                        DynamicMacroError,
+                        "not publicly available by the first macro origin",
+                    ):
+                        run_dynamic_macro(args)
 
+    def test_replay_live_requires_household_availability_metadata(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            panel = root / "sce_panel.csv"
+            write_sce_panel(panel)
+            households = pd.read_csv(panel).drop(
+                columns=["source_estimated_public_availability_date"]
+            )
+            households.to_csv(panel, index=False)
+            args = runner_args(root, panel, mode="replay_live")
+            replay = root / "replay.json"
+            replay.write_text("[]\n", encoding="utf-8")
+            args.raw_records_json = str(replay)
+            args.replay_prefix_period_count = 1
+            args.max_live_calls = 1
             with patch(
                 "macro_llm_tournament.dynamic_macro_economy.load_bundle_view",
                 return_value=fixture_bundle(),
             ):
                 with self.assertRaisesRegex(
                     DynamicMacroError,
-                    "not publicly available by the first macro origin",
+                    "requires source_estimated_public_availability_date",
                 ):
                     run_dynamic_macro(args)
 

@@ -1,6 +1,6 @@
 # Macro LLM Simulation: Research Retrospective
 
-**Status:** Historical experiment log through the first aligned Phase 4 runs.
+**Status:** Historical experiment log through the recursive January-May 2026 development tournament.
 For the current evidence verdict, use
 [`macro_simulation_report.md`](macro_simulation_report.md). A July 2026
 integrity review downgraded the February score from confirmatory to a one-shot
@@ -148,6 +148,16 @@ Then the SCE prior-update panel was extended to December 2024 for the 81 respond
 
 Status: keep as a promising diagnostic, not final validation. The aligned economy can beat adaptive, but the added December belief-update leg is not gate-clearing, so the next real confirmation needs a longer aligned panel that passes its own prior-update gate before scoring.
 
+### 16. Recursive Rolling-Origin Economy
+
+Question: can the surviving pieces become a dynamic economy rather than a short replay: real household priors, LLM belief updates, measured behavior, accounting, macro state transitions, feedback, and repeated scoring?
+
+Result: yes as a simulation, not yet as a predictive win. The new engine runs 81 real SCE households across January-May 2026. January is warmup; February-May are scored against 10 common-month first-release targets per origin. Simulated household and macro state feed into the next period, while observed rolling-origin state is assimilated where declared. Every scored target was first released after GPT-5.5's cutoff.
+
+The base empirical-v4 LLM economy scores `0.564533` against adaptive `0.564235`. Full origin-visible policy-state assimilation with `0.85` rate smoothing improves the LLM score to `0.549789`; adaptive scores `0.548667`. A half-weight policy-state compromise scores `0.555688`. The full-assimilation candidate wins development by absolute LLM score, improves the base LLM economy by `2.61%`, and remains `0.2%` behind adaptive. Accounting residuals stay below `7.28e-12`.
+
+Status: keep as the current developmental economy. Stop tuning on January-May. The exact winner and five replay records are frozen for a one-shot June test after the complete first-release bundle exists.
+
 ## The Lessons
 
 1. LLMs contain audited aggregate macro belief signal.
@@ -160,14 +170,16 @@ Status: keep as a promising diagnostic, not final validation. The aligned econom
 8. Deterministic execution remains non-negotiable: budgets, feasibility, accounting, and aggregation belong in code.
 9. Bridge stabilization helps but does not solve the problem alone.
 10. Horizon alignment is load-bearing. The first aligned retrospective Phase 4 replay beats the adaptive twin, but its added belief-update leg does not clear persistence.
-11. The macro-simulation claim is unvalidated. We have a retrospective end-to-end positive and a negative held-out diagnostic, not a valid real-time-vintage confirmation.
+11. The pieces now form a recursive macro simulation over real households and post-cutoff monthly vintages.
+12. Policy-state assimilation improves absolute performance, but the current LLM economy still trails adaptive by `0.2%` on development data.
+13. The macro-prediction claim remains unconfirmed. The next clean evidence is the frozen June test, not another January-May mechanism variant.
 
 ## What Should Happen Next
 
 The next real test needs new evidence, not more reuse of spent holdouts.
 
-1. Treat v5 as the current stabilized bridge and stop tuning it against Phase 4.
-2. Build a longer same-horizon SCE prior-update panel that clears the prior-update gate.
-3. Run the next Phase 4 comparison as confirmatory only after the panel horizon, belief replay horizon, behavior executor, bridge, target mapping, complete target set, and frozen input hashes are committed before scoring.
-4. Freeze CTC, lottery, and UI for mechanism evaluation; any new behavior promotion needs a new family.
-5. Keep the Phase 4 v2 mapping locked and use frozen ALFRED/release-aware inputs for the next newly scoreable month.
+1. Freeze the full-policy-state recursive winner and stop January-May mechanism search.
+2. Wait until all 10 June first-release targets exist, expected July 30, 2026.
+3. Build and validate the exact January-June canonical vintage bundle.
+4. Run the one-shot locked June confirmation: five replay periods, one accepted GPT-5.5 June update, and June-only scoring against the adaptive twin.
+5. Preserve CTC, lottery, UI, February, and June as spent surfaces once used. Any later model-building round needs genuinely new data.

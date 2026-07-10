@@ -401,6 +401,10 @@ def build_frozen_vintage_bundle(
     build_as_of_date = date.today()
     origin_records = _origin_records(origins, as_of_day=as_of_day)
     root = Path(output_dir)
+    if root.exists() and any(root.iterdir()):
+        raise FrozenVintageBundleError(
+            f"Frozen bundle output must be absent or empty: {root}"
+        )
     root.mkdir(parents=True, exist_ok=True)
     if client is None:
         if mode == "fixture":

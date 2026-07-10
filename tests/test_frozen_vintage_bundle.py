@@ -282,6 +282,17 @@ class FrozenVintageBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(FrozenVintageBundleError, "Source request provenance"):
                 validate_frozen_vintage_bundle(root)
 
+    def test_build_rejects_nonempty_output_without_modifying_existing_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bundle"
+            root.mkdir()
+            sentinel = root / "existing.txt"
+            sentinel.write_text("keep me\n", encoding="utf-8")
+            with self.assertRaisesRegex(FrozenVintageBundleError, "absent or empty"):
+                build_frozen_vintage_bundle(root, ["2024-01-01"], mode="fixture")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
+            self.assertEqual(list(root.iterdir()), [sentinel])
+
     def test_cli_fixture_keeps_month_start_input_and_writes_explicit_as_of_date(self) -> None:
         with TemporaryDirectory() as temp_dir:
             result = subprocess.run(

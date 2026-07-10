@@ -19,6 +19,7 @@ from macro_llm_tournament.dynamic_macro_tournament import (
     run_tournament,
     select_winner,
 )
+from macro_llm_tournament.dynamic_macro_economy import score_macro
 
 
 def sha(path: Path) -> str:
@@ -108,36 +109,79 @@ def fake_child(spec, candidate, *, mode, output_dir):
     (output_dir / "normalized_spec.json").write_text(
         json.dumps(child_spec), encoding="utf-8"
     )
+    joined = pd.DataFrame(
+        [
+            {
+                "candidate": "llm",
+                "origin_month": "2026-02-01",
+                "family": "demand",
+                "target_name": "fixture_target",
+                "scaled_squared_error": score**2,
+                "absolute_scaled_error": score,
+                "direction_correct": True,
+            },
+            {
+                "candidate": "adaptive",
+                "origin_month": "2026-02-01",
+                "family": "demand",
+                "target_name": "fixture_target",
+                "scaled_squared_error": adaptive**2,
+                "absolute_scaled_error": adaptive,
+                "direction_correct": True,
+            },
+        ]
+    )
+    target_scores, family_scores, origin_scores, macro_scores = score_macro(joined)
+    joined.to_csv(output_dir / "joined_errors.csv", index=False)
+    target_scores.to_csv(output_dir / "target_scores.csv", index=False)
+    family_scores.to_csv(output_dir / "family_scores.csv", index=False)
+    origin_scores.to_csv(output_dir / "origin_scores.csv", index=False)
+    for name in (
+        "households.csv",
+        "prompt_cards.csv",
+        "beliefs.csv",
+        "decisions.csv",
+        "periods.csv",
+        "accounting.csv",
+        "forecasts.csv",
+    ):
+        (output_dir / name).write_text("fixture\n", encoding="utf-8")
+    (output_dir / "raw_records.json").write_text("[]\n", encoding="utf-8")
+    (output_dir / "report.md").write_text("# Fixture\n", encoding="utf-8")
+    output_contract = [
+        "normalized_spec.json",
+        "manifest.json",
+        "households.csv",
+        "prompt_cards.csv",
+        "beliefs.csv",
+        "decisions.csv",
+        "periods.csv",
+        "accounting.csv",
+        "forecasts.csv",
+        "joined_errors.csv",
+        "target_scores.csv",
+        "family_scores.csv",
+        "origin_scores.csv",
+        "raw_records.json",
+        "report.md",
+    ]
     manifest = {
         "status": "complete",
         "bundle_sha256": spec["shared"]["bundle_sha256"],
         "normalized_spec_sha256": child_spec_sha,
         "household_provenance": {"raw_input_file_sha256": household_hash},
         "max_accounting_abs_residual": 0.0,
-        "macro_scores": {"llm": score, "adaptive": adaptive},
-        "llm_minus_adaptive": score - adaptive,
+        "macro_scores": macro_scores,
+        "llm_minus_adaptive": macro_scores["llm"] - macro_scores["adaptive"],
         "live_call_count": 2 if mode == "live" else 0,
+        "output_contract": output_contract,
+        "outputs": {
+            name: sha(output_dir / name)
+            for name in output_contract
+            if name != "manifest.json"
+        },
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    pd.DataFrame(
-        [
-            {
-                "candidate": "llm",
-                "family": "demand",
-                "direction_accuracy": 0.6,
-                "family_mean_squared_scaled_error": score**2,
-            },
-            {
-                "candidate": "adaptive",
-                "family": "demand",
-                "direction_accuracy": 0.9,
-                "family_mean_squared_scaled_error": adaptive**2,
-            },
-        ]
-    ).to_csv(output_dir / "family_scores.csv", index=False)
-    pd.DataFrame([{"candidate": "llm", "origin_month": "2026-01-01", "macro_score": score}]).to_csv(
-        output_dir / "origin_scores.csv", index=False
-    )
 
 
 class DynamicMacroTournamentTests(unittest.TestCase):
@@ -352,6 +396,53 @@ class DynamicMacroTournamentTests(unittest.TestCase):
             self.assertTrue(bool(scores.loc["candidate_a", "resumed_existing_result"]))
             self.assertEqual(scores.loc["candidate_b", "prior_failed_live_call_count"], 1)
             self.assertTrue((output / "failed_attempts" / "candidate_b_attempt_1").is_dir())
+
+    def test_live_resume_rejects_tampered_complete_child(self) -> None:
+        with TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            root = Path(temp_dir)
+            spec_path = write_inputs(root)
+            normalized = normalize_spec(
+                json.loads(spec_path.read_text()), spec_path=spec_path
+            )
+            output = root / "out"
+            output.mkdir()
+            (output / "normalized_spec.json").write_text(
+                json.dumps(normalized, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            candidate_a = next(
+                row
+                for row in normalized["candidates"]
+                if row["candidate_id"] == "candidate_a"
+            )
+            child = output / "candidates" / "candidate_a"
+            fake_child(normalized, candidate_a, mode="live", output_dir=child)
+            family = pd.read_csv(child / "family_scores.csv")
+            family.loc[family["candidate"].eq("llm"), "macro_score"] = 0.0
+            family.to_csv(child / "family_scores.csv", index=False)
+            args = parse_args(
+                [
+                    "--spec",
+                    str(spec_path),
+                    "--mode",
+                    "live",
+                    "--max-live-calls",
+                    "12",
+                    "--output-dir",
+                    str(output),
+                    "--resume",
+                ]
+            )
+            with patch(
+                "macro_llm_tournament.dynamic_macro_tournament._run_candidate"
+            ) as run_child:
+                with self.assertRaisesRegex(
+                    DynamicMacroTournamentError,
+                    "Child output hash mismatch",
+                ):
+                    run_tournament(args)
+            run_child.assert_not_called()
+            self.assertFalse((output / "winner_manifest.json").exists())
 
     def test_live_multi_resume_fails_before_exceeding_candidate_cap(self) -> None:
         def write_live_calls(directory: Path, count: int) -> None:

@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
+from macro_llm_tournament import demand_economy, demand_timeline
 from macro_llm_tournament.demand_economy import (
     DemandEconomyClient,
     STEADY_EMPLOYMENT_RATE,
@@ -35,6 +36,14 @@ def _accepted_bridge_profile(coefficients: dict[str, float]) -> dict[str, object
 
 
 class DemandFrequencyTests(unittest.TestCase):
+    def test_timeline_helpers_remain_explicit_demand_economy_reexports(self):
+        self.assertIs(
+            demand_economy._quarterly_persistence_for_frequency,
+            demand_timeline._quarterly_persistence_for_frequency,
+        )
+        self.assertIs(demand_economy._period_state, demand_timeline._period_state)
+        self.assertIs(demand_economy._next_environment, demand_timeline._next_environment)
+
     def _run_fixture(
         self,
         *,

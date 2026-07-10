@@ -16,6 +16,7 @@ from typing import Any
 import pandas as pd
 
 from .agent_common import ACCOUNTING_TOLERANCE, markdown_table
+from .dynamic_macro_economy import score_macro
 
 
 SCHEMA_VERSION = "dynamic_macro_tournament_v2"
@@ -36,6 +37,23 @@ BEHAVIOR_MODES = {
     "state_schedule",
     "empirical_bridge",
     "empirical_bridge_state_schedule",
+}
+LEGACY_CHILD_OUTPUT_FILES = {
+    "normalized_spec.json",
+    "manifest.json",
+    "households.csv",
+    "prompt_cards.csv",
+    "beliefs.csv",
+    "decisions.csv",
+    "periods.csv",
+    "accounting.csv",
+    "forecasts.csv",
+    "joined_errors.csv",
+    "target_scores.csv",
+    "family_scores.csv",
+    "origin_scores.csv",
+    "raw_records.json",
+    "report.md",
 }
 
 
@@ -489,6 +507,7 @@ def collect_candidate_result(
     if any(not path.is_file() for path in required):
         raise DynamicMacroTournamentError("Child output contract is incomplete")
     manifest = _read_json(manifest_path)
+    _validate_child_output_contract(candidate_dir, manifest)
     child_spec_path = candidate_dir / "normalized_spec.json"
     if not child_spec_path.is_file():
         raise DynamicMacroTournamentError("Child normalized spec is missing")
@@ -506,16 +525,28 @@ def collect_candidate_result(
     residual = float(manifest.get("max_accounting_abs_residual", math.inf))
     if not math.isfinite(residual) or residual > ACCOUNTING_TOLERANCE:
         raise DynamicMacroTournamentError(f"Accounting residual {residual} exceeds tolerance")
+    joined = pd.read_csv(candidate_dir / "joined_errors.csv")
+    _, recomputed_family, recomputed_origin, recomputed_scores = score_macro(joined)
     family = pd.read_csv(candidate_dir / "family_scores.csv")
     origin = pd.read_csv(candidate_dir / "origin_scores.csv")
+    _assert_score_frame_matches(
+        family,
+        recomputed_family,
+        sort_by=["candidate", "family"],
+        label="family_scores.csv",
+    )
+    _assert_score_frame_matches(
+        origin,
+        recomputed_origin,
+        sort_by=["candidate", "origin_month"],
+        label="origin_scores.csv",
+    )
+    family = recomputed_family
+    origin = recomputed_origin
     llm_family = family[family["candidate"].eq("llm")]
     if llm_family.empty:
         raise DynamicMacroTournamentError("Child family scores lack the LLM candidate")
     direction = float(llm_family["direction_accuracy"].mean())
-    recomputed_scores = {
-        str(name): float(math.sqrt(group["family_mean_squared_scaled_error"].mean()))
-        for name, group in family.groupby("candidate")
-    }
     if set(recomputed_scores) != {"llm", "adaptive"}:
         raise DynamicMacroTournamentError("Child family table cannot reproduce matched macro scores")
     scores = manifest.get("macro_scores", {})
@@ -635,9 +666,65 @@ def _candidate_output_is_complete(candidate_dir: Path) -> bool:
     if any(not path.is_file() for path in required):
         return False
     try:
-        return _read_json(candidate_dir / "manifest.json").get("status") == "complete"
-    except (OSError, ValueError, json.JSONDecodeError):
+        manifest = _read_json(candidate_dir / "manifest.json")
+        if manifest.get("status") != "complete":
+            return False
+        _validate_child_output_contract(candidate_dir, manifest)
+        return True
+    except DynamicMacroTournamentError:
+        raise
+    except (OSError, json.JSONDecodeError, TypeError):
         return False
+
+
+def _validate_child_output_contract(
+    candidate_dir: Path, manifest: dict[str, Any]
+) -> None:
+    contract = manifest.get("output_contract")
+    outputs = manifest.get("outputs")
+    if not isinstance(contract, list) or not all(
+        isinstance(name, str) for name in contract
+    ):
+        raise DynamicMacroTournamentError("Child output contract is missing")
+    contract_set = set(contract)
+    supported = (
+        contract_set == LEGACY_CHILD_OUTPUT_FILES
+        or contract_set == LEGACY_CHILD_OUTPUT_FILES | {"live_attempts.json"}
+    )
+    if not supported or len(contract) != len(contract_set):
+        raise DynamicMacroTournamentError("Child output contract is incomplete or unknown")
+    expected_hashed = contract_set - {"manifest.json"}
+    if not isinstance(outputs, dict) or set(outputs) != expected_hashed:
+        raise DynamicMacroTournamentError("Child output hashes do not cover the contract")
+    for name, expected in outputs.items():
+        path = candidate_dir / name
+        if not path.is_file() or _file_sha256(path) != expected:
+            raise DynamicMacroTournamentError(f"Child output hash mismatch: {name}")
+
+
+def _assert_score_frame_matches(
+    observed: pd.DataFrame,
+    expected: pd.DataFrame,
+    *,
+    sort_by: list[str],
+    label: str,
+) -> None:
+    if set(observed.columns) != set(expected.columns):
+        raise DynamicMacroTournamentError(f"{label} columns do not reproduce")
+    columns = list(expected.columns)
+    left = observed[columns].sort_values(sort_by, kind="mergesort").reset_index(drop=True)
+    right = expected[columns].sort_values(sort_by, kind="mergesort").reset_index(drop=True)
+    try:
+        pd.testing.assert_frame_equal(
+            left,
+            right,
+            check_dtype=False,
+            check_exact=False,
+            rtol=0.0,
+            atol=1e-12,
+        )
+    except AssertionError as exc:
+        raise DynamicMacroTournamentError(f"{label} does not reproduce from joined_errors.csv") from exc
 
 
 def _archive_failed_candidate_attempt(

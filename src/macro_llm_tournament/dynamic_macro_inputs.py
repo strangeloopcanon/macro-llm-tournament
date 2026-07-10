@@ -798,7 +798,7 @@ def validate_household_temporal_availability(
     event_candidates = ("source_survey_event_date", "survey_event_date", "survey_date")
     first_as_of = pd.Timestamp(first_origin["as_of_date"]).normalize()
     if availability_column not in households:
-        if args.mode in {"live", "replay"}:
+        if args.mode in {"live", "replay", "replay_live"}:
             raise DynamicMacroError(
                 f"Real household input requires {availability_column} in {args.mode} mode"
             )

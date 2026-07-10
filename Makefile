@@ -70,6 +70,44 @@ dynamic-macro-bundle-dev:
 		--mode fred \
 		--output-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
 
+.PHONY: dynamic-macro-confirmatory-june
+dynamic-macro-confirmatory-june:
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_confirmatory \
+		--lock configs/dynamic_macro/confirmatory_june_2026_v1.json \
+		--output-dir outputs/dynamic_macro_confirmatory_june_2026_v1
+
+.PHONY: dynamic-macro-incumbent-replay
+dynamic-macro-incumbent-replay:
+	rm -rf outputs/dynamic_macro_incumbent_replay
+	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
+		--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
+		--households-csv work/persona_beliefs/dynamic_macro_panel_gpt55_realtime/initial_households.csv \
+		--mode replay_live \
+		--provider codex_cli \
+		--model gpt-5.5 \
+		--contamination-policy unavailable_at_cutoff \
+		--score-origin-start 2026-02-01 \
+		--score-origin-end 2026-05-01 \
+		--behavior-policy-mode empirical_bridge \
+		--empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
+		--feedback-mode closed_loop \
+		--feedback-gain 1.0 \
+		--policy-rate-smoothing 0.85 \
+		--policy-state-mode origin_visible \
+		--policy-state-weight 1.0 \
+		--belief-gain-global 3.0 \
+		--belief-gain-inflation 1.5 \
+		--belief-gain-income 0.5 \
+		--belief-gain-unemployment 1.0 \
+		--household-flow-anchor origin_saving_rate \
+		--raw-records-json work/dynamic_macro/banked_gpt55_development_v1/policy_assimilation_100_smoothing_085_periods_0_4.json \
+		--replay-prefix-period-count 5 \
+		--fresh-cache \
+		--bootstrap-replicates 1000 \
+		--bootstrap-seed 20260709 \
+		--max-live-calls 0 \
+		--output-dir outputs/dynamic_macro_incumbent_replay
+
 dynamic-macro-economy-fixture: dynamic-macro-bundle-fixture
 	rm -rf outputs/dynamic_macro_economy_fixture
 	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \

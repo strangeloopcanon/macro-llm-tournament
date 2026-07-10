@@ -27,10 +27,13 @@ from .demand_economy import (
 )
 from .dynamic_macro_clients import (
     GainAdjustedDemandClient,
+    JournaledLiveDemandClient,
+    LiveAttemptJournal,
     ObservedSignalAdaptiveClient,
     ReplayThenLiveDemandClient,
     apply_belief_gains,
     belief_gains_from_args,
+    canonical_live_attempts,
     cache_identity,
     observed_signal_adaptive_payload,
     seed_live_cache,
@@ -63,6 +66,7 @@ from .dynamic_macro_inputs import (
     household_input_provenance,
 )
 from .llm_common import LLMUnavailable
+from .source_provenance import build_source_contract
 
 
 SCHEMA_VERSION = "recursive_dynamic_macro_economy_v3"
@@ -85,6 +89,7 @@ OUTPUT_FILES = (
     "family_scores.csv",
     "origin_scores.csv",
     "raw_records.json",
+    "live_attempts.json",
     "report.md",
 )
 
@@ -244,6 +249,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         model=args.model,
         policy=args.contamination_policy,
     )
+    _validate_replay_live_horizon(args, origin_count=len(bundle.origins))
     score_bundle, score_origin_contract = select_score_origins(
         bundle,
         start=args.score_origin_start,
@@ -284,6 +290,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         if args.fresh_cache
         else WORK_ROOT / "dynamic_macro_economy_cache"
     )
+    journal_dir = output_dir / ".cache" / "live_attempts"
     seed_cache_provenance = (
         seed_live_cache(
             Path(args.seed_cache_dir),
@@ -313,6 +320,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
             max_live_calls=int(args.max_live_calls),
             semantic_retry_limit=int(args.semantic_retry_limit),
             execution_cwd=provider_cwd,
+            journal_dir=journal_dir,
         )
     else:
         llm_mode = (
@@ -330,6 +338,13 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
             raw_replay_records=raw_replay_records,
             execution_cwd=provider_cwd,
         )
+        if args.mode == "live":
+            llm_base = JournaledLiveDemandClient(
+                llm_base,
+                LiveAttemptJournal(
+                    journal_dir, provider=args.provider, model=args.model
+                ),
+            )
     llm_client = GainAdjustedDemandClient(
         llm_base,
         gains=gains,
@@ -406,6 +421,17 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         block_length=args.bootstrap_block_length,
     )
     raw_records = [*llm_client.raw_records, *adaptive_client.raw_records]
+    live_attempts = (
+        canonical_live_attempts(journal_dir)
+        if args.mode in {"live", "replay_live"}
+        else []
+    )
+    if args.mode in {"live", "replay_live"} and int(llm_client.live_call_count) != len(
+        live_attempts
+    ):
+        raise DynamicMacroError(
+            "Live-attempt ledger does not reconcile with live_call_count"
+        )
 
     spec = normalized_spec(
         args,
@@ -437,6 +463,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         family_scores=family_scores,
         origin_scores=origin_scores,
         raw_records=raw_records,
+        live_attempts=live_attempts,
     )
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -458,7 +485,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "household_flow_anchor": household_flow_anchor,
         "behavior_policy_content_sha256": behavior_profile_content_sha256,
         "household_count": int(len(households)),
-        "live_call_count": llm_client.live_call_count,
+        "live_call_count": int(llm_client.live_call_count),
         "cache_hit_count": llm_client.cache_hit_count,
         "replayed_record_count": llm_client.replayed_record_count,
         "semantic_retry_count": llm_client.semantic_retry_count,
@@ -467,6 +494,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "max_accounting_abs_residual": _max_accounting_residual(accounting_frame),
         "macro_scores": macro_scores,
         "llm_minus_adaptive": macro_scores["llm"] - macro_scores["adaptive"],
+        "execution_source": build_source_contract(Path(__file__).resolve().parents[2]),
         "origin_block_bootstrap": bootstrap,
         "adaptive_role": "diagnostic_only_not_a_selection_veto",
         "output_contract": list(OUTPUT_FILES),
@@ -969,6 +997,7 @@ def write_outputs(
     family_scores: pd.DataFrame,
     origin_scores: pd.DataFrame,
     raw_records: list[dict[str, Any]],
+    live_attempts: list[dict[str, Any]],
 ) -> None:
     (output_dir / "normalized_spec.json").write_text(
         json.dumps(spec, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -989,6 +1018,9 @@ def write_outputs(
         frame.to_csv(output_dir / filename, index=False)
     (output_dir / "raw_records.json").write_text(
         json.dumps(raw_records, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (output_dir / "live_attempts.json").write_text(
+        json.dumps(live_attempts, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
@@ -1085,10 +1117,10 @@ def load_raw_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
-    if args.mode in {"live", "replay_live"} and int(args.max_live_calls) <= 0:
-        raise DynamicMacroError(
-            "--max-live-calls must be positive in live and replay_live modes"
-        )
+    if args.mode == "live" and int(args.max_live_calls) <= 0:
+        raise DynamicMacroError("--max-live-calls must be positive in live mode")
+    if args.mode == "replay_live" and int(args.max_live_calls) < 0:
+        raise DynamicMacroError("--max-live-calls must be non-negative in replay_live mode")
     if args.mode not in {"replay", "replay_live"} and args.raw_records_json:
         raise DynamicMacroError(
             "--raw-records-json is only valid in replay or replay_live mode"
@@ -1127,6 +1159,22 @@ def _validate_args(args: argparse.Namespace) -> None:
         or not 0.0 <= float(args.hybrid_state_weight) <= 1.0
     ):
         raise DynamicMacroError("--hybrid-state-weight must be between zero and one")
+
+
+def _validate_replay_live_horizon(
+    args: argparse.Namespace, *, origin_count: int
+) -> None:
+    if args.mode != "replay_live":
+        return
+    prefix = int(args.replay_prefix_period_count)
+    if prefix > origin_count:
+        raise DynamicMacroError(
+            "Replay prefix cannot exceed the recursive economy horizon"
+        )
+    if prefix < origin_count and int(args.max_live_calls) <= 0:
+        raise DynamicMacroError(
+            "replay_live requires positive --max-live-calls when the replay prefix does not cover the horizon"
+        )
 
 
 def _pct_change(current: float, previous: float) -> float:

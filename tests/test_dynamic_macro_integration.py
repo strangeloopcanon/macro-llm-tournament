@@ -25,6 +25,7 @@ class DynamicMacroIntegrationTests(unittest.TestCase):
             "macro-llm-frozen-vintage-bundle": "macro_llm_tournament.frozen_vintage_bundle:main",
             "macro-llm-dynamic-macro-economy": "macro_llm_tournament.dynamic_macro_economy:main",
             "macro-llm-dynamic-macro-tournament": "macro_llm_tournament.dynamic_macro_tournament:main",
+            "macro-llm-dynamic-macro-confirmatory": "macro_llm_tournament.dynamic_macro_confirmatory:main",
             "macro-llm-data-provenance": "macro_llm_tournament.data_provenance:main",
         }
         self.assertEqual(
@@ -48,6 +49,8 @@ class DynamicMacroIntegrationTests(unittest.TestCase):
             "dynamic-macro-policy-partial-fixture",
             "dynamic-macro-policy-partial-live",
             "dynamic-macro-policy-partial-resume",
+            "dynamic-macro-confirmatory-june",
+            "dynamic-macro-incumbent-replay",
         ):
             self.assertRegex(makefile, rf"(?m)^{re.escape(target)}:[^\n]*$")
 
