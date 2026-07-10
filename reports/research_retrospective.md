@@ -1,6 +1,6 @@
 # Macro LLM Simulation: Research Retrospective
 
-**Status:** Historical experiment log through the recursive January-May 2026 development tournament.
+**Status:** Historical experiment log through the corrected 81-versus-200 recursive economy comparison.
 For the current evidence verdict, use
 [`macro_simulation_report.md`](macro_simulation_report.md). A July 2026
 integrity review downgraded the February score from confirmatory to a one-shot
@@ -156,7 +156,17 @@ Result: yes as a simulation, not yet as a predictive win. The new engine runs 81
 
 The base empirical-v4 LLM economy scores `0.564533` against adaptive `0.564235`. Full origin-visible policy-state assimilation with `0.85` rate smoothing improves the LLM score to `0.549789`; adaptive scores `0.548667`. A half-weight policy-state compromise scores `0.555688`. The full-assimilation candidate wins development by absolute LLM score, improves the base LLM economy by `2.61%`, and remains `0.2%` behind adaptive. Accounting residuals stay below `7.28e-12`.
 
-Status: keep as the current developmental economy. Stop tuning on January-May. The exact winner and five replay records are frozen for a one-shot June test after the complete first-release bundle exists.
+Status: historical predecessor. Its mechanism survives, but its raw-weight 81-household aggregation and June lock are superseded by the corrected scale comparison below.
+
+### 17. Population Weights and Household Scale
+
+Question: was the recursive result being limited by an 81-household ecology or by incorrect aggregation of the stratified sample?
+
+Result: correcting the weights matters for the evidence contract; increasing the household count does not improve the score. The new cohort builder starts from the 886 respondents with an April 2025 observation and an immediate March prior, without conditioning on future survey completion. A locked stratified draw nests the historical 81-household core inside a 200-household master sample. Each household receives its SCE survey weight multiplied by the eligible-to-sampled ratio in its income, age, and education stratum. Those adjusted weights are normalized for aggregation and withheld from model prompts.
+
+Both cohorts were rerun live through GPT-5.5 at high reasoning effort under the same January-May mechanism and target surface. Corrected 81 scores `0.546550` against adaptive `0.548858`. Corrected 200 scores `0.548996` against adaptive `0.548379`. The larger ecology is `0.45%` worse on the absolute LLM score, while increasing direction accuracy from `45%` to `50%`. Its main gain is representational: effective weighted sample size rises from `46.53` to `123.58`, and the largest household weight falls from `6.41%` to `2.15%`.
+
+Status: household count is not the main macro-accuracy bottleneck. The pre-registered rule treats the two scores as a near tie because the gap is below 1%, then promotes 200 for population coverage. The promotion is methodological, not an accuracy claim. Fifteen accepted calls, zero retries, independent score/accounting reconstruction, and a zero-call replay preserve the result. The 200-household path replaces the old June lock; June itself remains unspent.
 
 ## The Lessons
 
@@ -170,16 +180,17 @@ Status: keep as the current developmental economy. Stop tuning on January-May. T
 8. Deterministic execution remains non-negotiable: budgets, feasibility, accounting, and aggregation belong in code.
 9. Bridge stabilization helps but does not solve the problem alone.
 10. Horizon alignment is load-bearing. The first aligned retrospective Phase 4 replay beats the adaptive twin, but its added belief-update leg does not clear persistence.
-11. The pieces now form a recursive macro simulation over real households and post-cutoff monthly vintages.
-12. Policy-state assimilation improves absolute performance, but the current LLM economy still trails adaptive by `0.2%` on development data.
-13. The macro-prediction claim remains unconfirmed. The next clean evidence is the frozen June test, not another January-May mechanism variant.
+11. The pieces now form a recursive macro simulation over persistent, population-weighted real households and post-cutoff monthly vintages.
+12. Correcting stratified-sample weights changes the development result; increasing household count from 81 to 200 does not improve absolute macro accuracy.
+13. A larger ecology still earns its place when scores are nearly tied: it reduces weight concentration and makes population aggregation less dependent on a few respondents.
+14. The macro-prediction claim remains unconfirmed. The next clean evidence is the frozen June test, not another January-May mechanism or scale variant.
 
 ## What Should Happen Next
 
 The next real test needs new evidence, not more reuse of spent holdouts.
 
-1. Freeze the full-policy-state recursive winner and stop January-May mechanism search.
+1. Freeze the promoted 200-household full-policy-state economy and stop January-May mechanism and scale search.
 2. Wait until all 10 June first-release targets exist, expected July 30, 2026.
 3. Build and validate the exact January-June canonical vintage bundle.
-4. Run the one-shot locked June confirmation: five replay periods, one accepted GPT-5.5 June update, and June-only scoring against the adaptive twin.
+4. Run the one-shot locked June confirmation: five replay periods in 10 batches, two accepted GPT-5.5 June batches, and June-only scoring against the adaptive twin.
 5. Preserve CTC, lottery, UI, February, and June as spent surfaces once used. Any later model-building round needs genuinely new data.

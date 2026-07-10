@@ -4,33 +4,44 @@ This file is the clean entry point for the current state of the repo.
 
 ## Current Recursive Development Winner
 
-The current economy starts with 81 real SCE household states, asks GPT-5.5 to
-update their beliefs from each month's as-of information, converts those
-beliefs into spending through empirical bridge v4, enforces household and
-aggregate accounting, and carries the resulting state into the next origin. An
-adaptive-expectations version of the same economy is scored beside it as a
-strong dumb benchmark.
+The current economy starts with 200 persistent, population-weighted real SCE
+household states. GPT-5.5 updates their beliefs from each month's as-of
+information in two fixed batches of 100. Empirical bridge v4 converts belief
+changes into spending pressure; deterministic code executes household choices,
+enforces household and aggregate accounting, and carries the resulting state
+into the next origin. An adaptive-expectations version of the same economy is
+scored beside it as a strong dumb benchmark.
 
-The locked January-May 2026 development tournament uses January as warmup and
-scores February-May against 10 common-month first-release targets per origin.
-The winner is
-`empirical_v4_moderate_policy_full_100_smooth_085`: LLM MacroScore `0.549789`
-versus adaptive `0.548667`. Lower is better, so adaptive still leads by `0.2%`;
-the bootstrap interval crosses zero. The winning mechanism improves the base
-LLM economy by `2.61%`, mainly by assimilating the observed policy-rate state
-at each rolling origin and smoothing the next policy-rate transition.
+The current promotion comes from a pre-registered corrected-weight comparison,
+not another mechanism search. Both cohorts use the same January-May 2026
+development bundle, prompts, model, behavior bridge, feedback, policy-state
+assimilation, and score mapping:
+
+| Cohort | LLM MacroScore | Adaptive | LLM minus adaptive | Effective sample size | Largest household weight |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Historical uncorrected 81 | `0.549789` | `0.548667` | `+0.001122` | `55.34` | `4.72%` |
+| Corrected 81 | **`0.546550`** | `0.548858` | `-0.002308` | `46.53` | `6.41%` |
+| Corrected 200 | `0.548996` | `0.548379` | `+0.000617` | `123.58` | `2.15%` |
+
+Lower is better. Increasing the ecology from 81 to 200 did not improve the
+absolute LLM score: the corrected 81 path is better by `0.45%`. That difference
+is inside the locked 1% near-tie band, so the pre-registered rule promotes 200
+households for substantially better population coverage. The 200-household LLM
+path trails adaptive by `0.11%`; its origin-block interval
+`[-0.00655, 0.00757]` crosses zero. This remains developmental evidence, not a
+confirmed predictive win.
 
 This is developmental model selection, not confirmation. The compact tracked
 evidence is:
 
 ```text
-reports/dynamic_macro_development_v1_evidence.json
+reports/dynamic_macro_household_scale_v1_evidence.json
 ```
 
 The local run is:
 
 ```text
-outputs/dynamic_macro_policy_partial_gpt55_live_v4/
+outputs/dynamic_macro_household_scale_incumbent_replay_v1/
 ```
 
 Reproduce the selected economy from the banked five-period records with zero
@@ -40,8 +51,9 @@ provider calls:
 make dynamic-macro-incumbent-replay
 ```
 
-That writes `outputs/dynamic_macro_incumbent_replay/` and must reproduce the
-winner's scores and accounting contract.
+That writes `outputs/dynamic_macro_household_scale_incumbent_replay_v1/` and
+must reproduce the promoted 200-household scores, two-batch belief records, and
+accounting contract with zero provider calls.
 
 The canonical reader-facing report is:
 
@@ -54,8 +66,9 @@ Phase 4 tournament. It is not the current recursive winner.
 
 ## Locked June Confirmation
 
-The winner, provider, model, household panel, empirical bridge, replay records,
-target contract, and input hashes are frozen in:
+The promoted cohort, adjusted population weights, provider, model, two-batch
+layout, prompts, empirical bridge, replay records, target contract, executable
+source, and input hashes are frozen in:
 
 ```text
 configs/dynamic_macro/confirmatory_june_2026_v1.json
@@ -65,11 +78,14 @@ configs/dynamic_macro/confirmatory_june_2026_v1.json
 fails before writing a receipt because the complete June first-release bundle
 does not yet exist. The full 10-target June surface is expected to become
 available with the [BEA June Personal Income and Outlays release on July 30,
-2026](https://www.bea.gov/news/schedule/). Once a valid bundle exists, any started run spends
-the surface; failed runs cannot be renamed and retried.
+2026](https://www.bea.gov/news/schedule/). Once a valid bundle exists, any
+started run spends the surface; failed runs cannot be renamed and retried. The
+five development periods replay in 10 banked batches, and June permits exactly
+two accepted GPT-5.5 batches plus two schema retries per batch.
 
 These targets depend on ignored local `work/` and `outputs/` artifacts. They are
-runnable in this research workspace, not from a clean clone.
+runnable in this research workspace, not from a clean clone. The historical
+uncorrected 81 path remains evidence only and is not eligible for promotion.
 
 ## Held-Out February Diagnostic
 

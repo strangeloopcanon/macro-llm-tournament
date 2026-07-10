@@ -1,5 +1,5 @@
 {
-  "file_count": 59,
+  "file_count": 63,
   "files": {
     "src/macro_llm_tournament/__init__.py": "b446e1bb134e7625e4c8f4d2101ff947028dc4118cc5438e58c75202f6a1dd74",
     "src/macro_llm_tournament/agent_behavior.py": "7b674ab3f61fb328d3665d8096cf78050c5989d621831f8d8aee5da53547a4ca",
@@ -16,15 +16,18 @@
     "src/macro_llm_tournament/belief_calibration.py": "028b5d85a9575f9bb719f41f3d672fa15b49d22619127c21af2c39d7e71f57d4",
     "src/macro_llm_tournament/combine_prior_update_panels.py": "f99cecd0bb013d4a083b51748395dfbc70db098d209b40c272dc81f1bef32e68",
     "src/macro_llm_tournament/data_provenance.py": "9e576defcd161c1a341169a5b27f2745b1758e21194a04f98a3df93cd09dc2d1",
-    "src/macro_llm_tournament/demand_economy.py": "70a90b52df42cfd5e6bad696c893d998493c8d4961fadd25f6b19c5af1576376",
+    "src/macro_llm_tournament/demand_economy.py": "736dc64933a2fb560a50d54d99e8f87fde355f9846aa0063457b4515280d1c40",
     "src/macro_llm_tournament/demand_timeline.py": "42bb4b40dce0ff89cd5d33ae8707006c45d303f2d3622f5708788e094e85115d",
     "src/macro_llm_tournament/demand_vintage_audit.py": "4197b96b8d54519dbdbc83f0adf204b18e1cd95667de368809a3f177251ed57a",
     "src/macro_llm_tournament/demand_vintage_oos.py": "02902f42958d1c243c00dfc34d69e3af7cad0883083e2a2a61276b1fae142b93",
     "src/macro_llm_tournament/download_data.py": "185953283caa5d1a38c6f4189080734e8b28367da28f28cf166c4f8694af6493",
-    "src/macro_llm_tournament/dynamic_macro_clients.py": "d7d329a5501e1593c66008d8f96c63b0881a5bbe53c72f8b46992fb65a0cffba",
+    "src/macro_llm_tournament/dynamic_macro_clients.py": "65577e95f0f3d512ea08eb2171ca961f9936bc271451191686f02481ca0e9194",
     "src/macro_llm_tournament/dynamic_macro_common.py": "1fb9b48f6392860d53f4f4718075dd21ca77d3c20bc1b62103745bf4c01bae86",
-    "src/macro_llm_tournament/dynamic_macro_confirmatory.py": "3ba544f0038946df7f020093366a7147bf454daf0ce2a3727434ac5644c3a8a3",
-    "src/macro_llm_tournament/dynamic_macro_economy.py": "8014170aee4b89e4d24cd0ea342aaed64d8209a6f4fc93564e144301f484b69b",
+    "src/macro_llm_tournament/dynamic_macro_confirmatory.py": "e66b1f9e95b05cece5edd4f6582952a71df43f349786227991e906c8ea9259d3",
+    "src/macro_llm_tournament/dynamic_macro_economy.py": "7009fc4ec7aff3003d5354a358a34cfce6282d0d27005c22aadd56b960bfd6d7",
+    "src/macro_llm_tournament/dynamic_macro_household_scale.py": "90879af7c289d472b289e5ec5003144866817e863e73546b845ec895e525ba44",
+    "src/macro_llm_tournament/dynamic_macro_household_scale_artifacts.py": "b97d3aefe70ba818936a52d0553e471f1eaa1a9c93b1d6f36e7b84853b96cbe0",
+    "src/macro_llm_tournament/dynamic_macro_household_scale_validation.py": "d358fe4f1aa6c1dc4d2d70b886cfcbe8c36c493c5981087eb89a02951395a98a",
     "src/macro_llm_tournament/dynamic_macro_inputs.py": "780e71aeb87c9e794fd6d3c065a6ff9260529b8e205c14aacc98c0aecdff2e98",
     "src/macro_llm_tournament/dynamic_macro_tournament.py": "4dda3dd6b0b5a1f3cf6d0789a9a6e3981cf1a8bdb9be99fcc97b444ce75beadd",
     "src/macro_llm_tournament/empirical_bridge.py": "da6fe9256c0fcbee998f55310716c85a1bc411a544d8080ad0865ff0b29b0437",
@@ -45,6 +48,7 @@
     "src/macro_llm_tournament/macro_playground.py": "14a15b3e03334467ddf18328d258bd78d620858ac71e14a5bff5b69ff6b22a8d",
     "src/macro_llm_tournament/macro_tournament.py": "880a0a97b6e60e1c8efbdfae872653316e38e577577f11a100a8700b7c1343f1",
     "src/macro_llm_tournament/macro_validity.py": "b7326ae5140e1ee09c3d5ef33d54ddcaa0417ab901aa104f3f85668682537c2a",
+    "src/macro_llm_tournament/persistent_households.py": "d42bc4713f3d3e4b3c617abd8edc01f16de26766a85ec2556409074a4bf99773",
     "src/macro_llm_tournament/persona_belief_panel.py": "7bd20798e4e0ca506ec6bb3c0c759e4848a7c97b159d71234336e6f9bbd49f4d",
     "src/macro_llm_tournament/persona_ecology.py": "ce7efeeaff47735b5827793a9935ffa29e6c74dbe8ed27d66e2eb16e1b8dde59",
     "src/macro_llm_tournament/persona_elicitation_campaign.py": "9c81146316e2998cde7c094e0a6b008b9e63ba5d877fb9bcf300c584f0020b3f",
@@ -63,5 +67,5 @@
   },
   "schema_version": "macro_llm_source_contract_v1",
   "source_root": "src/macro_llm_tournament",
-  "tree_sha256": "61780fc1969bc794e61f3d9fea48af440268951494e191b8890257c7fa3a99f6"
+  "tree_sha256": "dc7c9b164dfcd20ea67e7c4b38619a5c07d02e7829a51f76ea6001aa5b37663c"
 }

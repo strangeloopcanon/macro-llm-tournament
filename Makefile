@@ -145,10 +145,10 @@ dynamic-macro-household-scale-compare:
 
 .PHONY: dynamic-macro-incumbent-replay
 dynamic-macro-incumbent-replay:
-	rm -rf outputs/dynamic_macro_incumbent_replay
-	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
+	rm -rf outputs/dynamic_macro_household_scale_incumbent_replay_v1
+	CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
 		--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
-		--households-csv work/persona_beliefs/dynamic_macro_panel_gpt55_realtime/initial_households.csv \
+		--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv \
 		--mode replay_live \
 		--provider codex_cli \
 		--model gpt-5.5 \
@@ -167,13 +167,14 @@ dynamic-macro-incumbent-replay:
 		--belief-gain-income 0.5 \
 		--belief-gain-unemployment 1.0 \
 		--household-flow-anchor origin_saving_rate \
-		--raw-records-json work/dynamic_macro/banked_gpt55_development_v1/policy_assimilation_100_smoothing_085_periods_0_4.json \
+		--max-households-per-call 100 \
+		--raw-records-json work/dynamic_macro/banked_household_scale_v1/corrected200_live_raw_records.json \
 		--replay-prefix-period-count 5 \
 		--fresh-cache \
 		--bootstrap-replicates 1000 \
 		--bootstrap-seed 20260709 \
 		--max-live-calls 0 \
-		--output-dir outputs/dynamic_macro_incumbent_replay
+		--output-dir outputs/dynamic_macro_household_scale_incumbent_replay_v1
 
 dynamic-macro-economy-fixture: dynamic-macro-bundle-fixture
 	rm -rf outputs/dynamic_macro_economy_fixture

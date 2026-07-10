@@ -13,7 +13,7 @@ state becomes part of the next period's information set.
 
 ```mermaid
 flowchart LR
-  A["81 real SCE households<br/>priors, balances, demographics, weights"] --> B["GPT-5.5 belief update<br/>inflation, income, job risk, confidence"]
+  A["200 persistent SCE households<br/>priors, demographics, mapped balance sheets, adjusted weights"] --> B["GPT-5.5 belief update<br/>two fixed batches of 100"]
   V["As-of monthly vintage<br/>origin-visible macro information"] --> B
   B --> C["Empirical spending bridge v4<br/>belief changes to consumption pressure"]
   C --> D["Deterministic household execution<br/>consume, save, repay debt, preserve liquidity"]
@@ -36,18 +36,23 @@ bounded policy schedules. Deterministic code executes the consequences.
 
 ### Current recursive result
 
-The January-May 2026 development run starts from 81 SCE households, uses
-January as a warmup month, and scores February-May on 40 post-cutoff,
-first-release target rows. The selected full-assimilation candidate scores
-`0.549789`; adaptive scores `0.548667`. Lower is better. The LLM economy is
-`0.2%` behind, statistically indistinguishable on this four-origin sample, but
-`2.61%` better than the base recursive LLM economy.
+The January-May 2026 scale experiment uses January as warmup and scores
+February-May on 40 post-cutoff, first-release target rows. After correcting
+stratified-sample weights, the 81-household LLM economy scores `0.546550`
+against adaptive `0.548858`. The 200-household LLM economy scores `0.548996`
+against adaptive `0.548379`. Lower is better: 81 is the absolute-score winner,
+but 200 is only `0.45%` worse, inside the pre-registered 1% near-tie band. The
+locked rule therefore promotes 200 for better population representation:
+effective weighted sample size rises from `46.53` to `123.58`, and the largest
+household weight falls from `6.41%` to `2.15%`.
 
 This is a working simulatable macroeconomy and a developmental near-tie, not a
-confirmed predictive win. The exact winner is frozen for a one-shot June 2026
-test. That command remains blocked until the complete 10-target first-release
-bundle is available, expected with the [BEA June Personal Income and Outlays
-release on July 30, 2026](https://www.bea.gov/news/schedule/).
+confirmed predictive win. Household scale did not materially improve macro
+accuracy; it reduced sampling concentration. The promoted 200-household path
+is frozen for a one-shot June 2026 test. That command remains blocked until the
+complete 10-target first-release bundle is available, expected with the
+[BEA June Personal Income and Outlays release on July 30,
+2026](https://www.bea.gov/news/schedule/).
 
 Replay the selected January-May economy without provider calls:
 
@@ -76,11 +81,13 @@ make dynamic-macro-incumbent-replay
 - `src/macro_llm_tournament/belief_calibration.py` fits validation-only belief-dynamics calibration, scores the locked transform on held-out vintage cards, and emits a bounded behavior-economy calibration profile.
 - `src/macro_llm_tournament/macro_playground.py` wraps the demand kernel in a branchable scenario sandbox with bounded household, firm, policy/narrative, and critic actor payloads.
 - `src/macro_llm_tournament/macro_tournament.py` runs retrospective full-economy candidate tournaments and replays the promoted incumbent without spending fresh score surfaces.
-- `src/macro_llm_tournament/prepare_dynamic_macro_panel.py` builds the leakage-audited 81-household SCE state used by the recursive economy.
+- `src/macro_llm_tournament/persistent_households.py` builds the deterministic nested 81/200 SCE cohorts, stable anonymized identities, append-only histories, and inclusion-correct population weights.
+- `src/macro_llm_tournament/prepare_dynamic_macro_panel.py` preserves the historical 81-household preparation path used before the scale correction.
 - `src/macro_llm_tournament/frozen_vintage_bundle.py` freezes and validates rolling-origin first-release FRED/ALFRED bundles.
 - `src/macro_llm_tournament/dynamic_macro_economy.py` runs the recursive matched twins, feedback, accounting, and common-month macro scoring.
 - `src/macro_llm_tournament/dynamic_macro_tournament.py` compares complete recursive economies on locked developmental surfaces and preserves live-call/replay provenance.
 - `src/macro_llm_tournament/dynamic_macro_confirmatory.py` owns the fail-closed, one-shot June confirmation lock and receipt.
+- `src/macro_llm_tournament/dynamic_macro_household_scale.py` orchestrates the corrected live-cohort comparison; `dynamic_macro_household_scale_validation.py` reconstructs lineage, scores, prompts, calls, and accounting; `dynamic_macro_household_scale_artifacts.py` owns pair selection and report artifacts.
 - `src/macro_llm_tournament/macro_performance_gate.py` scores the macro lab and vintage OOS artifacts against an executable target catalog without promoting fixture runs to empirical validity.
 - `src/macro_llm_tournament/macro_validity.py` is the legacy mechanism-readiness scorecard; its OOS rows are static gaps. Use `macro_performance_gate.py` for executable OOS readiness.
 - `src/macro_llm_tournament/postcutoff_behavior_gate.py` runs the contamination-clean post-cutoff household behavior proxy gate using public FRED spending, saving, and revolving-credit series.
