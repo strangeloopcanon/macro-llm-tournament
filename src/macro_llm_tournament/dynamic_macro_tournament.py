@@ -283,6 +283,12 @@ def normalize_spec(raw: dict[str, Any], *, spec_path: Path) -> dict[str, Any]:
             "hybrid_state_weight": float(raw_candidate.get("hybrid_state_weight", 1.0)),
             "feedback_mode": str(raw_candidate.get("feedback_mode", "closed_loop")),
             "feedback_gain": float(raw_candidate.get("feedback_gain", 1.0)),
+            "policy_rate_smoothing": float(
+                raw_candidate.get("policy_rate_smoothing", 0.0)
+            ),
+            "policy_state_mode": str(
+                raw_candidate.get("policy_state_mode", "recursive")
+            ),
             "belief_gain_global": float(raw_candidate.get("belief_gain_global", 1.0)),
             "belief_gain_inflation": float(raw_candidate.get("belief_gain_inflation", 1.0)),
             "belief_gain_income": float(raw_candidate.get("belief_gain_income", 1.0)),
@@ -294,6 +300,7 @@ def normalize_spec(raw: dict[str, Any], *, spec_path: Path) -> dict[str, Any]:
         numeric = [
             candidate["hybrid_state_weight"],
             candidate["feedback_gain"],
+            candidate["policy_rate_smoothing"],
             candidate["belief_gain_global"],
             candidate["belief_gain_inflation"],
             candidate["belief_gain_income"],
@@ -301,6 +308,14 @@ def normalize_spec(raw: dict[str, Any], *, spec_path: Path) -> dict[str, Any]:
         ]
         if any(not math.isfinite(float(value)) or float(value) < 0 for value in numeric):
             raise DynamicMacroTournamentError(f"Candidate {candidate_id} has invalid numeric controls")
+        if candidate["policy_rate_smoothing"] > 1.0:
+            raise DynamicMacroTournamentError(
+                f"Candidate {candidate_id} policy_rate_smoothing must not exceed one"
+            )
+        if candidate["policy_state_mode"] not in {"recursive", "origin_visible"}:
+            raise DynamicMacroTournamentError(
+                f"Candidate {candidate_id} has invalid policy_state_mode"
+            )
         if bool(candidate["replay_prefix_raw_records_json"]) != bool(
             candidate["replay_prefix_period_count"]
         ):
@@ -370,6 +385,10 @@ def _run_candidate(spec: dict[str, Any], candidate: dict[str, Any], *, mode: str
         candidate["feedback_mode"],
         "--feedback-gain",
         str(candidate["feedback_gain"]),
+        "--policy-rate-smoothing",
+        str(candidate["policy_rate_smoothing"]),
+        "--policy-state-mode",
+        candidate["policy_state_mode"],
         "--belief-gain-global",
         str(candidate["belief_gain_global"]),
         "--belief-gain-inflation",
@@ -620,6 +639,8 @@ def _assert_child_spec_matches_candidate(
     expected_controls = {
         "feedback_mode": candidate["feedback_mode"],
         "feedback_gain": candidate["feedback_gain"],
+        "policy_rate_smoothing": candidate["policy_rate_smoothing"],
+        "policy_state_mode": candidate["policy_state_mode"],
         "behavior_policy_mode": candidate["behavior_policy_mode"],
     }
     for key, expected in expected_controls.items():

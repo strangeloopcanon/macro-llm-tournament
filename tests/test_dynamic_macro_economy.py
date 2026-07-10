@@ -20,6 +20,7 @@ from macro_llm_tournament.dynamic_macro_economy import (
     ReplayThenLiveDemandClient,
     anchor_household_flows,
     apply_belief_gains,
+    assert_no_prompt_target_leakage,
     canonical_behavior_profile_sha256,
     filter_bundle_targets,
     mapped_value,
@@ -30,7 +31,12 @@ from macro_llm_tournament.dynamic_macro_economy import (
     select_score_origins,
     validate_replay_prefix_records,
 )
-from macro_llm_tournament.demand_economy import DemandScenario, build_fixture_demand_households
+from macro_llm_tournament.demand_economy import (
+    DemandScenario,
+    _environment_for_period,
+    _next_environment,
+    build_fixture_demand_households,
+)
 from macro_llm_tournament.frozen_vintage_bundle import (
     FixtureAlfredClient,
     build_frozen_vintage_bundle,
@@ -284,6 +290,68 @@ def prompt_payloads(output_dir: Path, candidate: str) -> list[dict]:
 
 
 class DynamicMacroEconomyTests(unittest.TestCase):
+    def test_policy_state_assimilation_and_rate_smoothing_are_explicit(self) -> None:
+        env = {
+            "periods_per_year": 12.0,
+            "policy_rate": 4.25,
+            "employment_rate": 0.956,
+            "inflation_rate": 3.2,
+        }
+        scenario = DemandScenario(
+            scenario_id="policy_inertia",
+            label="policy inertia",
+            policy_rate_smoothing=0.85,
+            policy_state_mode="origin_visible",
+        )
+        assimilated = _environment_for_period(
+            env,
+            scenario,
+            period_override={
+                "origin_visible_state_assimilation": {
+                    "policy_rate": {
+                        "series_id": "FEDFUNDS",
+                        "observation_date": "2026-01-01",
+                        "value": 3.64,
+                    }
+                }
+            },
+        )
+        self.assertEqual(assimilated["policy_rate"], 3.64)
+        aggregate = {
+            "output_gap_pct": 0.0,
+            "aggregate_consumption": 1.0,
+            "aggregate_job_loss_belief": 8.0,
+            "aggregate_confidence_index": 60.0,
+            "aggregate_liquid_buffer_months": 3.0,
+        }
+        next_env = _next_environment(
+            assimilated,
+            aggregate,
+            scenario,
+            feedback_mode="closed_loop",
+        )
+        unsmoothed = _next_environment(
+            assimilated,
+            aggregate,
+            DemandScenario("unsmoothed", "unsmoothed"),
+            feedback_mode="closed_loop",
+        )
+        self.assertGreater(next_env["policy_rate"], assimilated["policy_rate"])
+        self.assertLess(next_env["policy_rate"], unsmoothed["policy_rate"])
+
+    def test_origin_visible_policy_state_requires_a_valid_value(self) -> None:
+        scenario = DemandScenario(
+            "policy_assimilation",
+            "policy assimilation",
+            policy_state_mode="origin_visible",
+        )
+        with self.assertRaisesRegex(ValueError, "finite policy_rate"):
+            _environment_for_period(
+                {"policy_rate": 3.5},
+                scenario,
+                period_override={},
+            )
+
     def test_replay_live_semantic_retry_quarantines_bad_cached_payload(self) -> None:
         records = [
             {
@@ -836,6 +904,25 @@ class DynamicMacroEconomyTests(unittest.TestCase):
             )
             self.assertEqual(len(provenance["normalized_household_state_sha256"]), 64)
             self.assertIsNone(manifest["behavior_policy_content_sha256"])
+
+    def test_prompt_leakage_guard_rejects_nested_target_aliases(self) -> None:
+        for forbidden in (
+            "target_month",
+            "target_realized",
+            "realized",
+            "forecast_error",
+            "first_release",
+            "latest_revision",
+            "outcome",
+            "origin_visible_denominator_value",
+            "first_release_denominator_date",
+            "first_release_denominator_value",
+        ):
+            with self.subTest(forbidden=forbidden):
+                with self.assertRaisesRegex(DynamicMacroError, forbidden):
+                    assert_no_prompt_target_leakage(
+                        [{"prompt_payload": {"nested": [{forbidden: 1.0}]}}]
+                    )
 
     def test_raw_record_replay_is_deterministic_and_identity_checked(self) -> None:
         with (

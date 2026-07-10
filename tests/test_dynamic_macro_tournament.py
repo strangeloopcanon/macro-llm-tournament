@@ -74,6 +74,8 @@ def fake_child(spec, candidate, *, mode, output_dir):
     child_spec = {
         "feedback_mode": candidate["feedback_mode"],
         "feedback_gain": candidate["feedback_gain"],
+        "policy_rate_smoothing": candidate["policy_rate_smoothing"],
+        "policy_state_mode": candidate["policy_state_mode"],
         "behavior_policy_mode": candidate["behavior_policy_mode"],
         "belief_gains": {
             "global": candidate["belief_gain_global"],
@@ -144,6 +146,13 @@ class DynamicMacroTournamentTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(first["reserved_confirmatory"]["origin_month"], "2026-03-01")
             self.assertEqual(first["maximum_authorized_live_calls"], 12)
+            self.assertTrue(
+                all(
+                    candidate["policy_rate_smoothing"] == 0.0
+                    and candidate["policy_state_mode"] == "recursive"
+                    for candidate in first["candidates"]
+                )
+            )
 
     def test_reserved_origin_cannot_enter_development_bundle(self) -> None:
         with TemporaryDirectory(dir=Path.cwd()) as temp_dir:

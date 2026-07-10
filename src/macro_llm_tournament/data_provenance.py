@@ -54,6 +54,19 @@ DERIVED_DATA_DIRS: dict[str, dict[str, str]] = {
     },
 }
 
+RECURSIVE_DERIVED_DATA_DIRS: dict[str, dict[str, str]] = {
+    "work/dynamic_macro": {
+        "dataset": "dynamic_macro_vintage_and_replay_assets",
+        "source": "derived_in_repo",
+        "notes": "Frozen vintage bundles and identity-bearing banked dynamic-macro replay records.",
+    },
+    "work/persona_beliefs/dynamic_macro_panel_gpt55_realtime": {
+        "dataset": "dynamic_macro_sce_household_panel",
+        "source": "derived_in_repo",
+        "notes": "Leakage-audited SCE panel and initial household state for recursive macro runs.",
+    },
+}
+
 PACKAGED_DATA_FILES: dict[str, dict[str, str]] = {
     "src/macro_llm_tournament/data/public_behavior_targets.csv": {
         "dataset": "public_behavior_target_catalog",
@@ -62,6 +75,31 @@ PACKAGED_DATA_FILES: dict[str, dict[str, str]] = {
             "Behavior target bands with per-row citation columns (tax rebate, 2008 stimulus, "
             "2020 EIP, lottery, UI exhaustion, 2021 CTC families)."
         ),
+    },
+    "configs/dynamic_macro/development_v2.json": {
+        "dataset": "dynamic_macro_development_spec",
+        "source": "tracked_configuration",
+        "notes": "Locked corrected common-month developmental tournament specification.",
+    },
+    "configs/dynamic_macro/development_policy_inertia_v3.json": {
+        "dataset": "dynamic_macro_development_spec",
+        "source": "tracked_configuration",
+        "notes": "Locked policy-inertia mechanism comparison on the corrected development surface.",
+    },
+    "configs/behavior_profiles/empirical_bridge_v4.json": {
+        "dataset": "dynamic_macro_behavior_profile",
+        "source": "tracked_configuration",
+        "notes": "Accepted empirical bridge v4 profile used by dynamic candidates.",
+    },
+    "configs/behavior_profiles/empirical_bridge_v5_stabilized.json": {
+        "dataset": "dynamic_macro_behavior_profile",
+        "source": "tracked_configuration",
+        "notes": "Accepted stabilized empirical bridge v5 profile used by dynamic candidates.",
+    },
+    "configs/behavior_profiles/state_policy_gpt55.json": {
+        "dataset": "dynamic_macro_behavior_profile",
+        "source": "tracked_configuration",
+        "notes": "Banked GPT-5.5 state-conditioned household policy schedule.",
     },
 }
 
@@ -142,6 +180,26 @@ def _iter_derived_events(recorded_at: str) -> Iterator[dict[str, Any]]:
                 recorded_at=recorded_at,
                 notes=meta.get("notes"),
             )
+    for rel_dir, meta in RECURSIVE_DERIVED_DATA_DIRS.items():
+        directory = PROJECT_ROOT / rel_dir
+        if not directory.exists():
+            continue
+        paths = sorted(
+            path
+            for pattern in ("*.csv", "*.json")
+            for path in directory.rglob(pattern)
+            if path.is_file() and not any(part.startswith(".") for part in path.parts)
+        )
+        for path in paths:
+            yield _file_event(
+                path,
+                event_type="derived_dataset",
+                dataset=meta["dataset"],
+                source=meta["source"],
+                ts_basis="file_mtime",
+                recorded_at=recorded_at,
+                notes=meta.get("notes"),
+            )
     for rel_file, meta in PACKAGED_DATA_FILES.items():
         path = PROJECT_ROOT / rel_file
         if path.exists():
@@ -182,7 +240,7 @@ def _iter_run_events(recorded_at: str) -> Iterator[dict[str, Any]]:
     outputs = PROJECT_ROOT / "outputs"
     if not outputs.exists():
         return
-    for manifest_path in sorted(outputs.glob("*/manifest.json")):
+    for manifest_path in sorted(outputs.rglob("manifest.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -200,7 +258,7 @@ def _iter_run_events(recorded_at: str) -> Iterator[dict[str, Any]]:
             "ts_basis": basis,
             "recorded_at_utc": recorded_at,
             "event_type": "experiment_run",
-            "dataset": manifest_path.parent.name,
+            "dataset": str(manifest_path.parent.relative_to(outputs)),
             "source": str(manifest.get("schema_version") or "run_manifest"),
             "path": str(manifest_path.relative_to(PROJECT_ROOT)),
             "bytes": manifest_path.stat().st_size,

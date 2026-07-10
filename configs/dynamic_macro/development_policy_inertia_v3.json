@@ -1,0 +1,53 @@
+{
+  "schema_version": "dynamic_macro_tournament_v2",
+  "run_id": "dynamic_macro_policy_inertia_development_2026_01_2026_05_v3",
+  "shared": {
+    "bundle_dir": "work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1",
+    "bundle_sha256": "69a7dcabbda300bd1ce9e1f687d77351d65aa62a6167273f125816c0209d5fdd",
+    "households_csv": "work/persona_beliefs/dynamic_macro_panel_gpt55_realtime/initial_households.csv",
+    "households_sha256": "a73f9bb14ce1a78b127a861a2e6ee6769d2573cd756198887e12ce27ec3623f7",
+    "provider": "codex_cli",
+    "model": "gpt-5.5",
+    "contamination_policy": "unavailable_at_cutoff",
+    "score_origin_start": "2026-02-01",
+    "score_origin_end": "2026-05-01",
+    "bootstrap_replicates": 1000,
+    "bootstrap_seed": 20260709
+  },
+  "candidates": [
+    {
+      "candidate_id": "empirical_v4_moderate",
+      "behavior_policy_mode": "empirical_bridge",
+      "empirical_bridge_json": "configs/behavior_profiles/empirical_bridge_v4.json",
+      "belief_gain_global": 3.0,
+      "belief_gain_inflation": 1.5,
+      "belief_gain_income": 0.5,
+      "belief_gain_unemployment": 1.0,
+      "replay_prefix_raw_records_json": "work/dynamic_macro/banked_gpt55_development_v1/empirical_v4_moderate_periods_0_4.json",
+      "replay_prefix_period_count": 5,
+      "max_live_calls": 1,
+      "mechanism_complexity": 2
+    },
+    {
+      "candidate_id": "empirical_v4_moderate_policy_inertia_085",
+      "behavior_policy_mode": "empirical_bridge",
+      "empirical_bridge_json": "configs/behavior_profiles/empirical_bridge_v4.json",
+      "belief_gain_global": 3.0,
+      "belief_gain_inflation": 1.5,
+      "belief_gain_income": 0.5,
+      "belief_gain_unemployment": 1.0,
+      "policy_rate_smoothing": 0.85,
+      "policy_state_mode": "origin_visible",
+      "replay_prefix_raw_records_json": "work/dynamic_macro/banked_gpt55_development_v1/common_period_0.json",
+      "replay_prefix_period_count": 1,
+      "max_live_calls": 12,
+      "mechanism_complexity": 3
+    }
+  ],
+  "reserved_confirmatory": {
+    "origin_month": "2026-06-01",
+    "status": "awaiting_complete_common_month_first_release_target_set",
+    "earliest_expected_full_release": "2026-07-30",
+    "rule": "winner_only_after_development_selection_no_mechanism_changes"
+  }
+}

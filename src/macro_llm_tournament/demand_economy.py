@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shlex
 import subprocess
 import sys
@@ -77,6 +78,8 @@ class DemandScenario:
     job_risk_shock_pp: float = 0.0
     belief_dispersion_multiplier: float = 1.0
     feedback_gain: float = 1.0
+    policy_rate_smoothing: float = 0.0
+    policy_state_mode: str = "recursive"
     notes: str = ""
 
 
@@ -971,6 +974,14 @@ def run_demand_economy(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     if feedback_mode not in FEEDBACK_MODES:
         raise ValueError(f"Unsupported feedback mode: {feedback_mode}")
+    scenarios = list(scenarios)
+    for scenario in scenarios:
+        if not 0.0 <= float(scenario.policy_rate_smoothing) <= 1.0:
+            raise ValueError("policy_rate_smoothing must be between 0 and 1")
+        if scenario.policy_state_mode not in {"recursive", "origin_visible"}:
+            raise ValueError(
+                f"Unsupported policy_state_mode: {scenario.policy_state_mode}"
+            )
     periods_per_year = _validated_periods_per_year(periods_per_year)
     normalized_period_overrides = _normalize_period_overrides(period_overrides)
     normalized_initial_environment = _normalize_initial_environment_override(initial_environment_override)
@@ -989,12 +1000,18 @@ def run_demand_economy(
             **normalized_initial_environment,
         }
         for period_index in range(int(period_count)):
-            period_state = _period_state(
+            period_override = normalized_period_overrides.get(period_index)
+            transition_env = _environment_for_period(
                 env,
+                scenario,
+                period_override=period_override,
+            )
+            period_state = _period_state(
+                transition_env,
                 scenario,
                 period_index,
                 periods_per_year=periods_per_year,
-                period_override=normalized_period_overrides.get(period_index),
+                period_override=period_override,
             )
             panel = client.belief_panel(scenario, period_state, household_states)
             prompt_rows.append(
@@ -1028,7 +1045,12 @@ def run_demand_economy(
                 aggregate,
                 periods_per_year=periods_per_year,
             )
-            next_env = _next_environment(env, aggregate, scenario, feedback_mode=feedback_mode)
+            next_env = _next_environment(
+                transition_env,
+                aggregate,
+                scenario,
+                feedback_mode=feedback_mode,
+            )
             aggregate.update(
                 {
                     "next_output_gap_pct": float(next_env["output_gap_pct"]),
@@ -2083,11 +2105,44 @@ def _period_state(
         "policy_rate": float(env["policy_rate"]) + rate_shock,
     }
     if period_override:
-        state.update(period_override)
-        state["supplied_exogenous_conditions"] = dict(period_override)
+        public_override = {
+            key: value
+            for key, value in period_override.items()
+            if key != "origin_visible_state_assimilation"
+        }
+        state.update(public_override)
+        state["supplied_exogenous_conditions"] = public_override
     else:
         state["supplied_exogenous_conditions"] = {}
     return state
+
+
+def _environment_for_period(
+    env: dict[str, float],
+    scenario: DemandScenario,
+    *,
+    period_override: dict[str, Any] | None,
+) -> dict[str, float]:
+    if scenario.policy_state_mode == "recursive":
+        return env
+    assimilation = (
+        period_override.get("origin_visible_state_assimilation")
+        if period_override
+        else None
+    )
+    policy = assimilation.get("policy_rate") if isinstance(assimilation, dict) else None
+    value = policy.get("value") if isinstance(policy, dict) else None
+    try:
+        policy_rate = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "origin_visible policy state requires a finite policy_rate value"
+        ) from exc
+    if not math.isfinite(policy_rate) or not 0.0 <= policy_rate <= 30.0:
+        raise ValueError(
+            "origin_visible policy state requires a finite policy_rate value"
+        )
+    return {**env, "policy_rate": policy_rate}
 
 
 def _realize_household_period(
@@ -3165,9 +3220,16 @@ def _next_environment(
             12.0,
         )
     )
+    policy_target = (
+        NEUTRAL_POLICY_RATE
+        + 1.35 * (next_inflation - INFLATION_TARGET)
+        + 0.18 * output_gap
+    )
+    smoothing = float(scenario.policy_rate_smoothing)
     next_policy = float(
         np.clip(
-            NEUTRAL_POLICY_RATE + 1.35 * (next_inflation - INFLATION_TARGET) + 0.18 * output_gap,
+            smoothing * float(env["policy_rate"])
+            + (1.0 - smoothing) * policy_target,
             0.0,
             12.0,
         )

@@ -67,6 +67,16 @@ FORBIDDEN_PROMPT_KEYS = frozenset(
         "latest_minus_first_release",
         "revision_audit",
         "target_contamination",
+        "target_month",
+        "target_realized",
+        "realized",
+        "forecast_error",
+        "first_release",
+        "latest_revision",
+        "outcome",
+        "origin_visible_denominator_value",
+        "first_release_denominator_date",
+        "first_release_denominator_value",
     }
 )
 OUTPUT_FILES = (
@@ -257,6 +267,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--feedback-gain", type=float, default=1.0)
     parser.add_argument(
+        "--policy-rate-smoothing",
+        type=float,
+        default=0.0,
+        help="Monthly inertia applied to the Taylor-rule policy target; zero preserves the original rule.",
+    )
+    parser.add_argument(
+        "--policy-state-mode",
+        choices=("recursive", "origin_visible"),
+        default="recursive",
+        help="Use the recursive policy state or assimilate the frozen origin-visible FEDFUNDS state each month.",
+    )
+    parser.add_argument(
         "--household-flow-anchor",
         choices=("origin_saving_rate", "none"),
         default="origin_saving_rate",
@@ -318,7 +340,10 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         households,
         first_origin=bundle.origins[0],
     )
-    period_overrides = build_period_overrides(bundle)
+    period_overrides = build_period_overrides(
+        bundle,
+        policy_state_mode=str(args.policy_state_mode),
+    )
     households, household_flow_anchor = anchor_household_flows(
         households,
         period_overrides,
@@ -392,6 +417,8 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         scenario_id="recursive_monthly_path",
         label="Continuous frozen-origin monthly path",
         feedback_gain=float(args.feedback_gain),
+        policy_rate_smoothing=float(args.policy_rate_smoothing),
+        policy_state_mode=str(args.policy_state_mode),
         notes="One continuous trajectory; targets are withheld until scoring.",
     )
 
@@ -1505,7 +1532,13 @@ def assert_contiguous_origins(origins: tuple[dict[str, str], ...]) -> None:
             )
 
 
-def build_period_overrides(bundle: BundleView) -> dict[int, dict[str, Any]]:
+def build_period_overrides(
+    bundle: BundleView,
+    *,
+    policy_state_mode: str = "recursive",
+) -> dict[int, dict[str, Any]]:
+    if policy_state_mode not in {"recursive", "origin_visible"}:
+        raise DynamicMacroError(f"Unsupported policy state mode: {policy_state_mode}")
     rows_by_origin: dict[str, list[dict[str, str]]] = {}
     for row in bundle.history:
         rows_by_origin.setdefault(row["origin_month"], []).append(row)
@@ -1533,7 +1566,7 @@ def build_period_overrides(bundle: BundleView) -> dict[int, dict[str, Any]]:
                 f"Missing periods for origin {origin['origin_month']}"
             )
         raw_history = {key: raw_by_series[key] for key in sorted(raw_by_series)}
-        overrides[period_index] = {
+        period_override = {
             "origin_month": origin["origin_month"],
             "as_of_date": origin["as_of_date"],
             "origin_visible_macro_context": {
@@ -1542,6 +1575,26 @@ def build_period_overrides(bundle: BundleView) -> dict[int, dict[str, Any]]:
             "origin_visible_macro_history": raw_history,
             "observed_signal_summary": observed_signal_summary(raw_history),
         }
+        if policy_state_mode == "origin_visible":
+            policy_state = latest.get("FEDFUNDS")
+            if policy_state is None:
+                raise DynamicMacroError(
+                    f"Origin {origin['origin_month']} lacks origin-visible FEDFUNDS state"
+                )
+            if date.fromisoformat(
+                str(policy_state["observation_date"])
+            ) >= date.fromisoformat(origin["origin_month"]):
+                raise DynamicMacroError(
+                    "Origin-visible policy state must predate the scored observation month"
+                )
+            period_override["origin_visible_state_assimilation"] = {
+                "policy_rate": {
+                    "series_id": "FEDFUNDS",
+                    "observation_date": policy_state["observation_date"],
+                    "value": float(policy_state["value"]),
+                }
+            }
+        overrides[period_index] = period_override
     assert_no_prompt_target_leakage(
         [{"prompt_payload": value} for value in overrides.values()]
     )
@@ -2513,6 +2566,8 @@ def normalized_spec(
         "periods_per_year": PERIODS_PER_YEAR,
         "feedback_mode": args.feedback_mode,
         "feedback_gain": float(args.feedback_gain),
+        "policy_rate_smoothing": float(args.policy_rate_smoothing),
+        "policy_state_mode": str(args.policy_state_mode),
         "belief_gains": gains,
         "initial_environment_anchor": initial_environment_anchor,
         "initial_environment_anchor_origin": bundle.origins[0],
@@ -2723,6 +2778,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise DynamicMacroError("--semantic-retry-limit must be non-negative")
     if not math.isfinite(float(args.feedback_gain)) or float(args.feedback_gain) < 0.0:
         raise DynamicMacroError("--feedback-gain must be finite and non-negative")
+    if not math.isfinite(float(args.policy_rate_smoothing)) or not 0.0 <= float(
+        args.policy_rate_smoothing
+    ) <= 1.0:
+        raise DynamicMacroError("--policy-rate-smoothing must be between zero and one")
     if (
         not math.isfinite(float(args.hybrid_state_weight))
         or not 0.0 <= float(args.hybrid_state_weight) <= 1.0

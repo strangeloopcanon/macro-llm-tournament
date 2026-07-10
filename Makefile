@@ -1,7 +1,7 @@
 DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
 POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
 
-.PHONY: check test all fixture data postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay prior-update-extension-v2-inputs prior-update-dec2024-v2-live prior-update-jan2025-v2-live macro-tournament-dev macro-tournament-dev-v2 macro-incumbent-v1 macro-confirmatory-v1 phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+.PHONY: check test all fixture data data-provenance postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay prior-update-extension-v2-inputs prior-update-dec2024-v2-live prior-update-jan2025-v2-live macro-tournament-dev macro-tournament-dev-v2 macro-incumbent-v1 macro-confirmatory-v1 dynamic-macro-panel dynamic-macro-bundle-fixture dynamic-macro-bundle-dev dynamic-macro-economy-fixture dynamic-macro-tournament-fixture dynamic-macro-tournament-live dynamic-macro-tournament-resume dynamic-macro-policy-tournament-fixture dynamic-macro-policy-tournament-live dynamic-macro-policy-tournament-resume phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
 
 # Current milestone
 macro-incumbent-v1:
@@ -41,6 +41,90 @@ fixture:
 
 data:
 	PYTHONPATH=src python3 -m macro_llm_tournament.download_data
+
+data-provenance:
+	PYTHONPATH=src python3 -m macro_llm_tournament.data_provenance
+
+# Recursive monthly macro lane
+dynamic-macro-panel:
+	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_dynamic_macro_panel \
+		--input-csv work/persona_beliefs/sce_real_microdata.csv \
+		--output-dir work/persona_beliefs/dynamic_macro_panel_gpt55_realtime \
+		--model gpt-5.5 \
+		--sample-size 81 \
+		--sample-seed 20250709 \
+		--publication-lag-months 9 \
+		--initial-role sealed_test \
+		--initial-wave-position first
+
+dynamic-macro-bundle-fixture:
+	rm -rf work/dynamic_macro/frozen_fixture_v1
+	PYTHONPATH=src python3 -m macro_llm_tournament.frozen_vintage_bundle \
+		--origins 2025-10-01:2025-12-01 \
+		--mode fixture \
+		--output-dir work/dynamic_macro/frozen_fixture_v1
+
+dynamic-macro-bundle-dev:
+	PYTHONPATH=src python3 -m macro_llm_tournament.frozen_vintage_bundle \
+		--origins 2026-01-01:2026-05-01 \
+		--mode fred \
+		--output-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
+
+dynamic-macro-economy-fixture: dynamic-macro-bundle-fixture
+	rm -rf outputs/dynamic_macro_economy_fixture
+	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
+		--bundle-dir work/dynamic_macro/frozen_fixture_v1 \
+		--households-csv work/persona_beliefs/dynamic_macro_panel_gpt55_realtime/initial_households.csv \
+		--mode fixture \
+		--contamination-policy all \
+		--bootstrap-replicates 100 \
+		--output-dir outputs/dynamic_macro_economy_fixture
+
+dynamic-macro-tournament-fixture:
+	rm -rf outputs/dynamic_macro_tournament_fixture
+	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
+		--spec configs/dynamic_macro/development_v2.json \
+		--mode fixture \
+		--max-live-calls 0 \
+		--output-dir outputs/dynamic_macro_tournament_fixture
+
+dynamic-macro-tournament-live:
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
+		--spec configs/dynamic_macro/development_v2.json \
+		--mode live \
+		--max-live-calls 73 \
+		--output-dir outputs/dynamic_macro_tournament_gpt55_common_month_live_v2
+
+dynamic-macro-tournament-resume:
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
+		--spec configs/dynamic_macro/development_v2.json \
+		--mode live \
+		--max-live-calls 73 \
+		--output-dir outputs/dynamic_macro_tournament_gpt55_common_month_live_v2 \
+		--resume
+
+dynamic-macro-policy-tournament-fixture:
+	rm -rf outputs/dynamic_macro_policy_tournament_fixture
+	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
+		--spec configs/dynamic_macro/development_policy_inertia_v3.json \
+		--mode fixture \
+		--max-live-calls 0 \
+		--output-dir outputs/dynamic_macro_policy_tournament_fixture
+
+dynamic-macro-policy-tournament-live:
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
+		--spec configs/dynamic_macro/development_policy_inertia_v3.json \
+		--mode live \
+		--max-live-calls 13 \
+		--output-dir outputs/dynamic_macro_policy_tournament_gpt55_live_v3
+
+dynamic-macro-policy-tournament-resume:
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
+		--spec configs/dynamic_macro/development_policy_inertia_v3.json \
+		--mode live \
+		--max-live-calls 13 \
+		--output-dir outputs/dynamic_macro_policy_tournament_gpt55_live_v3 \
+		--resume
 
 postcutoff-fixture:
 	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
