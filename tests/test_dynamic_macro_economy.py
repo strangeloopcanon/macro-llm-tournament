@@ -28,6 +28,7 @@ from macro_llm_tournament.dynamic_macro_economy import (
     parse_args,
     run_dynamic_macro,
     score_macro,
+    seed_live_cache,
     select_score_origins,
     validate_replay_prefix_records,
 )
@@ -509,6 +510,40 @@ class DynamicMacroEconomyTests(unittest.TestCase):
                         [],
                     )
             self.assertEqual(client.semantic_retry_count, 0)
+            journals = list((root / ".cache" / "live_attempts").glob("*.json"))
+            self.assertEqual(len(journals), 1)
+            self.assertEqual(json.loads(journals[0].read_text())["status"], "failed")
+
+    def test_seed_live_cache_validates_identity_and_copies_records(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "seed" / "codex_cli"
+            source.mkdir(parents=True)
+            record = {
+                "provider": "codex_cli",
+                "model": "gpt-5.5",
+                "payload": {"prompt_version": "test", "beliefs": []},
+            }
+            (source / "record.json").write_text(json.dumps(record), encoding="utf-8")
+            provenance = seed_live_cache(
+                root / "seed",
+                root / "destination",
+                provider="codex_cli",
+                model="gpt-5.5",
+            )
+            self.assertEqual(provenance["record_count"], 1)
+            self.assertTrue(
+                (root / "destination" / "codex_cli" / "record.json").is_file()
+            )
+            record["model"] = "wrong"
+            (source / "bad.json").write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(DynamicMacroError, "identity mismatch"):
+                seed_live_cache(
+                    root / "seed",
+                    root / "other",
+                    provider="codex_cli",
+                    model="gpt-5.5",
+                )
 
     def test_score_origin_range_keeps_warmup_path_but_excludes_it_from_scores(self) -> None:
         bundle = fixture_bundle()

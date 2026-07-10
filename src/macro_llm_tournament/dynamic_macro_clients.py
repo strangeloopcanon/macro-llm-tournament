@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,6 +27,56 @@ from .dynamic_macro_common import (
     _sha256_json,
 )
 from .llm_common import LLMUnavailable
+
+
+def seed_live_cache(
+    seed_dir: Path,
+    cache_dir: Path,
+    *,
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    source_dir = seed_dir / provider
+    if not source_dir.is_dir():
+        raise DynamicMacroError(
+            f"Seed cache lacks provider directory: {source_dir}"
+        )
+    destination = cache_dir / provider
+    destination.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for source in sorted(source_dir.glob("*.json")):
+        if source.is_symlink() or not source.is_file():
+            raise DynamicMacroError("Seed cache entries must be regular JSON files")
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DynamicMacroError(f"Invalid seed cache JSON: {source}") from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("provider") != provider
+            or payload.get("model") != model
+            or not isinstance(payload.get("payload"), dict)
+        ):
+            raise DynamicMacroError(f"Seed cache identity mismatch: {source}")
+        target = destination / source.name
+        if target.exists():
+            raise DynamicMacroError(f"Seed cache destination collision: {target}")
+        shutil.copy2(source, target)
+        rows.append(
+            {
+                "file": source.name,
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+        )
+    if not rows:
+        raise DynamicMacroError("Seed cache contains no JSON records")
+    return {
+        "source_dir_name": seed_dir.name,
+        "provider": provider,
+        "model": model,
+        "record_count": len(rows),
+        "records": rows,
+    }
 
 
 class ReplayThenLiveDemandClient:
@@ -133,16 +186,30 @@ class ReplayThenLiveDemandClient:
         household_states: list[dict[str, Any]],
     ) -> dict[str, Any]:
         for attempt in range(self.semantic_retry_limit + 1):
+            cache_path = self._live.belief_cache_path(
+                scenario, period_state, household_states
+            )
+            attempt_path = (
+                None
+                if cache_path.is_file()
+                else self._start_live_attempt(period_state, cache_path)
+            )
             try:
-                return self._live.belief_panel(
+                panel = self._live.belief_panel(
                     scenario, period_state, household_states
                 )
+                if attempt_path is not None:
+                    self._finish_live_attempt(attempt_path, status="complete")
+                return panel
             except LLMUnavailable as exc:
+                if attempt_path is not None:
+                    self._finish_live_attempt(
+                        attempt_path,
+                        status="failed",
+                        error=str(exc),
+                    )
                 if attempt >= self.semantic_retry_limit:
                     raise
-                cache_path = self._live.belief_cache_path(
-                    scenario, period_state, household_states
-                )
                 if not cache_path.is_file():
                     raise
                 rejected_dir = self.cache_dir / "rejected_semantic"
@@ -164,6 +231,42 @@ class ReplayThenLiveDemandClient:
                     }
                 )
         raise AssertionError("unreachable semantic retry loop")
+
+    def _start_live_attempt(
+        self, period_state: dict[str, Any], cache_path: Path
+    ) -> Path:
+        attempt_dir = self.cache_dir / "live_attempts"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        sequence = 1 + len(list(attempt_dir.glob("attempt_*.json")))
+        path = attempt_dir / f"attempt_{sequence:04d}.json"
+        payload = {
+            "schema_version": "dynamic_macro_live_attempt_v1",
+            "status": "started",
+            "provider": self.provider,
+            "model": self.model,
+            "period_index": int(period_state["period_index"]),
+            "cache_file": cache_path.name,
+            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _finish_live_attempt(
+        path: Path,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.update(
+            {
+                "status": status,
+                "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+                "error": error[:500] if error else None,
+            }
+        )
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def decision_panel(
         self,

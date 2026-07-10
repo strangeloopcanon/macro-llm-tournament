@@ -33,6 +33,7 @@ from .dynamic_macro_clients import (
     belief_gains_from_args,
     cache_identity,
     observed_signal_adaptive_payload,
+    seed_live_cache,
     validate_replay_prefix_records,
 )
 from .dynamic_macro_common import (
@@ -115,6 +116,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--fresh-cache", action="store_true")
+    parser.add_argument(
+        "--seed-cache-dir",
+        help="Validated prior live-cache records to seed into an otherwise fresh output cache.",
+    )
     parser.add_argument(
         "--raw-records-json",
         help="Identity-bearing raw records to use instead of replay cache files.",
@@ -279,6 +284,16 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         if args.fresh_cache
         else WORK_ROOT / "dynamic_macro_economy_cache"
     )
+    seed_cache_provenance = (
+        seed_live_cache(
+            Path(args.seed_cache_dir),
+            cache_dir,
+            provider=args.provider,
+            model=args.model,
+        )
+        if args.seed_cache_dir
+        else None
+    )
     provider_cwd = (
         output_dir / "provider_cwd"
         if args.mode in {"live", "replay", "replay_live"}
@@ -403,6 +418,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         household_flow_anchor=household_flow_anchor,
         contamination_coverage=contamination_coverage,
         score_origin_contract=score_origin_contract,
+        seed_cache_provenance=seed_cache_provenance,
     )
     spec_sha256 = _sha256_json(spec)
     prompt_frame = prompt_rows_to_frame(prompt_rows)
@@ -447,6 +463,7 @@ def run_dynamic_macro(args: argparse.Namespace) -> dict[str, Any]:
         "replayed_record_count": llm_client.replayed_record_count,
         "semantic_retry_count": llm_client.semantic_retry_count,
         "rejected_semantic_payloads": llm_client.rejected_semantic_payloads,
+        "seed_cache_provenance": seed_cache_provenance,
         "max_accounting_abs_residual": _max_accounting_residual(accounting_frame),
         "macro_scores": macro_scores,
         "llm_minus_adaptive": macro_scores["llm"] - macro_scores["adaptive"],
@@ -861,6 +878,7 @@ def normalized_spec(
     household_flow_anchor: dict[str, Any],
     contamination_coverage: dict[str, Any],
     score_origin_contract: dict[str, Any],
+    seed_cache_provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     mappings = []
     for spec in bundle.target_specs:
@@ -896,6 +914,7 @@ def normalized_spec(
             "replay_prefix_period_count": int(args.replay_prefix_period_count),
             "semantic_retry_limit": int(args.semantic_retry_limit),
         },
+        "seed_cache_provenance": seed_cache_provenance,
         "period_overrides": {
             str(key): value for key, value in period_overrides.items()
         },
@@ -1087,6 +1106,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
     if int(args.semantic_retry_limit) < 0:
         raise DynamicMacroError("--semantic-retry-limit must be non-negative")
+    if args.seed_cache_dir and (
+        args.mode not in {"live", "replay_live"} or not args.fresh_cache
+    ):
+        raise DynamicMacroError(
+            "--seed-cache-dir requires live/replay_live mode with --fresh-cache"
+        )
     if not math.isfinite(float(args.feedback_gain)) or float(args.feedback_gain) < 0.0:
         raise DynamicMacroError("--feedback-gain must be finite and non-negative")
     if not math.isfinite(float(args.policy_rate_smoothing)) or not 0.0 <= float(

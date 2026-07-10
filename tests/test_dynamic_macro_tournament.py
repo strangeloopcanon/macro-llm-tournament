@@ -12,6 +12,8 @@ import pandas as pd
 from macro_llm_tournament.dynamic_macro_tournament import (
     SCHEMA_VERSION,
     DynamicMacroTournamentError,
+    _build_failed_candidate_cache_seed,
+    _summarize_failed_candidate_attempt,
     normalize_spec,
     parse_args,
     run_tournament,
@@ -139,6 +141,60 @@ def fake_child(spec, candidate, *, mode, output_dir):
 
 
 class DynamicMacroTournamentTests(unittest.TestCase):
+    def test_attempt_journal_is_authoritative_and_valid_cache_is_seeded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            attempt = (
+                root
+                / "failed_attempts"
+                / "candidate_a_attempt_1"
+            )
+            cache = attempt / ".cache" / "codex_cli"
+            cache.mkdir(parents=True)
+            valid = {
+                "provider": "codex_cli",
+                "model": "gpt-5.5",
+                "cache_hit": False,
+                "response_created_utc": "2026-07-09T00:00:00+00:00",
+                "payload": {"beliefs": [{"type_id": "h1"}, {"type_id": "h2"}]},
+            }
+            (cache / "valid.json").write_text(json.dumps(valid), encoding="utf-8")
+            invalid = {**valid, "payload": {"beliefs": [{"type_id": "h1"}, {"type_id": "h1"}]}}
+            (cache / "duplicate.json").write_text(json.dumps(invalid), encoding="utf-8")
+            journals = attempt / ".cache" / "live_attempts"
+            journals.mkdir()
+            for index in range(2):
+                (journals / f"attempt_{index + 1:04d}.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "dynamic_macro_live_attempt_v1",
+                            "status": "failed" if index else "complete",
+                            "provider": "codex_cli",
+                            "model": "gpt-5.5",
+                            "period_index": index + 1,
+                            "started_at_utc": "2026-07-09T00:00:00+00:00",
+                            "finished_at_utc": "2026-07-09T00:00:01+00:00",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            summary = _summarize_failed_candidate_attempt(
+                root,
+                candidate_id="candidate_a",
+                attempt_number=1,
+                archived=attempt,
+            )
+            self.assertEqual(summary["live_call_count"], 2)
+            self.assertEqual(summary["live_call_count_basis"], "attempt_journal")
+            seed = _build_failed_candidate_cache_seed(
+                root, candidate_id="candidate_a"
+            )
+            self.assertIsNotNone(seed)
+            self.assertEqual(
+                [path.name for path in (seed / "codex_cli").glob("*.json")],
+                ["valid.json"],
+            )
+
     def test_normalized_spec_is_stable_and_reserves_future_origin(self) -> None:
         with TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             path = write_inputs(Path(temp_dir))

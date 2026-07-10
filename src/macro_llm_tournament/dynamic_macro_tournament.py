@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -136,6 +137,13 @@ def run_tournament(args: argparse.Namespace) -> dict[str, Any]:
                         else int(candidate["max_live_calls"])
                     ),
                 }
+                if args.resume:
+                    seed_dir = _build_failed_candidate_cache_seed(
+                        output_dir,
+                        candidate_id=candidate_id,
+                    )
+                    if seed_dir is not None:
+                        candidate_for_run["_seed_cache_dir"] = str(seed_dir)
                 _run_candidate(
                     spec,
                     candidate_for_run,
@@ -444,6 +452,8 @@ def _run_candidate(spec: dict[str, Any], candidate: dict[str, Any], *, mode: str
     ]
     if mode == "live":
         command.append("--fresh-cache")
+        if candidate.get("_seed_cache_dir"):
+            command.extend(["--seed-cache-dir", candidate["_seed_cache_dir"]])
     replay_prefix = candidate.get("replay_prefix_raw_records_json")
     if replay_prefix and mode == "live":
         command.extend(
@@ -700,13 +710,86 @@ def _summarize_failed_candidate_attempt(
                     "response_created_utc": payload.get("response_created_utc"),
                 }
             )
+    live_attempt_records: list[dict[str, Any]] = []
+    for path in sorted(archived.glob(".cache/live_attempts/attempt_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DynamicMacroTournamentError(
+                f"Malformed live-attempt journal: {path}"
+            ) from exc
+        if not isinstance(payload, dict) or payload.get("schema_version") != "dynamic_macro_live_attempt_v1":
+            raise DynamicMacroTournamentError(
+                f"Malformed live-attempt journal: {path}"
+            )
+        live_attempt_records.append(
+            {
+                "relative_path": str(path.relative_to(output_dir)),
+                "sha256": _file_sha256(path),
+                "provider": payload.get("provider"),
+                "model": payload.get("model"),
+                "period_index": payload.get("period_index"),
+                "status": payload.get("status"),
+                "started_at_utc": payload.get("started_at_utc"),
+                "finished_at_utc": payload.get("finished_at_utc"),
+            }
+        )
     return {
         "candidate_id": candidate_id,
         "attempt_number": attempt_number,
         "archive_path": str(archived.relative_to(output_dir)),
-        "live_call_count": len(live_cache_records),
+        "live_call_count": (
+            len(live_attempt_records)
+            if live_attempt_records
+            else len(live_cache_records)
+        ),
+        "live_call_count_basis": (
+            "attempt_journal" if live_attempt_records else "legacy_cache_records"
+        ),
         "live_cache_records": live_cache_records,
+        "live_attempt_records": live_attempt_records,
     }
+
+
+def _build_failed_candidate_cache_seed(
+    output_dir: Path,
+    *,
+    candidate_id: str,
+) -> Path | None:
+    failed_root = output_dir / "failed_attempts"
+    candidates: dict[str, Path] = {}
+    for archived in sorted(failed_root.glob(f"{candidate_id}_attempt_*")):
+        for path in sorted(archived.glob(".cache/codex_cli/*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            payload = record.get("payload") if isinstance(record, dict) else None
+            beliefs = payload.get("beliefs") if isinstance(payload, dict) else None
+            if not isinstance(beliefs, list) or not beliefs:
+                continue
+            type_ids = [
+                str(row.get("type_id", ""))
+                for row in beliefs
+                if isinstance(row, dict)
+            ]
+            if (
+                len(type_ids) != len(beliefs)
+                or any(not type_id for type_id in type_ids)
+                or len(type_ids) != len(set(type_ids))
+            ):
+                continue
+            candidates[path.name] = path
+    if not candidates:
+        return None
+    seed_root = output_dir / "resume_cache" / candidate_id
+    if seed_root.exists():
+        shutil.rmtree(seed_root)
+    provider_dir = seed_root / "codex_cli"
+    provider_dir.mkdir(parents=True)
+    for name, source in sorted(candidates.items()):
+        shutil.copy2(source, provider_dir / name)
+    return seed_root
 
 
 def _assert_child_spec_matches_candidate(
