@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macro-llm-tournament"
-version = "0.1.0"
-description = "As-of macro forecast tournaments for testing LLM belief engines."
+version = "0.2.0"
+description = "A household-first rolling macroeconomy driven by isolated LLM beliefs and intentions."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -14,45 +14,17 @@ dependencies = [
   "numpy",
   "pandas",
   "requests",
-  "openai",
-  "xlrd",
   "openpyxl",
   "python-dotenv",
-  "scipy",
 ]
 
 [project.scripts]
-macro-llm-forecast-tournament = "macro_llm_tournament.forecast_tournament:main"
-macro-llm-download-data = "macro_llm_tournament.download_data:main"
-macro-llm-postcutoff-tournament = "macro_llm_tournament.postcutoff_tournament:main"
-macro-llm-agent-economy = "macro_llm_tournament.agent_economy:main"
-macro-llm-behavior-gate = "macro_llm_tournament.behavior_gate:main"
-macro-llm-prepare-persona-holdouts = "macro_llm_tournament.prepare_persona_holdouts:main"
-macro-llm-persona-belief-panel = "macro_llm_tournament.persona_belief_panel:main"
-macro-llm-persona-ecology = "macro_llm_tournament.persona_ecology:main"
-macro-llm-persona-elicitation-campaign = "macro_llm_tournament.persona_elicitation_campaign:main"
-macro-llm-demand-economy = "macro_llm_tournament.demand_economy:main"
-macro-llm-state-policy-schedules = "macro_llm_tournament.state_policy_schedules:main"
-macro-llm-demand-vintage-oos = "macro_llm_tournament.demand_vintage_oos:main"
-macro-llm-belief-calibration = "macro_llm_tournament.belief_calibration:main"
-macro-llm-macro-validity = "macro_llm_tournament.macro_validity:main"
-macro-llm-macro-performance-gate = "macro_llm_tournament.macro_performance_gate:main"
-macro-llm-postcutoff-behavior-gate = "macro_llm_tournament.postcutoff_behavior_gate:main"
-macro-llm-forecast-audit = "macro_llm_tournament.forecast_audit:main"
-macro-llm-prepare-spending-survey = "macro_llm_tournament.prepare_spending_survey:main"
-macro-llm-empirical-bridge = "macro_llm_tournament.empirical_bridge:main"
-macro-llm-phase4-v4-diagnostics = "macro_llm_tournament.phase4_v4_diagnostics:main"
-macro-llm-prepare-dynamic-macro-panel = "macro_llm_tournament.prepare_dynamic_macro_panel:main"
-macro-llm-prepare-household-scale-cohorts = "macro_llm_tournament.persistent_households:main"
-macro-llm-frozen-vintage-bundle = "macro_llm_tournament.frozen_vintage_bundle:main"
-macro-llm-dynamic-macro-economy = "macro_llm_tournament.dynamic_macro_economy:main"
-macro-llm-dynamic-macro-tournament = "macro_llm_tournament.dynamic_macro_tournament:main"
-macro-llm-dynamic-macro-confirmatory = "macro_llm_tournament.dynamic_macro_confirmatory:main"
-macro-llm-dynamic-macro-household-scale = "macro_llm_tournament.dynamic_macro_household_scale:main"
-macro-llm-data-provenance = "macro_llm_tournament.data_provenance:main"
+macro-llm-ecology = "macro_llm_tournament.ecology:main"
+macro-llm-ecology-origin = "macro_llm_tournament.ecology_inputs:main"
+macro-llm-ecology-realize = "macro_llm_tournament.ecology_realizations:main"
+macro-llm-household-cohort = "macro_llm_tournament.persistent_households:main"
+macro-llm-frozen-vintage = "macro_llm_tournament.frozen_vintage_bundle:main"
+macro-llm-prepare-sce = "macro_llm_tournament.prepare_sce_microdata:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-macro_llm_tournament = ["data/*.csv"]

@@ -1,24 +1,15 @@
-DEMAND_ECONOMY_REPLAY_OUTPUT ?= outputs/demand_economy_live_gpt55_p20_12cell_mechanism_replay_v5
-POSTCUTOFF_REPLAY_OUTPUT ?= outputs/spf_postcutoff_replay_refresh
+.PHONY: all check test ecology-fixture ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize household-cohort vintage-bundle origin-snapshot
 
-.PHONY: check test all fixture data data-provenance postcutoff-fixture postcutoff-replay-refresh agent-fixture agent-counterfactual-fixture behavior-fixture behavior-architecture-fixture behavior-ecology-ctc-holdout-replay persona-holdouts persona-belief-fixture persona-ecology-fixture persona-ecology-relative-fixture persona-elicitation-prepare persona-elicitation-live demand-economy-fixture demand-economy-live-replay demand-vintage-oos-fixture state-policy-schedules-fixture state-policy-schedules-live macro-playground-fixture phase4-matched-twins-fixture phase4-prior-update-codex-replay phase4-prior-update-policy-schedule-replay phase4-prior-update-state-schedule-replay empirical-bridge-v4-fit empirical-bridge-v5-stabilized-fit phase4-prior-update-empirical-bridge-v4-replay phase4-prior-update-empirical-bridge-v4-holdlast-replay phase4-prior-update-empirical-bridge-v4-aligned-replay phase4-prior-update-empirical-bridge-v5-stabilized-replay phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay prior-update-extension-v2-inputs prior-update-dec2024-v2-live prior-update-jan2025-v2-live macro-tournament-dev macro-tournament-dev-v2 macro-incumbent-v1 macro-confirmatory-v1 dynamic-macro-panel dynamic-macro-bundle-fixture dynamic-macro-bundle-dev dynamic-macro-economy-fixture dynamic-macro-tournament-fixture dynamic-macro-tournament-live dynamic-macro-tournament-resume dynamic-macro-policy-tournament-fixture dynamic-macro-policy-tournament-live dynamic-macro-policy-tournament-resume dynamic-macro-policy-partial-fixture dynamic-macro-policy-partial-live dynamic-macro-policy-partial-resume phase4-v4-diagnostics macro-performance-fixture macro-validity-scorecard postcutoff-behavior-fixture audit-fixture
+ORIGIN ?= 2026-07-01
+AS_OF ?= 2026-07-10
+MODEL ?= gpt-5.5
+ORIGIN_SNAPSHOT ?= work/ecology_origins/$(AS_OF).json
+ECOLOGY_CACHE ?= work/ecology_cache_200_july_v1
+CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_replay_current
+REPLAY_REFERENCE_DIR ?= outputs/.household_ecology_replay_reference
 
-# Current milestone
-macro-incumbent-v1:
-	PYTHONPATH=src python3 -m macro_llm_tournament.macro_tournament \
-		--spec configs/macro_tournament/incumbent_v1.json \
-		--mode replay \
-		--max-live-calls 0 \
-		--output-dir outputs/macro_incumbent_v1
+all: check test
 
-macro-confirmatory-v1:
-	PYTHONPATH=src python3 -m macro_llm_tournament.macro_tournament \
-		--spec configs/macro_tournament/confirmatory_fred_2026_02_v1.json \
-		--mode replay \
-		--max-live-calls 0 \
-		--output-dir outputs/macro_confirmatory_fred_2026_02_v1
-
-# Core utilities and forecast gates
 check:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q src tests
 	@for file in $$(git ls-files '*.json'); do python3 -m json.tool "$$file" >/dev/null || exit 1; done
@@ -28,56 +19,81 @@ check:
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
 
-all: check test
-
-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.forecast_tournament \
-		--llm-mode fixture \
-		--card-count 8 \
-		--vintage-context best_effort \
-		--belief-targets best_effort \
-		--typed-agent-panel \
-		--output-dir outputs/spf_fixture
-
-data:
-	PYTHONPATH=src python3 -m macro_llm_tournament.download_data
-
-data-provenance:
-	PYTHONPATH=src python3 -m macro_llm_tournament.data_provenance
-
-# Recursive monthly macro lane
-dynamic-macro-panel:
-	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_dynamic_macro_panel \
-		--input-csv work/persona_beliefs/sce_real_microdata.csv \
-		--output-dir work/persona_beliefs/dynamic_macro_panel_gpt55_realtime \
-		--model gpt-5.5 \
-		--sample-size 81 \
-		--sample-seed 20250709 \
-		--publication-lag-months 9 \
-		--initial-role sealed_test \
-		--initial-wave-position first
-
-dynamic-macro-bundle-fixture:
-	rm -rf work/dynamic_macro/frozen_fixture_v1
-	PYTHONPATH=src python3 -m macro_llm_tournament.frozen_vintage_bundle \
-		--origins 2025-10-01:2025-12-01 \
+ecology-fixture:
+	rm -rf outputs/household_ecology_fixture_v1
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
+		--origin 2026-05-01 \
 		--mode fixture \
-		--output-dir work/dynamic_macro/frozen_fixture_v1
+		--provider codex_cli \
+		--model gpt-5.5 \
+		--household-count 12 \
+		--workers 4 \
+		--max-live-calls 0 \
+		--output-dir outputs/household_ecology_fixture_v1
 
-dynamic-macro-bundle-dev:
-	PYTHONPATH=src python3 -m macro_llm_tournament.frozen_vintage_bundle \
-		--origins 2026-01-01:2026-05-01 \
-		--mode fred \
-		--output-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
+ecology-live-canary:
+	rm -rf outputs/household_ecology_canary_v1
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 \
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
+		--origin 2026-05-01 \
+		--mode live \
+		--provider codex_cli \
+		--model gpt-5.5 \
+		--household-count 12 \
+		--workers 4 \
+		--max-live-calls 14 \
+		--output-dir outputs/household_ecology_canary_v1
 
-.PHONY: dynamic-macro-confirmatory-june
-dynamic-macro-confirmatory-june:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_confirmatory \
-		--lock configs/dynamic_macro/confirmatory_june_2026_v1.json \
-		--output-dir outputs/dynamic_macro_confirmatory_june_2026_v1
+ecology-live-200:
+	rm -rf $(CURRENT_RUN_DIR)
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 \
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
+		--origin $(ORIGIN) \
+		--bundle $(ORIGIN_SNAPSHOT) \
+		--mode live \
+		--provider codex_cli \
+		--model $(MODEL) \
+		--household-count 200 \
+		--workers 4 \
+		--max-live-calls 210 \
+		--cache-dir $(ECOLOGY_CACHE) \
+		--output-dir $(CURRENT_RUN_DIR)
 
-.PHONY: dynamic-macro-household-scale-cohorts dynamic-macro-household-scale-fixture dynamic-macro-household-scale-81-live dynamic-macro-household-scale-200-live dynamic-macro-household-scale-compare
-dynamic-macro-household-scale-cohorts:
+ecology-current-replay:
+	rm -rf $(CURRENT_RUN_DIR) $(REPLAY_REFERENCE_DIR)
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
+		--origin $(ORIGIN) \
+		--bundle $(ORIGIN_SNAPSHOT) \
+		--mode replay \
+		--provider codex_cli \
+		--model $(MODEL) \
+		--household-count 200 \
+		--workers 4 \
+		--max-live-calls 0 \
+		--cache-dir $(ECOLOGY_CACHE) \
+		--output-dir $(REPLAY_REFERENCE_DIR)
+	@expected=$$(python3 -c 'import json; print(json.load(open("$(REPLAY_REFERENCE_DIR)/manifest.json"))["replay_equivalence_sha256"])'); \
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
+		--origin $(ORIGIN) \
+		--bundle $(ORIGIN_SNAPSHOT) \
+		--mode replay \
+		--provider codex_cli \
+		--model $(MODEL) \
+		--household-count 200 \
+		--workers 4 \
+		--max-live-calls 0 \
+		--expected-replay-sha256 $$expected \
+		--cache-dir $(ECOLOGY_CACHE) \
+		--output-dir $(CURRENT_RUN_DIR)
+	rm -rf $(REPLAY_REFERENCE_DIR)
+
+ecology-realize:
+	@test -n "$(REALIZATIONS_CSV)" || (echo "REALIZATIONS_CSV is required" >&2; exit 2)
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_realizations \
+		--run-dir $(CURRENT_RUN_DIR) \
+		--realizations-csv $(REALIZATIONS_CSV)
+
+household-cohort:
 	PYTHONPATH=src python3 -m macro_llm_tournament.persistent_households \
 		--input-csv work/persona_beliefs/sce_real_microdata.csv \
 		--output-dir work/persona_beliefs/persistent_household_scale_v1 \
@@ -87,624 +103,14 @@ dynamic-macro-household-scale-cohorts:
 		--core-sample-size 81 \
 		--sample-seed 20250709
 
-dynamic-macro-household-scale-fixture:
-	rm -rf outputs/dynamic_macro_household_scale_81_fixture_v1 outputs/dynamic_macro_household_scale_200_fixture_v1
-	@for size in 81 200; do \
-		CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
-			--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
-			--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_$$size.csv \
-			--mode fixture --provider codex_cli --model gpt-5.5 \
-			--contamination-policy unavailable_at_cutoff \
-			--score-origin-start 2026-02-01 --score-origin-end 2026-05-01 \
-			--behavior-policy-mode empirical_bridge \
-			--empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
-			--feedback-mode closed_loop --feedback-gain 1.0 \
-			--policy-rate-smoothing 0.85 --policy-state-mode origin_visible --policy-state-weight 1.0 \
-			--belief-gain-global 3.0 --belief-gain-inflation 1.5 \
-			--belief-gain-income 0.5 --belief-gain-unemployment 1.0 \
-			--household-flow-anchor origin_saving_rate --max-households-per-call 100 \
-			--bootstrap-replicates 1000 --bootstrap-seed 20260709 --max-live-calls 0 \
-			--output-dir outputs/dynamic_macro_household_scale_$${size}_fixture_v1 || exit $$?; \
-	done
+vintage-bundle:
+	PYTHONPATH=src python3 -m macro_llm_tournament.frozen_vintage_bundle \
+		--origins 2026-01-01:2026-05-01 \
+		--mode fred \
+		--output-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
 
-dynamic-macro-household-scale-81-live:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
-		--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
-		--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_81.csv \
-		--mode live --provider codex_cli --model gpt-5.5 --contamination-policy unavailable_at_cutoff \
-		--score-origin-start 2026-02-01 --score-origin-end 2026-05-01 \
-		--behavior-policy-mode empirical_bridge --empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
-		--feedback-mode closed_loop --feedback-gain 1.0 --policy-rate-smoothing 0.85 \
-		--policy-state-mode origin_visible --policy-state-weight 1.0 \
-		--belief-gain-global 3.0 --belief-gain-inflation 1.5 --belief-gain-income 0.5 --belief-gain-unemployment 1.0 \
-		--household-flow-anchor origin_saving_rate --max-households-per-call 100 \
-		--semantic-retry-limit 2 --fresh-cache --bootstrap-replicates 1000 --bootstrap-seed 20260709 \
-		--max-live-calls 15 --output-dir outputs/dynamic_macro_household_scale_81_gpt55_live_v1
-
-dynamic-macro-household-scale-200-live:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
-		--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
-		--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv \
-		--mode live --provider codex_cli --model gpt-5.5 --contamination-policy unavailable_at_cutoff \
-		--score-origin-start 2026-02-01 --score-origin-end 2026-05-01 \
-		--behavior-policy-mode empirical_bridge --empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
-		--feedback-mode closed_loop --feedback-gain 1.0 --policy-rate-smoothing 0.85 \
-		--policy-state-mode origin_visible --policy-state-weight 1.0 \
-		--belief-gain-global 3.0 --belief-gain-inflation 1.5 --belief-gain-income 0.5 --belief-gain-unemployment 1.0 \
-		--household-flow-anchor origin_saving_rate --max-households-per-call 100 \
-		--semantic-retry-limit 2 --fresh-cache --bootstrap-replicates 1000 --bootstrap-seed 20260709 \
-		--max-live-calls 30 --output-dir outputs/dynamic_macro_household_scale_200_gpt55_live_v1
-
-dynamic-macro-household-scale-compare:
-	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_household_scale \
-		--spec configs/dynamic_macro/household_scale_development_v1.json \
-		--historical-evidence reports/dynamic_macro_development_v1_evidence.json \
-		--run-81-dir outputs/dynamic_macro_household_scale_81_gpt55_live_v1 \
-		--run-200-dir outputs/dynamic_macro_household_scale_200_gpt55_live_v1 \
-		--output-dir outputs/dynamic_macro_household_scale_comparison_v1
-
-.PHONY: dynamic-macro-incumbent-replay
-dynamic-macro-incumbent-replay:
-	rm -rf outputs/dynamic_macro_household_scale_incumbent_replay_v1
-	CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
-		--bundle-dir work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
-		--households-csv work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv \
-		--mode replay_live \
-		--provider codex_cli \
-		--model gpt-5.5 \
-		--contamination-policy unavailable_at_cutoff \
-		--score-origin-start 2026-02-01 \
-		--score-origin-end 2026-05-01 \
-		--behavior-policy-mode empirical_bridge \
-		--empirical-bridge-json configs/behavior_profiles/empirical_bridge_v4.json \
-		--feedback-mode closed_loop \
-		--feedback-gain 1.0 \
-		--policy-rate-smoothing 0.85 \
-		--policy-state-mode origin_visible \
-		--policy-state-weight 1.0 \
-		--belief-gain-global 3.0 \
-		--belief-gain-inflation 1.5 \
-		--belief-gain-income 0.5 \
-		--belief-gain-unemployment 1.0 \
-		--household-flow-anchor origin_saving_rate \
-		--max-households-per-call 100 \
-		--raw-records-json work/dynamic_macro/banked_household_scale_v1/corrected200_live_raw_records.json \
-		--replay-prefix-period-count 5 \
-		--fresh-cache \
-		--bootstrap-replicates 1000 \
-		--bootstrap-seed 20260709 \
-		--max-live-calls 0 \
-		--output-dir outputs/dynamic_macro_household_scale_incumbent_replay_v1
-
-dynamic-macro-economy-fixture: dynamic-macro-bundle-fixture
-	rm -rf outputs/dynamic_macro_economy_fixture
-	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_economy \
-		--bundle-dir work/dynamic_macro/frozen_fixture_v1 \
-		--households-csv work/persona_beliefs/dynamic_macro_panel_gpt55_realtime/initial_households.csv \
-		--mode fixture \
-		--contamination-policy all \
-		--bootstrap-replicates 100 \
-		--output-dir outputs/dynamic_macro_economy_fixture
-
-dynamic-macro-tournament-fixture:
-	rm -rf outputs/dynamic_macro_tournament_fixture
-	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_v2.json \
-		--mode fixture \
-		--max-live-calls 0 \
-		--output-dir outputs/dynamic_macro_tournament_fixture
-
-dynamic-macro-tournament-live:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_v2.json \
-		--mode live \
-		--max-live-calls 73 \
-		--output-dir outputs/dynamic_macro_tournament_gpt55_common_month_live_v2
-
-dynamic-macro-tournament-resume:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_v2.json \
-		--mode live \
-		--max-live-calls 73 \
-		--output-dir outputs/dynamic_macro_tournament_gpt55_common_month_live_v2 \
-		--resume
-
-dynamic-macro-policy-tournament-fixture:
-	rm -rf outputs/dynamic_macro_policy_tournament_fixture
-	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_policy_inertia_v3.json \
-		--mode fixture \
-		--max-live-calls 0 \
-		--output-dir outputs/dynamic_macro_policy_tournament_fixture
-
-dynamic-macro-policy-tournament-live:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_policy_inertia_v3.json \
-		--mode live \
-		--max-live-calls 13 \
-		--output-dir outputs/dynamic_macro_policy_tournament_gpt55_live_v3
-
-dynamic-macro-policy-tournament-resume:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_policy_inertia_v3.json \
-		--mode live \
-		--max-live-calls 13 \
-		--output-dir outputs/dynamic_macro_policy_tournament_gpt55_live_v3 \
-		--resume
-
-dynamic-macro-policy-partial-fixture:
-	rm -rf outputs/dynamic_macro_policy_partial_fixture
-	PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_policy_partial_v4.json \
-		--mode fixture \
-		--max-live-calls 0 \
-		--output-dir outputs/dynamic_macro_policy_partial_fixture
-
-dynamic-macro-policy-partial-live:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_policy_partial_v4.json \
-		--mode live \
-		--max-live-calls 14 \
-		--output-dir outputs/dynamic_macro_policy_partial_gpt55_live_v4
-
-dynamic-macro-policy-partial-resume:
-	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 PYTHONPATH=src python3 -m macro_llm_tournament.dynamic_macro_tournament \
-		--spec configs/dynamic_macro/development_policy_partial_v4.json \
-		--mode live \
-		--max-live-calls 14 \
-		--output-dir outputs/dynamic_macro_policy_partial_gpt55_live_v4 \
-		--resume
-
-postcutoff-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
-		--llm-mode fixture \
-		--max-live-calls 0 \
-		--vintage-context best_effort \
-		--belief-targets best_effort \
-		--typed-agent-panel \
-		--output-dir outputs/spf_postcutoff_fixture
-
-postcutoff-replay-refresh:
-	@if [ -e "$(POSTCUTOFF_REPLAY_OUTPUT)" ] && [ "$(ALLOW_REPLAY_OVERWRITE)" != "1" ]; then \
-		echo "Refusing to overwrite $(POSTCUTOFF_REPLAY_OUTPUT). Set POSTCUTOFF_REPLAY_OUTPUT=outputs/spf_postcutoff_replay_$$(date -u +%Y%m%dT%H%M%SZ) or ALLOW_REPLAY_OVERWRITE=1."; \
-		exit 2; \
-	fi
-	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_tournament \
-		--llm-mode replay \
-		--max-live-calls 0 \
-		--replay-cache-miss-policy freeze \
-		--vintage-context best_effort \
-		--belief-targets best_effort \
-		--typed-agent-panel \
-		--output-dir "$(POSTCUTOFF_REPLAY_OUTPUT)"
-
-# Historical reproduction targets
-agent-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
-		--llm-mode fixture \
-		--max-live-calls 0 \
-		--agent-mode fixture \
-		--max-agent-live-calls 0 \
-		--card-count 8 \
-		--vintage-context best_effort \
-		--belief-targets best_effort \
-		--output-dir outputs/agent_economy_fixture
-
-agent-counterfactual-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.agent_economy \
-		--llm-mode fixture \
-		--max-live-calls 0 \
-		--agent-mode fixture \
-		--max-agent-live-calls 0 \
-		--card-count 8 \
-		--vintage-context best_effort \
-		--belief-targets best_effort \
-		--belief-sources llm \
-		--household-policy residual_over_liquidity \
-		--feedback-mode closed_loop \
-		--counterfactual-shocks rate_hike,growth_slump,credit_crunch \
-		--output-dir outputs/agent_economy_counterfactual_fixture
-
-behavior-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.behavior_gate \
-		--behavior-mode fixture \
-		--max-live-calls 0 \
-		--output-dir outputs/behavior_gate_fixture
-
-behavior-architecture-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.behavior_architecture_fidelity \
-		--mode fixture \
-		--max-live-calls 0 \
-		--output-dir outputs/behavior_architecture_fidelity_fixture
-
-behavior-ecology-ctc-holdout-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.behavior_ecology \
-		--provider codex_cli \
-		--model gpt-5.5 \
-		--mode replay \
-		--max-live-calls 0 \
-		--arms policy \
-		--scenario-ids ctc_2021_monthly_child_credit_style \
-		--policy-raw-records-json outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json \
-		--output-dir outputs/behavior_ecology_ctc_holdout_policy_replay
-
-persona-holdouts:
-	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_persona_holdouts \
-		--respondent-count 54 \
-		--period-count 3 \
-		--start-as-of 2024-10-01 \
-		--output-dir work/persona_beliefs
-
-persona-belief-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.persona_belief_panel \
-		--belief-mode fixture \
-		--max-live-calls 0 \
-		--models gpt-5.5,gpt-5.4 \
-		--respondent-source fixture \
-		--respondent-count 54 \
-		--output-dir outputs/persona_belief_panel_fixture
-
-persona-ecology-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
-		--ecology-mode fixture \
-		--max-live-calls 0 \
-		--models gpt-5.5,gpt-5.4 \
-		--respondent-source fixture \
-		--respondent-count 60 \
-		--period-count 4 \
-		--prior-mode simulated \
-		--feedback-mode closed_loop \
-		--output-dir outputs/persona_ecology_fixture
-
-persona-ecology-relative-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
-		--ecology-mode fixture \
-		--max-live-calls 0 \
-		--models gpt-5.5 \
-		--respondent-source fixture \
-		--respondent-count 6 \
-		--period-count 3 \
-		--target-fields expected_inflation_1y \
-		--prior-mode simulated \
-		--feedback-mode closed_loop \
-		--date-mode relative \
-		--output-dir outputs/persona_ecology_fixture_relative_gate
-
-persona-elicitation-prepare:
-	PYTHONPATH=src python3 -m macro_llm_tournament.persona_elicitation_campaign \
-		--mode prepare \
-		--provider codex_cli \
-		--output-dir outputs/persona_elicitation_campaign \
-		--work-dir work/persona_beliefs/persona_elicitation_campaign
-
-persona-elicitation-live:
-	PYTHONPATH=src python3 -m macro_llm_tournament.persona_elicitation_campaign \
-		--mode all \
-		--provider codex_cli \
-		--execute-live \
-		--output-dir outputs/persona_elicitation_campaign \
-		--work-dir work/persona_beliefs/persona_elicitation_campaign
-
-demand-economy-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
-		--belief-mode fixture \
-		--max-live-calls 0 \
-		--models gpt-5.5 \
-		--household-source fixture \
-		--household-count 24 \
-		--period-count 100 \
-		--variants representative,adaptive,llm_belief,naive_persona \
-		--feedback-mode closed_loop \
-		--output-dir outputs/demand_economy_fixture
-
-demand-economy-live-replay:
-	@if [ -e "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" ] && [ "$(ALLOW_REPLAY_OVERWRITE)" != "1" ]; then \
-		echo "Refusing to overwrite $(DEMAND_ECONOMY_REPLAY_OUTPUT). Set DEMAND_ECONOMY_REPLAY_OUTPUT=outputs/demand_economy_replay_$$(date -u +%Y%m%dT%H%M%SZ) or ALLOW_REPLAY_OVERWRITE=1."; \
-		exit 2; \
-	fi
-	PYTHONPATH=src python3 -m macro_llm_tournament.demand_economy \
-		--provider codex_cli \
-		--models gpt-5.5 \
-		--belief-mode raw_replay \
-		--raw-records-json outputs/demand_economy_live_gpt55_p20_12cell_full_v4/demand_raw_records.json \
-		--max-live-calls 0 \
-		--household-source fixture \
-		--household-count 12 \
-		--period-count 20 \
-		--variants representative,adaptive,llm_belief,naive_persona \
-		--fixture-variants naive_persona \
-		--feedback-mode closed_loop \
-		--scenarios baseline,transfer_shock,rate_hike,job_risk_shock,belief_feedback \
-		--output-dir "$(DEMAND_ECONOMY_REPLAY_OUTPUT)"
-
-demand-vintage-oos-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.demand_vintage_oos \
-		--mode fixture \
-		--max-origins 18 \
-		--history-periods 8 \
-		--output-dir outputs/demand_vintage_oos_fixture
-
-state-policy-schedules-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.state_policy_schedules \
-		--mode fixture \
-		--max-live-calls 0 \
-		--household-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--output-dir outputs/state_policy_schedules_fixture
-
-state-policy-schedules-live:
-	CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.state_policy_schedules \
-		--provider codex_cli \
-		--model gpt-5.5 \
-		--mode live \
-		--max-live-calls 1 \
-		--household-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--output-dir outputs/state_policy_schedules_live_gpt55_sce_prior_update
-
-macro-playground-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.macro_playground \
-		--spec configs/macro_playground_fixture_spec.json \
-		--mode fixture \
-		--max-live-calls 0 \
-		--output-dir outputs/macro_playground_fixture
-
-phase4-matched-twins-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode fixture \
-		--data-mode fixture \
-		--max-live-calls 0 \
-		--household-source fixture \
-		--household-count 24 \
-		--period-count 12 \
-		--feedback-mode closed_loop \
-		--output-dir outputs/phase4_matched_twins_fixture
-
-phase4-prior-update-codex-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2025-12-15 \
-		--history-months 18 \
-		--period-count 2 \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_prior_update_codex_replay_fred_onecard
-
-phase4-prior-update-policy-schedule-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2025-12-15 \
-		--history-months 18 \
-		--period-count 2 \
-		--behavior-policy-mode schedule \
-		--behavior-policy-raw-records-json outputs/behavior_ecology_gpt55_xhigh/ecology_raw_records.json \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_policy_schedule_codex_replay_fred_onecard
-
-phase4-prior-update-state-schedule-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2025-12-15 \
-		--history-months 18 \
-		--period-count 2 \
-		--behavior-policy-mode state_schedule \
-		--behavior-policy-state-profile-json outputs/state_policy_schedules_live_gpt55_sce_prior_update/state_behavior_policy_profile.json \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_state_schedule_codex_replay_fred_onecard
-
-empirical-bridge-v4-fit:
-	PYTHONPATH=src python3 -m macro_llm_tournament.empirical_bridge \
-		--panel-csv work/empirical_bridge/spending_belief_panel.csv \
-		--coverage-json work/empirical_bridge/spending_belief_panel_coverage.json \
-		--output-json work/empirical_bridge/empirical_bridge_v4.json \
-		--cell-targets-csv work/empirical_bridge/empirical_bridge_v4_cell_targets.csv \
-		--validation-scores-csv work/empirical_bridge/empirical_bridge_v4_validation_scores.csv
-
-empirical-bridge-v5-stabilized-fit:
-	PYTHONPATH=src python3 -m macro_llm_tournament.empirical_bridge \
-		--panel-csv work/empirical_bridge/spending_belief_panel.csv \
-		--coverage-json work/empirical_bridge/spending_belief_panel_coverage.json \
-		--output-json work/empirical_bridge/empirical_bridge_v5_stabilized.json \
-		--cell-targets-csv work/empirical_bridge/empirical_bridge_v5_stabilized_cell_targets.csv \
-		--validation-scores-csv work/empirical_bridge/empirical_bridge_v5_stabilized_validation_scores.csv \
-		--estimator ridge_cv \
-		--bridge-spec-version empirical_bridge_v5_stabilized
-
-phase4-prior-update-empirical-bridge-v4-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2025-12-15 \
-		--history-months 18 \
-		--period-count 2 \
-		--behavior-policy-mode empirical_bridge \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_onecard
-
-phase4-prior-update-empirical-bridge-v4-holdlast-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2026-04-15 \
-		--history-months 18 \
-		--period-count 6 \
-		--ecology-period-policy hold_last \
-		--behavior-policy-mode empirical_bridge \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_holdlast_5cards
-
-phase4-prior-update-empirical-bridge-v4-aligned-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_octnovdec_combined \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2026-01-15 \
-		--history-months 18 \
-		--period-count 3 \
-		--behavior-policy-mode empirical_bridge \
-		--empirical-bridge-json work/empirical_bridge/empirical_bridge_v4.json \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_empirical_bridge_v4_codex_replay_fred_2card_aligned_octnovdec
-
-phase4-prior-update-empirical-bridge-v5-stabilized-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2025-12-15 \
-		--history-months 18 \
-		--period-count 2 \
-		--behavior-policy-mode empirical_bridge \
-		--empirical-bridge-json work/empirical_bridge/empirical_bridge_v5_stabilized.json \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_empirical_bridge_v5_stabilized_codex_replay_fred_onecard
-
-phase4-prior-update-empirical-bridge-v5-stabilized-holdlast-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_gpt54_100 \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2026-04-15 \
-		--history-months 18 \
-		--period-count 6 \
-		--ecology-period-policy hold_last \
-		--behavior-policy-mode empirical_bridge \
-		--empirical-bridge-json work/empirical_bridge/empirical_bridge_v5_stabilized.json \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_empirical_bridge_v5_stabilized_codex_replay_fred_holdlast_5cards
-
-phase4-prior-update-empirical-bridge-v5-stabilized-aligned-replay:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_matched_twins \
-		--mode replay \
-		--belief-source persona_ecology_replay \
-		--persona-ecology-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_octnovdec_combined \
-		--data-mode fred \
-		--asof-start 2025-12-15 \
-		--asof-end 2026-01-15 \
-		--history-months 18 \
-		--period-count 3 \
-		--behavior-policy-mode empirical_bridge \
-		--empirical-bridge-json work/empirical_bridge/empirical_bridge_v5_stabilized.json \
-		--scoring-label retrospective \
-		--max-live-calls 0 \
-		--output-dir outputs/phase4_matched_twins_empirical_bridge_v5_stabilized_codex_replay_fred_2card_aligned_octnovdec
-
-# Tournament and active search lane
-macro-tournament-dev:
-	PYTHONPATH=src python3 -m macro_llm_tournament.macro_tournament \
-		--spec configs/macro_tournament/development_v1.json \
-		--mode replay \
-		--max-live-calls 0 \
-		--output-dir outputs/macro_tournament_development_v1
-
-prior-update-extension-v2-inputs:
-	PYTHONPATH=src python3 -m macro_llm_tournament.prepare_prior_update_extension
-
-prior-update-dec2024-v2-live:
-	CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
-		--provider codex_cli \
-		--models gpt-5.5 \
-		--ecology-mode live \
-		--fresh-cache \
-		--max-live-calls 90 \
-		--respondent-source csv \
-		--survey-schema normalized \
-		--respondent-csv work/persona_beliefs/sce_2024_12_prior_update_extension_v2_input.csv \
-		--preserve-csv-respondent-ids \
-		--period-ids sce_2024_12 \
-		--prior-mode empirical \
-		--feedback-mode none \
-		--date-mode relative \
-		--target-fields expected_inflation_1y,expected_unemployment_higher_prob,expected_real_income_growth \
-		--output-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_81_dec2024_extension_v2
-
-prior-update-jan2025-v2-live:
-	CODEX_CLI_REASONING_EFFORT=high PYTHONPATH=src python3 -m macro_llm_tournament.persona_ecology \
-		--provider codex_cli \
-		--models gpt-5.5 \
-		--ecology-mode live \
-		--fresh-cache \
-		--max-live-calls 75 \
-		--respondent-source csv \
-		--survey-schema normalized \
-		--respondent-csv work/persona_beliefs/sce_2025_01_prior_update_extension_v2_input.csv \
-		--preserve-csv-respondent-ids \
-		--period-ids sce_2025_01 \
-		--prior-mode empirical \
-		--feedback-mode none \
-		--date-mode relative \
-		--target-fields expected_inflation_1y,expected_unemployment_higher_prob,expected_real_income_growth \
-		--output-dir outputs/persona_ecology_sce_prior_update_live_codex_gpt55_67_jan2025_extension_v2
-
-macro-tournament-dev-v2:
-	PYTHONPATH=src python3 -m macro_llm_tournament.macro_tournament \
-		--spec configs/macro_tournament/development_v2.json \
-		--mode replay \
-		--max-live-calls 0 \
-		--output-dir outputs/macro_tournament_development_v2
-
-# Diagnostics and scorecards
-phase4-v4-diagnostics:
-	PYTHONPATH=src python3 -m macro_llm_tournament.phase4_v4_diagnostics \
-		--output-dir outputs/phase4_v4_diagnostics
-
-macro-performance-fixture: demand-economy-fixture demand-vintage-oos-fixture
-	PYTHONPATH=src python3 -m macro_llm_tournament.macro_performance_gate \
-		--mode fixture \
-		--demand-run-dir outputs/demand_economy_fixture \
-		--vintage-panel-dir work/fred_vintage_panel \
-		--vintage-oos-dir outputs/demand_vintage_oos_fixture \
-		--output-dir outputs/macro_performance_gate_fixture
-
-macro-validity-scorecard:
-	@echo "Legacy mechanism-readiness scorecard: OOS readiness rows are static. Use macro-performance-fixture for executable OOS checks."
-	@test -d "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" || { echo "Missing $(DEMAND_ECONOMY_REPLAY_OUTPUT). Run demand-economy-live-replay with a fresh DEMAND_ECONOMY_REPLAY_OUTPUT first."; exit 2; }
-	PYTHONPATH=src python3 -m macro_llm_tournament.macro_validity \
-		--demand-run-dir "$(DEMAND_ECONOMY_REPLAY_OUTPUT)" \
-		--vintage-panel-dir work/fred_vintage_panel \
-		--output-dir outputs/macro_validity_scorecard
-
-postcutoff-behavior-fixture:
-	PYTHONPATH=src python3 -m macro_llm_tournament.postcutoff_behavior_gate \
-		--data-mode fixture \
-		--agent-mode fixture \
-		--max-live-calls 0 \
-		--output-dir outputs/postcutoff_behavior_gate_fixture
-
-audit-fixture: fixture
-	PYTHONPATH=src python3 -m macro_llm_tournament.forecast_audit \
-		--run-dir outputs/spf_fixture \
-		--recall-mode fixture \
-		--qualitative-recall-mode fixture \
-		--output-dir outputs/forecast_audit_fixture
+origin-snapshot:
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_inputs \
+		--origin $(ORIGIN) \
+		--as-of $(AS_OF) \
+		--output $(ORIGIN_SNAPSHOT)
