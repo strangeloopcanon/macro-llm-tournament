@@ -31,7 +31,7 @@ survey-seeded household state + own history + as-of public information
 - Replay cache hits in this execution: `200`; fresh calls: `0`.
 - Accounting: **PASS**; maximum residual `4.19e-09`.
 - Origin snapshot hash: `7ccc2bbf1d378faec01cbb021a3af82de5af85094a0cd195da6bb0312a610981`.
-- Executable source hash: `0ecf9f07d2f5c6d9503474a3c59471e217c87cf793698f68bd6d7d461347ad30`.
+- Executable source hash: `0cb0d80abba203f5322cf19d5f747630bb7ff34aee41bc943f0156afbb043aca`.
 - Replay equivalence: `f935182686559b8140e7f03bfc1755f9bda05ded4e0517167a74ba6a81f1f674`; verified against an expected hash: `True`.
 
 ## Forecast Paths
