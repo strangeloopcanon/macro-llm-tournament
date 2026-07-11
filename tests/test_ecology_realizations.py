@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from macro_llm_tournament.ecology import DEFAULT_BUNDLE, DEFAULT_HISTORY, DEFAULT_HOUSEHOLDS, run
+from macro_llm_tournament.ecology import PROJECT_ROOT, run
 from macro_llm_tournament.ecology_realizations import (
     REALIZATION_COLUMNS,
     REALIZATION_METRICS,
@@ -16,6 +16,8 @@ from macro_llm_tournament.ecology_realizations import (
     append_realizations,
     main,
 )
+
+FIXTURE_ROOT = PROJECT_ROOT / "examples/ecology_fixture"
 
 
 class EcologyRealizationsTests(unittest.TestCase):
@@ -242,9 +244,9 @@ class EcologyRealizationsTests(unittest.TestCase):
                 model="gpt-5.5",
                 max_live_calls=0,
                 household_count=12,
-                households=DEFAULT_HOUSEHOLDS,
-                history=DEFAULT_HISTORY,
-                bundle=DEFAULT_BUNDLE,
+                households=FIXTURE_ROOT / "households.csv",
+                history=FIXTURE_ROOT / "history.csv",
+                bundle=FIXTURE_ROOT / "origin_snapshot.json",
                 cache_dir=root / "cache",
                 output_dir=run_dir,
             )

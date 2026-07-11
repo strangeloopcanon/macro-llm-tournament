@@ -9,11 +9,9 @@ from pathlib import Path
 import pandas as pd
 
 from macro_llm_tournament.ecology import (
-    DEFAULT_BUNDLE,
-    DEFAULT_HISTORY,
-    DEFAULT_HOUSEHOLDS,
     PROJECT_ROOT,
     _coverage_sample,
+    build_arg_parser,
     run,
 )
 from macro_llm_tournament.ecology_households import (
@@ -24,10 +22,24 @@ from macro_llm_tournament.ecology_households import (
 from macro_llm_tournament.ecology_models import household_response_schema
 from macro_llm_tournament.ecology_inputs import ORIGIN_SNAPSHOT_SCHEMA_VERSION, _canonical_sha256
 
+FIXTURE_ROOT = PROJECT_ROOT / "examples/ecology_fixture"
+FIXTURE_HOUSEHOLDS = FIXTURE_ROOT / "households.csv"
+FIXTURE_HISTORY = FIXTURE_ROOT / "history.csv"
+FIXTURE_BUNDLE = FIXTURE_ROOT / "origin_snapshot.json"
+
 
 class HouseholdEcologyTests(unittest.TestCase):
+    def test_cli_requires_all_input_paths(self) -> None:
+        parser = build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args([
+                "--origin", "2026-05-01",
+                "--mode", "fixture",
+                "--output-dir", "out",
+            ])
+
     def test_canary_sample_is_stable_and_covers_state_categories(self) -> None:
-        frame = pd.read_csv(DEFAULT_HOUSEHOLDS)
+        frame = pd.read_csv(FIXTURE_HOUSEHOLDS)
         first = _coverage_sample(frame, 12)
         second = _coverage_sample(frame.sample(frac=1.0, random_state=7), 12)
         self.assertEqual(first["type_id"].tolist(), second["type_id"].tolist())
@@ -93,9 +105,9 @@ class HouseholdEcologyTests(unittest.TestCase):
                     model="gpt-5.5",
                     max_live_calls=0,
                     household_count=12,
-                    households=DEFAULT_HOUSEHOLDS,
-                    history=DEFAULT_HISTORY,
-                    bundle=DEFAULT_BUNDLE,
+                    households=FIXTURE_HOUSEHOLDS,
+                    history=FIXTURE_HISTORY,
+                    bundle=FIXTURE_BUNDLE,
                     cache_dir=Path(directory) / "cache",
                     output_dir=output,
                 )
@@ -136,9 +148,9 @@ class HouseholdEcologyTests(unittest.TestCase):
                         model="gpt-5.5",
                         max_live_calls=0,
                         household_count=12,
-                        households=DEFAULT_HOUSEHOLDS,
-                        history=DEFAULT_HISTORY,
-                        bundle=DEFAULT_BUNDLE,
+                        households=FIXTURE_HOUSEHOLDS,
+                        history=FIXTURE_HISTORY,
+                        bundle=FIXTURE_BUNDLE,
                         state_json=output / "next_state.json",
                         cache_dir=Path(directory) / "cache",
                         output_dir=recursive,
@@ -166,8 +178,8 @@ class HouseholdEcologyTests(unittest.TestCase):
                     model="gpt-5.5",
                     max_live_calls=0,
                     household_count=12,
-                    households=DEFAULT_HOUSEHOLDS,
-                    history=DEFAULT_HISTORY,
+                    households=FIXTURE_HOUSEHOLDS,
+                    history=FIXTURE_HISTORY,
                     bundle=snapshot_path,
                     state_json=output / "next_state.json",
                     cache_dir=Path(directory) / "cache",
@@ -191,9 +203,9 @@ class HouseholdEcologyTests(unittest.TestCase):
                 model="gpt-5.5",
                 max_live_calls=0,
                 household_count=12,
-                households=DEFAULT_HOUSEHOLDS,
-                history=DEFAULT_HISTORY,
-                bundle=DEFAULT_BUNDLE,
+                households=FIXTURE_HOUSEHOLDS,
+                history=FIXTURE_HISTORY,
+                bundle=FIXTURE_BUNDLE,
                 cache_dir=root / "cache",
             )
             first = run(Namespace(**base, output_dir=first_dir))

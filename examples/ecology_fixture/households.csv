@@ -1,0 +1,13 @@
+type_id,label,population_weight,age_bucket,income_group,liquidity_group,job_loss_risk_type,employment_status,annual_income,baseline_consumption_annual,liquid_assets,debt,debt_service_burden,base_mpc,base_saving_rate,baseline_job_loss_probability,unemployment_higher_probability_1y,target_buffer_months,inflation_expectation_1y,income_growth_expectation_1y,subsistence_floor_share
+synthetic_01,synthetic low liquidity worker,0.0833333333,young,low,low,high,employed,36000,30000,1200,3000,0.10,0.70,0.08,20,55,1.0,3.0,1.0,0.55
+synthetic_02,synthetic medium liquidity worker,0.0833333333,young,middle,medium,medium,employed,60000,45000,8000,5000,0.08,0.50,0.15,10,45,2.0,2.5,1.5,0.45
+synthetic_03,synthetic high liquidity worker,0.0833333333,young,high,high,low,employed,120000,78000,40000,8000,0.07,0.30,0.25,4,30,4.0,2.0,2.0,0.35
+synthetic_04,synthetic unemployed renter,0.0833333333,prime,low,low,high,unemployed,24000,21600,500,4000,0.17,0.80,0.03,60,75,0.5,4.0,-2.0,0.70
+synthetic_05,synthetic prime worker,0.0833333333,prime,middle,medium,medium,employed,72000,54000,10000,7000,0.10,0.50,0.16,8,40,2.5,2.8,1.2,0.45
+synthetic_06,synthetic prime saver,0.0833333333,prime,high,high,low,employed,150000,96000,60000,10000,0.07,0.25,0.28,3,25,5.0,2.2,2.5,0.35
+synthetic_07,synthetic older low income,0.0833333333,older,low,medium,medium,retired,30000,27000,6000,1000,0.03,0.60,0.10,0,35,2.0,3.5,0.5,0.60
+synthetic_08,synthetic older middle income,0.0833333333,older,middle,high,low,retired,54000,42000,25000,0,0.00,0.35,0.20,0,25,4.0,2.7,0.8,0.45
+synthetic_09,synthetic older high income,0.0833333333,older,high,high,low,employed,100000,72000,50000,5000,0.05,0.30,0.22,2,20,5.0,2.0,1.5,0.35
+synthetic_10,synthetic unknown status,0.0833333333,prime,unknown,low,high,unknown,48000,40000,2000,6000,0.13,0.65,0.08,25,60,1.0,4.0,0.0,0.60
+synthetic_11,synthetic contract worker,0.0833333333,young,middle,low,high,employed,50000,42000,1500,4500,0.09,0.65,0.10,18,55,1.0,3.2,0.5,0.55
+synthetic_12,synthetic stable worker,0.0833333337,prime,middle,high,low,employed,80000,57000,30000,3000,0.04,0.35,0.22,3,25,4.0,2.3,1.8,0.40

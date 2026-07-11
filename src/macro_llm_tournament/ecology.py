@@ -28,9 +28,6 @@ from .ecology_models import CreditIntermediaryState, EmployerState, HouseholdSta
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_HOUSEHOLDS = PROJECT_ROOT / "work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv"
-DEFAULT_HISTORY = PROJECT_ROOT / "work/persona_beliefs/persistent_household_scale_v1/selected_observed_history.csv"
-DEFAULT_BUNDLE = PROJECT_ROOT / "work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1"
 DEFAULT_CACHE = PROJECT_ROOT / "work/ecology_cache"
 SCHEMA_VERSION = "household_first_rolling_microeconomy_v1"
 
@@ -44,9 +41,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--household-count", type=int, default=200)
-    parser.add_argument("--households", type=Path, default=DEFAULT_HOUSEHOLDS)
-    parser.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
-    parser.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE)
+    parser.add_argument("--households", type=Path, required=True)
+    parser.add_argument("--history", type=Path, required=True)
+    parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--state-json", type=Path)
     parser.add_argument("--expected-replay-sha256")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)

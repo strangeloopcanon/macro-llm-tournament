@@ -1,0 +1,13 @@
+household_id,event_date,public_availability_date,source_name,observation_status,employment_status,income_group,liquid_wealth_group
+synthetic_01,2026-03-01,2026-04-15,synthetic fixture,observed,employed,low,low
+synthetic_02,2026-03-01,2026-04-15,synthetic fixture,observed,employed,middle,medium
+synthetic_03,2026-03-01,2026-04-15,synthetic fixture,observed,employed,high,high
+synthetic_04,2026-03-01,2026-04-15,synthetic fixture,observed,unemployed,low,low
+synthetic_05,2026-03-01,2026-04-15,synthetic fixture,observed,employed,middle,medium
+synthetic_06,2026-03-01,2026-04-15,synthetic fixture,observed,employed,high,high
+synthetic_07,2026-03-01,2026-04-15,synthetic fixture,observed,retired,low,medium
+synthetic_08,2026-03-01,2026-04-15,synthetic fixture,observed,retired,middle,high
+synthetic_09,2026-03-01,2026-04-15,synthetic fixture,observed,employed,high,high
+synthetic_10,2026-03-01,2026-04-15,synthetic fixture,observed,unknown,unknown,low
+synthetic_11,2026-03-01,2026-04-15,synthetic fixture,observed,employed,middle,low
+synthetic_12,2026-03-01,2026-04-15,synthetic fixture,observed,employed,middle,high

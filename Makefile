@@ -5,6 +5,10 @@ AS_OF ?= 2026-07-10
 MODEL ?= gpt-5.5
 ORIGIN_SNAPSHOT ?= work/ecology_origins/$(AS_OF).json
 ECOLOGY_CACHE ?= work/ecology_cache_200_july_v1
+ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv
+ECOLOGY_HISTORY ?= work/persona_beliefs/persistent_household_scale_v1/selected_observed_history.csv
+ECOLOGY_BUNDLE ?= work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
+ECOLOGY_FIXTURE_DIR := examples/ecology_fixture
 CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_replay_current
 REPLAY_REFERENCE_DIR ?= outputs/.household_ecology_replay_reference
 
@@ -27,6 +31,9 @@ ecology-fixture:
 		--provider codex_cli \
 		--model gpt-5.5 \
 		--household-count 12 \
+		--households $(ECOLOGY_FIXTURE_DIR)/households.csv \
+		--history $(ECOLOGY_FIXTURE_DIR)/history.csv \
+		--bundle $(ECOLOGY_FIXTURE_DIR)/origin_snapshot.json \
 		--workers 4 \
 		--max-live-calls 0 \
 		--output-dir outputs/household_ecology_fixture_v1
@@ -40,6 +47,9 @@ ecology-live-canary:
 		--provider codex_cli \
 		--model gpt-5.5 \
 		--household-count 12 \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--history $(ECOLOGY_HISTORY) \
+		--bundle $(ECOLOGY_BUNDLE) \
 		--workers 4 \
 		--max-live-calls 14 \
 		--output-dir outputs/household_ecology_canary_v1
@@ -50,6 +60,8 @@ ecology-live-200:
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
 		--origin $(ORIGIN) \
 		--bundle $(ORIGIN_SNAPSHOT) \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--history $(ECOLOGY_HISTORY) \
 		--mode live \
 		--provider codex_cli \
 		--model $(MODEL) \
@@ -64,6 +76,8 @@ ecology-current-replay:
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
 		--origin $(ORIGIN) \
 		--bundle $(ORIGIN_SNAPSHOT) \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--history $(ECOLOGY_HISTORY) \
 		--mode replay \
 		--provider codex_cli \
 		--model $(MODEL) \
@@ -76,6 +90,8 @@ ecology-current-replay:
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
 		--origin $(ORIGIN) \
 		--bundle $(ORIGIN_SNAPSHOT) \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--history $(ECOLOGY_HISTORY) \
 		--mode replay \
 		--provider codex_cli \
 		--model $(MODEL) \
