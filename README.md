@@ -80,7 +80,9 @@ artifacts first and never rewrites the forecast manifest.
   additional institutions are justified only by stable errors across new origins.
 
 See [CURRENT.md](CURRENT.md) for the exact current milestone and
-[research_history.md](research_history.md) for the compact record of retired work.
+[reports/current_ecology_report.md](reports/current_ecology_report.md) for the
+canonical result, and [research_history.md](research_history.md) for the compact
+record of retired work.
 
 ## Verification
 
