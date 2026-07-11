@@ -1,0 +1,21 @@
+{
+  "origin_information": {
+    "as_of_date": "2026-05-15",
+    "origin_month": "2026-05-01",
+    "origin_visible_macro_context": {
+      "CPIAUCSL": {"observation_date": "2026-04-01", "value": 320.0},
+      "FEDFUNDS": {"observation_date": "2026-04-01", "value": 4.25},
+      "UMCSENT": {"observation_date": "2026-04-01", "value": 72.0}
+    },
+    "origin_visible_macro_history": {
+      "CPIAUCSL": [{"observation_date": "2026-03-01", "value": 319.0}, {"observation_date": "2026-04-01", "value": 320.0}],
+      "FEDFUNDS": [{"observation_date": "2026-03-01", "value": 4.25}, {"observation_date": "2026-04-01", "value": 4.25}],
+      "UMCSENT": [{"observation_date": "2026-03-01", "value": 71.0}, {"observation_date": "2026-04-01", "value": 72.0}]
+    },
+    "public_events": []
+  },
+  "schema_version": "household_ecology_origin_snapshot_v1",
+  "snapshot_sha256": "2555fd7a60859928700d723201d33dbdd15ceea806f2884b7405545623072b21",
+  "source": "Fully synthetic clean-clone test fixture; no realized targets.",
+  "source_requests": []
+}

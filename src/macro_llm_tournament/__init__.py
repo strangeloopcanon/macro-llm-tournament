@@ -1,3 +1,3 @@
-"""Macro forecast tournaments for testing LLM belief engines."""
+"""Household-first rolling macroeconomy."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

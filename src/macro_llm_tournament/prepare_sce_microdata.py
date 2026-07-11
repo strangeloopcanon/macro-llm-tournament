@@ -11,10 +11,12 @@ import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 
-from .persona_belief_panel import TARGET_SPECS
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TARGET_SPECS = {
+    "expected_inflation_1y": {"lower": -5.0, "upper": 20.0},
+    "expected_unemployment_higher_prob": {"lower": 0.0, "upper": 100.0},
+    "expected_real_income_growth": {"lower": -20.0, "upper": 20.0},
+}
 DEFAULT_INPUT = PROJECT_ROOT / "work" / "persona_beliefs" / "sce_raw" / "frbny-sce-public-microdata-latest.xlsx"
 DEFAULT_RAW_DIR = PROJECT_ROOT / "work" / "persona_beliefs" / "sce_raw"
 DEFAULT_OUTPUT = PROJECT_ROOT / "work" / "persona_beliefs" / "sce_real_microdata.csv"
