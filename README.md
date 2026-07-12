@@ -1,9 +1,14 @@
 # Household-First Macro Ecology
 
-This repository builds a monthly microeconomy from real household survey states.
-Each household gets one isolated LLM call. The LLM reports beliefs and intentions;
-deterministic code enforces budgets, credit, production, employment, inventories,
-and settlement. The aggregate is the forecast.
+This project asks whether LLM-updated household beliefs can produce useful macro
+forecasts and counterfactuals inside an explicit, accounting-constrained economy.
+Real survey data supplies household heterogeneity. Each household gets one isolated
+LLM call to report its beliefs and intended choices; deterministic code then
+enforces budgets, credit, production, employment, inventories, and settlement. The
+economy's aggregate path emerges from those household decisions.
+
+The household panel comes from the Federal Reserve Bank of New York's Survey of
+Consumer Expectations (SCE).
 
 ```text
 survey-seeded SCE household state + own history + as-of public information
@@ -28,10 +33,10 @@ debt repayment, defaults, and inventories to interact.
 
 ## Current Result
 
-The first full run freezes an August 2026 target path from a July 2026 origin and
-200 separately elicited GPT-5.5 households. The median path has household
-intentions at **-2.95%** consumption growth and feasible consumption at
-**-4.08%**, with lower-liquidity households cutting more.
+The first full run gave 200 GPT-5.5 households only information available by
+July 10, 2026, and froze their path for August before August outcomes were known.
+The median path has household intentions at **-2.95%** consumption growth and
+feasible consumption at **-4.08%**, with lower-liquidity households cutting more.
 
 ### Run facts
 
@@ -42,7 +47,7 @@ intentions at **-2.95%** consumption growth and feasible consumption at
 | One-month-ahead target | `2026-08-01` |
 | Provider and model | `codex_cli` / `gpt-5.5` |
 | Household responses | 200 accepted, one isolated response per household |
-| Final execution | 200 replay hits, 0 fresh calls |
+| Reproducibility check | 200 replay hits, 0 fresh calls |
 | Accounting | **PASS**, maximum residual `4.19e-09` |
 | Replay | **PASS**, exact economy hash reproduced |
 
@@ -105,10 +110,15 @@ responses, feasible decisions, employer and credit ledgers, downside/median/upsi
 macro paths, accounting audit, event hashes, manifest, and a short report. Realized
 targets are not loaded into prompts or scored during forecast creation.
 
-When native outcomes become available, `make ecology-realize
-REALIZATIONS_CSV=...` writes a separate retrospective score bundle. The input row
-is keyed to the one-month-ahead `target_month`. The command verifies the frozen
-artifacts first and never rewrites the forecast manifest.
+When native outcomes become available, run:
+
+```bash
+make ecology-realize REALIZATIONS_CSV=path/to/realizations.csv
+```
+
+This writes a separate retrospective score bundle. The input row is keyed to the
+one-month-ahead `target_month`; the command verifies the frozen artifacts first
+and never rewrites the forecast manifest.
 
 ## Current Boundary
 
@@ -136,6 +146,5 @@ make check
 make test
 ```
 
-The previous weighted-demand economy is preserved by the Git tag
-`macro-v1-weighted-demand` and a hashed local archive under
-`~/Downloads/llm-hank-docs/archive/v1/`.
+The previous weighted-demand economy and its tracked history remain available at
+the Git tag `macro-v1-weighted-demand`.
