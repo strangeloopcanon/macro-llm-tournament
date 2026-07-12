@@ -29,16 +29,52 @@ debt repayment, defaults, and inventories to interact.
 ## Current Result
 
 The first full run freezes an August 2026 target path from a July 2026 origin and
-200 separately elicited GPT-5.5 households. The median path has household intentions at -2.95% consumption
-growth and feasible consumption at -4.08%, with lower-liquidity households cutting
-more. All three paths pass the household, employer, credit, and stock-flow audits.
+200 separately elicited GPT-5.5 households. The median path has household
+intentions at **-2.95%** consumption growth and feasible consumption at
+**-4.08%**, with lower-liquidity households cutting more.
 
-That is evidence that the ecology runs and produces heterogeneous, internally
-consistent macro paths. It is not evidence that the forecast is accurate; the
-August outcome surface was unavailable and excluded when the forecast was frozen.
-The persistent cohort is initialized from March-April 2025 SCE observations;
-July 2026 public macro information is current to the forecast cutoff, but the
-household survey state is not contemporaneous.
+### Run facts
+
+| Item | Value |
+| --- | --- |
+| Forecast origin | `2026-07-01` |
+| Information cutoff | `2026-07-10` |
+| One-month-ahead target | `2026-08-01` |
+| Provider and model | `codex_cli` / `gpt-5.5` |
+| Household responses | 200 accepted, one isolated response per household |
+| Final execution | 200 replay hits, 0 fresh calls |
+| Accounting | **PASS**, maximum residual `4.19e-09` |
+| Replay | **PASS**, exact economy hash reproduced |
+
+### Forecast paths
+
+| Scenario | Consumption growth | Saving rate | Revolving-credit growth | Employment rate | Price growth |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Downside | -8.14% | -2.53% | -6.03% | 90.96% | -0.99% |
+| Median | -4.08% | -1.33% | -6.37% | 90.70% | -1.35% |
+| Upside | -0.73% | 0.48% | -6.63% | 90.70% | -1.93% |
+
+Population-weighted household responses imply median beliefs of **4.89%**
+inflation, **-1.01%** income growth, and a **9.99%** one-year job-loss
+probability. In the median economy, the 200 simulated household units execute
+`$1,016,637` of consumption, `$169,080` of debt payments, and `$2,750` of new
+borrowing.
+
+### Evidence boundary
+
+| This run shows | This run does not yet show |
+| --- | --- |
+| A branchable, recursive household microeconomy runs end to end. | That its August forecast is accurate. |
+| Household heterogeneity affects feasible consumption and balance sheets. | That one origin validates the economy's dynamics. |
+| Production, inventories, employment, credit, and settlement have explicit counterparties. | That one aggregate employer is sufficient. |
+| All three scenarios satisfy household, employer, credit, and stock-flow accounting. | That coarse survey-mapped balance sheets equal measured household accounts. |
+
+The August outcome surface was unavailable and excluded when the forecast was
+frozen. The persistent cohort is initialized from March-April 2025 SCE
+observations; July 2026 public macro information is current to the forecast
+cutoff, but the household survey state is not contemporaneous. See the
+[canonical report](reports/current_ecology_report.md) for hashes and the full
+result statement.
 
 ## Run It
 
