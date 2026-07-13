@@ -120,6 +120,19 @@ This writes a separate retrospective score bundle. The input row is keyed to the
 one-month-ahead `target_month`; the command verifies the frozen artifacts first
 and never rewrites the forecast manifest.
 
+To diagnose period-by-period scale and direction before the prospective August
+outcome arrives, run the current ecology recursively over the four available
+post-cutoff historical origins:
+
+```bash
+make ecology-retrospective-live
+```
+
+This is explicitly retrospective, not confirmatory. It carries the median
+simulated state forward, loads first-release outcomes only after all forecasts
+finish, and writes long-form predicted-versus-actual rows for charting. It uses
+a separate cache and never reads or rewrites the frozen July-to-August run.
+
 ## Current Boundary
 
 - 200 persistent anonymized SCE households are available locally.

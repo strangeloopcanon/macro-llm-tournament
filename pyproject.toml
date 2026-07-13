@@ -22,6 +22,7 @@ dependencies = [
 macro-llm-ecology = "macro_llm_tournament.ecology:main"
 macro-llm-ecology-origin = "macro_llm_tournament.ecology_inputs:main"
 macro-llm-ecology-realize = "macro_llm_tournament.ecology_realizations:main"
+macro-llm-ecology-retrospective = "macro_llm_tournament.ecology_retrospective:main"
 macro-llm-household-cohort = "macro_llm_tournament.persistent_households:main"
 macro-llm-frozen-vintage = "macro_llm_tournament.frozen_vintage_bundle:main"
 macro-llm-prepare-sce = "macro_llm_tournament.prepare_sce_microdata:main"

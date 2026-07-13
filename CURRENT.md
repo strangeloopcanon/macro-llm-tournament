@@ -23,13 +23,22 @@ read as a current environment acting on a survey-seeded population, not as a
 contemporaneous July household survey.
 
 This establishes a runnable, recursive economy and a genuinely frozen forecast.
-It does not establish predictive validity. The next gates are:
+A separate retrospective diagnostic now runs the exact mechanism over four
+post-cutoff 2026 origins, with 800 fresh household calls and the median simulated
+state carried forward. It fails badly against first-release outcomes: median-path
+RMSE is 7.10 percentage points for consumption, 4.33 for prices, and 7.47 for
+revolving credit. The economy predicts contraction and deflation in every month
+while the realized economy grows and prices rise. Accounting still passes.
+
+The next gates are therefore:
 
 1. append the August native outcomes once released, without rewriting the forecast;
-2. run August and subsequent origins under the same frozen procedure;
-3. compare path errors and household calibration over several untouched months;
-4. add sectoral employers or richer institutions only if repeated errors identify
-   a mechanism the current aggregate employer or credit intermediary cannot express.
+2. diagnose and correct the contractionary feedback and unit scaling on retrospective
+   development origins without changing the frozen August forecast;
+3. rerun the historical path and require credible signs and magnitudes before adding
+   firms, banks, or other institutional complexity;
+4. run August and subsequent origins under a newly locked procedure only after that
+   development gate is met.
 
 The old adaptive-twin tournament is retired from the active path. Its code and
 results remain recoverable at Git tag `macro-v1-weighted-demand` and in the local
