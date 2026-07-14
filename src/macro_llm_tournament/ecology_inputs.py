@@ -16,10 +16,15 @@ import pandas as pd
 from .env import load_secret_env
 from .frozen_vintage_bundle import (
     AlfredClient,
+    BUNDLE_SCHEMA_VERSION,
     CONTEXT_SERIES,
     DEFAULT_CACHE_DIR,
+    HISTORY_COLUMNS,
+    ORIGIN_COLUMNS,
     TARGET_SPECS,
-    load_frozen_vintage_bundle,
+    _bundle_sha256,
+    _file_sha256,
+    _read_canonical_csv,
 )
 
 
@@ -44,12 +49,28 @@ def load_origin_information(bundle_dir: Path, origin_month: str) -> tuple[dict[s
         if information.get("origin_month") != origin_month:
             raise ValueError("origin snapshot month mismatch")
         return dict(information), str(supplied_hash)
-    bundle = load_frozen_vintage_bundle(bundle_dir)
-    origins = [row for row in bundle.origins if row["origin_month"] == origin_month]
+    manifest_path = bundle_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != BUNDLE_SCHEMA_VERSION:
+        raise ValueError("origin-input bundle schema mismatch")
+    if manifest.get("bundle_sha256") != _bundle_sha256(manifest):
+        raise ValueError("origin-input bundle manifest hash mismatch")
+    hashes = manifest.get("payload_sha256")
+    if not isinstance(hashes, dict):
+        raise ValueError("origin-input bundle payload hashes are missing")
+    for name in ("origins.csv", "history.csv"):
+        path = bundle_dir / name
+        if not path.exists() or hashes.get(name) != _file_sha256(path):
+            raise ValueError(f"origin-input bundle hash mismatch for {name}")
+    origin_rows = _read_canonical_csv(bundle_dir / "origins.csv", ORIGIN_COLUMNS)
+    history_rows = _read_canonical_csv(bundle_dir / "history.csv", HISTORY_COLUMNS)
+    if origin_rows != manifest.get("origins"):
+        raise ValueError("origin-input rows do not match the manifest")
+    origins = [row for row in origin_rows if row["origin_month"] == origin_month]
     if len(origins) != 1:
         raise ValueError(f"origin {origin_month} is absent or duplicated in frozen bundle")
     origin = origins[0]
-    history = [row for row in bundle.history if row["origin_month"] == origin_month]
+    history = [row for row in history_rows if row["origin_month"] == origin_month]
     if not history:
         raise ValueError(f"origin {origin_month} has no origin-visible history")
     by_series: dict[str, list[dict[str, Any]]] = {}
@@ -65,7 +86,14 @@ def load_origin_information(bundle_dir: Path, origin_month: str) -> tuple[dict[s
         "origin_visible_macro_history": by_series,
         "public_events": [],
     }
-    return information, str(bundle.manifest["bundle_sha256"])
+    if any(
+        row["as_of_date"] != origin["as_of_date"]
+        or row["observation_date"] > origin["as_of_date"]
+        or not math.isfinite(float(row["value"]))
+        for row in history
+    ):
+        raise ValueError("origin-input history violates its information cutoff")
+    return information, str(manifest["bundle_sha256"])
 
 
 def build_origin_snapshot(

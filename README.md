@@ -2,10 +2,12 @@
 
 This project asks whether LLM-updated household beliefs can produce useful macro
 forecasts and counterfactuals inside an explicit, accounting-constrained economy.
-Real survey data supplies household heterogeneity. Each household gets one isolated
-LLM call to report its beliefs and intended choices; deterministic code then
-enforces budgets, credit, production, employment, inventories, and settlement. The
-economy's aggregate path emerges from those household decisions.
+Real survey data supplies household heterogeneity. Each household gets one tool-isolated
+LLM elicitation to report its beliefs and intended choices; deterministic code then
+enforces budgets, credit, production, employment, inventories, and settlement.
+Survey weights determine each household type's population mass, and annual job-loss
+risk is converted to a monthly hazard. The aggregate path emerges from those
+household decisions.
 
 The household panel comes from the Federal Reserve Bank of New York's Survey of
 Consumer Expectations (SCE).
@@ -13,7 +15,7 @@ Consumer Expectations (SCE).
 ```text
 survey-seeded SCE household state + own history + as-of public information
                               |
-                    one isolated LLM call
+              one tool-isolated LLM elicitation
                               |
                  beliefs and intended choices
                               |
@@ -33,10 +35,12 @@ debt repayment, defaults, and inventories to interact.
 
 ## Current Result
 
-The first full run gave 200 GPT-5.5 households only information available by
+The corrected full run gave 200 GPT-5.5 households only information available by
 July 10, 2026, and froze their path for August before August outcomes were known.
-The median path has household intentions at **-2.95%** consumption growth and
-feasible consumption at **-4.08%**, with lower-liquidity households cutting more.
+Every prompt now receives the exact engine state it will execute and says whether
+that state is survey-seeded or inherited. The median path has household intentions
+at **-3.64%** consumption growth and feasible consumption at **-3.77%**, with
+lower-liquidity households cutting more.
 
 ### Run facts
 
@@ -46,24 +50,24 @@ feasible consumption at **-4.08%**, with lower-liquidity households cutting more
 | Information cutoff | `2026-07-10` |
 | One-month-ahead target | `2026-08-01` |
 | Provider and model | `codex_cli` / `gpt-5.5` |
-| Household responses | 200 accepted, one isolated response per household |
+| Household responses | 200 accepted, one tool-isolated response per household |
 | Reproducibility check | 200 replay hits, 0 fresh calls |
-| Accounting | **PASS**, maximum residual `4.19e-09` |
+| Accounting | **PASS**, maximum residual `2.79e-09` |
 | Replay | **PASS**, exact economy hash reproduced |
 
 ### Forecast paths
 
 | Scenario | Consumption growth | Saving rate | Revolving-credit growth | Employment rate | Price growth |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Downside | -8.14% | -2.53% | -6.03% | 90.96% | -0.99% |
-| Median | -4.08% | -1.33% | -6.37% | 90.70% | -1.35% |
-| Upside | -0.73% | 0.48% | -6.63% | 90.70% | -1.93% |
+| Downside | -9.76% | 18.11% | -5.62% | 90.70% | -1.11% |
+| Median | -3.77% | 18.23% | -5.65% | 90.70% | -1.27% |
+| Upside | 1.50% | 18.67% | -5.66% | 90.70% | -1.50% |
 
-Population-weighted household responses imply median beliefs of **4.89%**
-inflation, **-1.01%** income growth, and a **9.99%** one-year job-loss
-probability. In the median economy, the 200 simulated household units execute
-`$1,016,637` of consumption, `$169,080` of debt payments, and `$2,750` of new
-borrowing.
+The population-weighted mean of household p50 responses implies **5.16%**
+inflation, **-0.80%** income growth, and a **9.12%** one-year job-loss
+probability. In the median economy, 200 household types representing 200
+population-equivalent units execute `$915,697` of consumption, `$134,377` of
+debt payments, and `$11,922` of new borrowing.
 
 ### Evidence boundary
 
@@ -105,6 +109,12 @@ For a new untouched month, set `ORIGIN`, `AS_OF`, `ORIGIN_SNAPSHOT`,
 `ECOLOGY_BUNDLE` names the private frozen bundle used by the live canary. Live
 household calls go only through Codex CLI.
 
+Live household elicitation runs Codex in a fresh empty directory with shell,
+local text-file, web, browser, app, memory, and multi-agent access disabled. The model
+therefore receives the household card in the prompt but cannot inspect the repo or
+the realization files. Cache records are bound to the provider, model, full prompt,
+card, and isolation version.
+
 Every run writes the normalized origin information, private household cards,
 responses, feasible decisions, employer and credit ledgers, downside/median/upside
 macro paths, accounting audit, event hashes, manifest, and a short report. Realized
@@ -129,9 +139,20 @@ make ecology-retrospective-live
 ```
 
 This is explicitly retrospective, not confirmatory. It carries the median
-simulated state forward, loads first-release outcomes only after all forecasts
-finish, and writes long-form predicted-versus-actual rows for charting. It uses
-a separate cache and never reads or rewrites the frozen July-to-August run.
+simulated state forward after an unscored survey-seeded initialization transition,
+opens only origin/history inputs during forecasting, loads first-release outcomes
+only after all forecasts finish, and writes both long-form predicted-versus-actual rows and a chart. It uses
+a separate cache and reads the frozen July-to-August run only to add its unscored
+August marker.
+
+Once the response cache exists, `make ecology-retrospective-replay` reconstructs
+the same diagnostic with zero model calls.
+
+The current retrospective result is a negative: on the three valid recursive
+months, nominal-consumption RMSE is **5.48 percentage points** and the sign is
+wrong in all three. The chained prediction falls from 100 to **86.40** while the
+first-release PCE path rises to **102.14**. This is useful diagnosis, not evidence
+that the economy is already an accurate macro predictor.
 
 ## Current Boundary
 

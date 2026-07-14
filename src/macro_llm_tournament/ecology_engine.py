@@ -28,6 +28,10 @@ class _Plan:
     response: HouseholdResponse
     trajectory: HouseholdTrajectory
     realized_job_loss: bool
+    employment_share_start: float
+    job_loss_share: float
+    hired_share: float
+    employment_share_end: float
     actual_hours_worked: float
     actual_job_search_hours: float
     wage_income_usd: float
@@ -74,6 +78,13 @@ def build_household_trajectory(response: HouseholdResponse) -> HouseholdTrajecto
     )
 
 
+def annual_probability_to_monthly(probability_pct: float) -> float:
+    """Convert a 12-month event probability to a constant monthly hazard."""
+
+    probability = min(1.0, max(0.0, probability_pct / 100.0))
+    return 1.0 - (1.0 - probability) ** (1.0 / 12.0)
+
+
 def run_monthly_ecology(
     households: list[HouseholdState],
     responses: Mapping[str, HouseholdResponse],
@@ -98,26 +109,57 @@ def run_monthly_ecology(
         if household.household_id not in responses:
             raise ValueError(f"missing response for household {household.household_id}")
 
-    headroom_start = sum(
-        max(0.0, row.revolving_credit_limit_usd - row.revolving_debt_usd)
+    weight_total = sum(row.population_weight for row in ordered_households)
+    if weight_total <= 0.0:
+        raise ValueError("household population weights must sum to a positive value")
+    population_scale = float(len(ordered_households))
+    masses = {
+        row.household_id: population_scale * row.population_weight / weight_total
         for row in ordered_households
+    }
+
+    def aggregate(values: Mapping[str, float]) -> float:
+        return sum(masses[household_id] * value for household_id, value in values.items())
+
+    def starting_employment_share(household: HouseholdState) -> float:
+        if household.employment_share is not None:
+            return household.employment_share
+        return 1.0 if household.baseline_monthly_hours > ACCOUNTING_TOLERANCE else 0.0
+
+    headroom_start = aggregate(
+        {
+            row.household_id: max(
+                0.0,
+                row.revolving_credit_limit_usd - row.revolving_debt_usd,
+            )
+            for row in ordered_households
+        }
     )
     trajectories = {
         household.household_id: build_household_trajectory(responses[household.household_id])
         for household in ordered_households
     }
     points = {household_id: getattr(trajectory, scenario) for household_id, trajectory in trajectories.items()}
-    retained = sum(
-        household.baseline_monthly_hours > 0
-        and points[household.household_id].job_loss_probability_pct < household.layoff_threshold_pct
-        for household in ordered_households
-    )
-    openings = max(0, int(employer.target_headcount) - retained)
+    employment_start = {
+        row.household_id: starting_employment_share(row) for row in ordered_households
+    }
+    retained_shares = {
+        row.household_id: employment_start[row.household_id]
+        * (
+            1.0
+            - annual_probability_to_monthly(
+                points[row.household_id].job_loss_probability_pct
+            )
+        )
+        for row in ordered_households
+    }
+    retained_mass = aggregate(retained_shares)
+    openings = max(0.0, employer.target_headcount - retained_mass)
     candidates = sorted(
         (
             household
             for household in ordered_households
-            if household.baseline_monthly_hours <= ACCOUNTING_TOLERANCE
+            if retained_shares[household.household_id] < 1.0 - ACCOUNTING_TOLERANCE
             and points[household.household_id].planned_job_search_hours > 0
         ),
         key=lambda household: (
@@ -125,19 +167,32 @@ def run_monthly_ecology(
             household.household_id,
         ),
     )
-    hired_ids = {household.household_id for household in candidates[:openings]}
+    hired_shares = {row.household_id: 0.0 for row in ordered_households}
+    for household in candidates:
+        if openings <= ACCOUNTING_TOLERANCE:
+            break
+        household_id = household.household_id
+        available_share = 1.0 - retained_shares[household_id]
+        admitted_share = min(available_share, openings / masses[household_id])
+        hired_shares[household_id] = admitted_share
+        openings -= masses[household_id] * admitted_share
     plans = [
         _build_plan(
             household,
             responses[household.household_id],
             credit,
+            employer,
             scenario=scenario,
-            hired=household.household_id in hired_ids,
+            employment_share_start=employment_start[household.household_id],
+            retained_share=retained_shares[household.household_id],
+            hired_share=hired_shares[household.household_id],
         )
         for household in ordered_households
     ]
 
-    total_requested = sum(row.borrowing_requested_usd for row in plans)
+    total_requested = aggregate(
+        {row.household.household_id: row.borrowing_requested_usd for row in plans}
+    )
     if total_requested <= 0.0:
         rationing_ratio = 1.0
     elif math.isfinite(credit.new_lending_budget_usd):
@@ -188,10 +243,13 @@ def run_monthly_ecology(
         )
         defaulted = (
             plan.minimum_payment_due_usd - debt_payment_usd > ACCOUNTING_TOLERANCE
-            and plan.realized_job_loss
+            and plan.job_loss_share > ACCOUNTING_TOLERANCE
         )
         default_chargeoff_usd = (
-            debt_stock_before_chargeoff * credit.loss_given_default_pct / 100.0
+            debt_stock_before_chargeoff
+            * credit.loss_given_default_pct
+            / 100.0
+            * plan.job_loss_share
             if defaulted
             else 0.0
         )
@@ -215,14 +273,22 @@ def run_monthly_ecology(
             }
         )
 
-    total_hours = sum(float(row["plan"].actual_hours_worked) for row in goods_ready)
+    total_hours = aggregate(
+        {
+            row["plan"].household.household_id: float(row["plan"].actual_hours_worked)
+            for row in goods_ready
+        }
+    )
     output_units = min(
         employer.monthly_capacity_units,
         employer.productivity_per_hour * total_hours,
     )
     available_units = employer.inventory_units + output_units
-    desired_consumption_total = sum(
-        float(row["consumption_before_goods_usd"]) for row in goods_ready
+    desired_consumption_total = aggregate(
+        {
+            row["plan"].household.household_id: float(row["consumption_before_goods_usd"])
+            for row in goods_ready
+        }
     )
     nominal_sales_capacity = available_units * employer.price_per_unit_usd
     goods_rationing_ratio = (
@@ -264,6 +330,7 @@ def run_monthly_ecology(
             debt_payment_usd=debt_payment_usd,
             consumption_usd=consumption_usd,
             default_chargeoff_usd=float(row["default_chargeoff_usd"]),
+            population_mass=masses[plan.household.household_id],
         )
         all_flows.extend(flows)
         household_results.append(
@@ -272,6 +339,10 @@ def run_monthly_ecology(
                 employer_id=plan.household.employer_id,
                 trajectory=plan.trajectory,
                 realized_job_loss=plan.realized_job_loss,
+                employment_share_start=plan.employment_share_start,
+                job_loss_share=plan.job_loss_share,
+                hired_share=plan.hired_share,
+                employment_share_end=plan.employment_share_end,
                 actual_hours_worked=plan.actual_hours_worked,
                 actual_job_search_hours=plan.actual_job_search_hours,
                 wage_income_usd=plan.wage_income_usd,
@@ -297,18 +368,26 @@ def run_monthly_ecology(
             )
         )
 
-    aggregate_consumption_usd = sum(row.consumption_usd for row in household_results)
+    results_by_id = {row.household_id: row for row in household_results}
+    aggregate_consumption_usd = aggregate(
+        {household_id: row.consumption_usd for household_id, row in results_by_id.items()}
+    )
     units_sold = (
         aggregate_consumption_usd / employer.price_per_unit_usd
         if employer.price_per_unit_usd > 0.0
         else 0.0
     )
     inventory_end_units = employer.inventory_units + output_units - units_sold
-    employment_count = sum(
-        1 for row in household_results if row.actual_hours_worked > ACCOUNTING_TOLERANCE
+    employment_count = aggregate(
+        {
+            household_id: row.employment_share_end
+            for household_id, row in results_by_id.items()
+        }
     )
-    vacancies = max(0, int(employer.target_headcount) - employment_count)
-    wage_bill_usd = sum(row.wage_income_usd for row in household_results)
+    vacancies = max(0.0, employer.target_headcount - employment_count)
+    wage_bill_usd = aggregate(
+        {household_id: row.wage_income_usd for household_id, row in results_by_id.items()}
+    )
     variable_cost_usd = output_units * employer.variable_nonlabor_cost_per_unit_usd
     vacancy_cost_usd = vacancies * employer.vacancy_cost_per_opening_usd
     inventory_carry_cost_usd = (
@@ -336,7 +415,7 @@ def run_monthly_ecology(
     next_price = employer.price_per_unit_usd * (
         1.0 + max(-0.10, min(0.10, 0.03 * (demand_pressure - 1.0) + 0.02 * inventory_gap))
     )
-    vacancy_rate = vacancies / max(int(employer.target_headcount), 1)
+    vacancy_rate = vacancies / max(employer.target_headcount, 1.0)
     next_wage = employer.wage_offer_usd * (
         1.0 + max(-0.05, min(0.08, 0.02 * vacancy_rate + 0.01 * inventory_gap))
     )
@@ -367,20 +446,36 @@ def run_monthly_ecology(
         demand_pressure=demand_pressure,
     )
 
-    deposits_start = sum(row.deposit_balance_usd for row in ordered_households)
-    deposits_end = sum(row.deposit_balance_end_usd for row in household_results)
-    debt_start = sum(row.revolving_debt_usd for row in ordered_households)
-    debt_end = sum(row.revolving_debt_end_usd for row in household_results)
-    credit_limits_total = sum(
-        row.revolving_credit_limit_usd for row in ordered_households
+    deposits_start = aggregate(
+        {row.household_id: row.deposit_balance_usd for row in ordered_households}
     )
-    borrowing_total = sum(row.borrowing_usd for row in household_results)
-    interest_income = sum(row.interest_accrued_usd for row in household_results)
-    minimum_payments_due = sum(
-        row.minimum_payment_due_usd for row in household_results
+    deposits_end = aggregate(
+        {household_id: row.deposit_balance_end_usd for household_id, row in results_by_id.items()}
     )
-    debt_payments_received = sum(row.debt_payment_usd for row in household_results)
-    chargeoffs = sum(row.default_chargeoff_usd for row in household_results)
+    debt_start = aggregate(
+        {row.household_id: row.revolving_debt_usd for row in ordered_households}
+    )
+    debt_end = aggregate(
+        {household_id: row.revolving_debt_end_usd for household_id, row in results_by_id.items()}
+    )
+    credit_limits_total = aggregate(
+        {row.household_id: row.revolving_credit_limit_usd for row in ordered_households}
+    )
+    borrowing_total = aggregate(
+        {household_id: row.borrowing_usd for household_id, row in results_by_id.items()}
+    )
+    interest_income = aggregate(
+        {household_id: row.interest_accrued_usd for household_id, row in results_by_id.items()}
+    )
+    minimum_payments_due = aggregate(
+        {household_id: row.minimum_payment_due_usd for household_id, row in results_by_id.items()}
+    )
+    debt_payments_received = aggregate(
+        {household_id: row.debt_payment_usd for household_id, row in results_by_id.items()}
+    )
+    chargeoffs = aggregate(
+        {household_id: row.default_chargeoff_usd for household_id, row in results_by_id.items()}
+    )
     deposit_stock_residual = deposits_end - (
         deposits_start
         + wage_bill_usd
@@ -435,31 +530,31 @@ def _build_plan(
     household: HouseholdState,
     response: HouseholdResponse,
     credit: CreditIntermediaryState,
+    employer: EmployerState,
     *,
     scenario: str,
-    hired: bool = False,
+    employment_share_start: float,
+    retained_share: float,
+    hired_share: float,
 ) -> _Plan:
     trajectory = build_household_trajectory(response)
     point = getattr(trajectory, scenario)
-    was_employed = household.baseline_monthly_hours > ACCOUNTING_TOLERANCE
-    realized_job_loss = (
-        was_employed
-        and point.job_loss_probability_pct >= household.layoff_threshold_pct
+    employment_share_end = min(1.0, retained_share + hired_share)
+    job_loss_share = max(0.0, employment_share_start - retained_share)
+    realized_job_loss = job_loss_share > ACCOUNTING_TOLERANCE
+    conditional_hours = min(
+        point.planned_work_hours,
+        max(160.0, household.baseline_monthly_hours * 1.25),
     )
-    employed_now = (was_employed and not realized_job_loss) or hired
-    actual_hours_worked = (
-        0.0
-        if not employed_now
-        else min(
-            point.planned_work_hours if point.planned_work_hours > 0 else 160.0,
-            max(160.0, household.baseline_monthly_hours * 1.25),
-        )
-    )
+    actual_hours_worked = conditional_hours * employment_share_end
     actual_job_search_hours = max(
         point.planned_job_search_hours,
-        12.0 if realized_job_loss else 0.0,
+        12.0 * job_loss_share,
     )
-    wage_income_usd = actual_hours_worked * household.hourly_wage_usd
+    wage_income_usd = conditional_hours * (
+        retained_share * household.hourly_wage_usd
+        + hired_share * employer.wage_offer_usd
+    )
     interest_accrued_usd = (
         household.revolving_debt_usd * credit.annual_interest_rate_pct / 1200.0
     )
@@ -536,9 +631,12 @@ def _build_plan(
         - debt_payment_usd
     )
     minimum_shortfall = minimum_payment_due_usd - debt_payment_usd
-    defaulted = minimum_shortfall > ACCOUNTING_TOLERANCE and realized_job_loss
+    defaulted = minimum_shortfall > ACCOUNTING_TOLERANCE and job_loss_share > ACCOUNTING_TOLERANCE
     default_chargeoff_usd = (
-        debt_after_before_chargeoff * credit.loss_given_default_pct / 100.0
+        debt_after_before_chargeoff
+        * credit.loss_given_default_pct
+        / 100.0
+        * job_loss_share
         if defaulted
         else 0.0
     )
@@ -551,6 +649,10 @@ def _build_plan(
         response=response,
         trajectory=trajectory,
         realized_job_loss=realized_job_loss,
+        employment_share_start=employment_share_start,
+        job_loss_share=job_loss_share,
+        hired_share=hired_share,
+        employment_share_end=employment_share_end,
         actual_hours_worked=actual_hours_worked,
         actual_job_search_hours=actual_job_search_hours,
         wage_income_usd=wage_income_usd,
@@ -578,6 +680,7 @@ def _counterparty_flows(
     debt_payment_usd: float,
     consumption_usd: float,
     default_chargeoff_usd: float,
+    population_mass: float,
 ) -> list[CounterpartyFlow]:
     flows: list[CounterpartyFlow] = []
     if wage_income_usd > 0.0:
@@ -588,7 +691,7 @@ def _counterparty_flows(
                 to_party_id=household.household_id,
                 to_party_type="household",
                 category="wages",
-                amount_usd=wage_income_usd,
+                amount_usd=wage_income_usd * population_mass,
             )
         )
     if borrowing_usd > 0.0:
@@ -599,7 +702,7 @@ def _counterparty_flows(
                 to_party_id=household.household_id,
                 to_party_type="household",
                 category="revolving_borrowing",
-                amount_usd=borrowing_usd,
+                amount_usd=borrowing_usd * population_mass,
             )
         )
     if debt_payment_usd > 0.0:
@@ -610,7 +713,7 @@ def _counterparty_flows(
                 to_party_id=credit.intermediary_id,
                 to_party_type="credit_intermediary",
                 category="debt_payment",
-                amount_usd=debt_payment_usd,
+                amount_usd=debt_payment_usd * population_mass,
             )
         )
     if consumption_usd > 0.0:
@@ -621,7 +724,7 @@ def _counterparty_flows(
                 to_party_id=employer.employer_id,
                 to_party_type="employer",
                 category="consumption_spending",
-                amount_usd=consumption_usd,
+                amount_usd=consumption_usd * population_mass,
             )
         )
     if default_chargeoff_usd > 0.0:
@@ -632,7 +735,7 @@ def _counterparty_flows(
                 to_party_id=household.household_id,
                 to_party_type="household",
                 category="default_chargeoff",
-                amount_usd=default_chargeoff_usd,
+                amount_usd=default_chargeoff_usd * population_mass,
                 cash_flow=False,
             )
         )

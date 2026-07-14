@@ -9,6 +9,7 @@ import json
 import math
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -25,11 +26,16 @@ from .ecology_households import (
     normalize_household_payload,
 )
 from .ecology_models import CreditIntermediaryState, EmployerState, HouseholdState
+from .ecology_provider import (
+    CODEX_INSTRUCTION_CONTEXT_VERSION,
+    CODEX_TOOL_ISOLATION_VERSION,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = PROJECT_ROOT / "work/ecology_cache"
 SCHEMA_VERSION = "household_first_rolling_microeconomy_v1"
+LIVE_REFERENCE_SCHEMA_VERSION = "household_ecology_live_reference_v2"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -98,6 +104,47 @@ def _source_sha256() -> str:
     return digest.hexdigest()
 
 
+def _live_reference_path(
+    cache_dir: Path,
+    *,
+    origin: str,
+    provider: str,
+    model: str,
+    card_sha256s: Sequence[str],
+) -> tuple[Path, str]:
+    request_set_sha256 = canonical_sha256(
+        {
+            "origin": origin,
+            "provider": provider,
+            "model": model,
+            "prompt_version": HOUSEHOLD_PROMPT_VERSION,
+            "tool_isolation_version": CODEX_TOOL_ISOLATION_VERSION,
+            "instruction_context_version": CODEX_INSTRUCTION_CONTEXT_VERSION,
+            "engine_source_sha256": _source_sha256(),
+            "card_sha256s": list(card_sha256s),
+        }
+    )
+    return (
+        cache_dir / "live_references" / f"{request_set_sha256}.json",
+        request_set_sha256,
+    )
+
+
+def _read_live_reference(path: Path, request_set_sha256: str) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    supplied_hash = payload.get("reference_sha256")
+    expected_hash = canonical_sha256(
+        {key: value for key, value in payload.items() if key != "reference_sha256"}
+    )
+    if (
+        payload.get("schema_version") != LIVE_REFERENCE_SCHEMA_VERSION
+        or payload.get("request_set_sha256") != request_set_sha256
+        or supplied_hash != expected_hash
+    ):
+        raise ValueError("live replay reference is malformed or mismatched")
+    return payload
+
+
 def _load_inputs(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], str]:
     if args.household_count <= 0:
         raise ValueError("--household-count must be positive")
@@ -154,7 +201,9 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
     status = str(row.get("employment_status", "unknown")).lower()
     employed = status not in {"unemployed", "not_employed"}
     hours = 160.0 if employed else 0.0
-    hourly_wage = income / 2080.0 if employed else max(7.25, income / 2080.0)
+    # The engine and prompt define 160 hours as one working month, so the wage
+    # conversion must use the same 1,920-hour simulation year.
+    hourly_wage = income / (12.0 * 160.0) if employed else max(7.25, income / (12.0 * 160.0))
     debt = max(0.0, float(row.get("debt", 0.0)))
     return HouseholdState(
         household_id=str(row["type_id"]),
@@ -165,6 +214,7 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
         hourly_wage_usd=hourly_wage,
         baseline_monthly_hours=hours,
         baseline_monthly_consumption_usd=monthly_consumption,
+        employment_share=1.0 if employed else 0.0,
         layoff_threshold_pct=50.0,
         liquid_buffer_floor_months=float(row.get("subsistence_floor_share", 0.5)),
         subsistence_consumption_share=float(row.get("subsistence_floor_share", 0.45)),
@@ -173,19 +223,37 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
 
 
 def _initial_employer(states: list[HouseholdState]) -> EmployerState:
-    employed_hours = sum(row.baseline_monthly_hours for row in states)
-    baseline_demand = sum(row.baseline_monthly_consumption_usd for row in states)
+    weight_total = sum(row.population_weight for row in states) or 1.0
+    masses = {
+        row.household_id: len(states) * row.population_weight / weight_total for row in states
+    }
+    employed_hours = sum(
+        masses[row.household_id] * row.baseline_monthly_hours for row in states
+    )
+    baseline_demand = sum(
+        masses[row.household_id] * row.baseline_monthly_consumption_usd for row in states
+    )
     productivity = baseline_demand / max(employed_hours, 1.0)
-    employed = sum(row.baseline_monthly_hours > 0 for row in states)
-    wages = [row.hourly_wage_usd for row in states if row.baseline_monthly_hours > 0]
+    employed = sum(
+        masses[row.household_id]
+        * (row.employment_share if row.employment_share is not None else float(row.baseline_monthly_hours > 0))
+        for row in states
+    )
+    employed_mass = max(employed, 1.0)
+    weighted_wage = sum(
+        masses[row.household_id]
+        * (row.employment_share if row.employment_share is not None else float(row.baseline_monthly_hours > 0))
+        * row.hourly_wage_usd
+        for row in states
+    ) / employed_mass
     return EmployerState(
         employer_id="aggregate_employer",
         productivity_per_hour=productivity,
         monthly_capacity_units=baseline_demand * 1.15,
         inventory_units=baseline_demand * 0.08,
         price_per_unit_usd=1.0,
-        target_headcount=max(1, employed),
-        wage_offer_usd=sum(wages) / max(len(wages), 1),
+        target_headcount=max(1.0, employed),
+        wage_offer_usd=weighted_wage,
         target_inventory_units=baseline_demand * 0.08,
         variable_nonlabor_cost_per_unit_usd=0.15,
         inventory_carry_cost_per_unit_usd=0.005,
@@ -201,9 +269,16 @@ def _initial_credit(states: list[HouseholdState], origin: dict[str, Any]) -> Cre
         minimum_payment_rate_pct=3.0,
         minimum_payment_floor_usd=25.0,
         loss_given_default_pct=55.0,
-        new_lending_budget_usd=sum(
-            max(0.0, row.revolving_credit_limit_usd - row.revolving_debt_usd) for row in states
-        ) * 0.2,
+        new_lending_budget_usd=(
+            len(states)
+            * sum(
+                row.population_weight
+                * max(0.0, row.revolving_credit_limit_usd - row.revolving_debt_usd)
+                for row in states
+            )
+            / max(sum(row.population_weight for row in states), 1e-12)
+            * 0.2
+        ),
     )
 
 
@@ -270,12 +345,14 @@ def _next_recursive_state(
                 deposit_balance_usd=outcome.deposit_balance_end_usd,
                 revolving_debt_usd=outcome.revolving_debt_end_usd,
                 revolving_credit_limit_usd=prior.revolving_credit_limit_usd,
-                hourly_wage_usd=max(0.0, prior.hourly_wage_usd * wage_ratio),
-                baseline_monthly_hours=0.7 * prior.baseline_monthly_hours + 0.3 * outcome.actual_hours_worked,
-                baseline_monthly_consumption_usd=max(
-                    1.0,
-                    0.7 * prior.baseline_monthly_consumption_usd + 0.3 * outcome.consumption_usd,
+                hourly_wage_usd=(
+                    max(0.0, outcome.wage_income_usd / outcome.actual_hours_worked * wage_ratio)
+                    if outcome.actual_hours_worked > 1e-12
+                    else prior.hourly_wage_usd
                 ),
+                baseline_monthly_hours=outcome.actual_hours_worked,
+                baseline_monthly_consumption_usd=max(1.0, outcome.consumption_usd),
+                employment_share=outcome.employment_share_end,
                 layoff_threshold_pct=prior.layoff_threshold_pct,
                 liquid_buffer_floor_months=prior.liquid_buffer_floor_months,
                 subsistence_consumption_share=prior.subsistence_consumption_share,
@@ -311,7 +388,7 @@ def _next_recursive_state(
             ),
             inventory_units=max(0.0, result.employer.inventory_end_units),
             price_per_unit_usd=result.employer.next_price_per_unit_usd,
-            target_headcount=max(1, round(result.employer.employment_count * pressure)),
+            target_headcount=max(1.0, result.employer.employment_count * pressure),
             wage_offer_usd=result.employer.next_wage_offer_usd,
             target_inventory_units=employer.target_inventory_units,
             fixed_cost_usd=employer.fixed_cost_usd,
@@ -320,10 +397,12 @@ def _next_recursive_state(
             inventory_carry_cost_per_unit_usd=employer.inventory_carry_cost_per_unit_usd,
         )
     )
-    headroom = sum(
-        max(0.0, row["revolving_credit_limit_usd"] - row["revolving_debt_usd"])
+    weight_total = sum(row.population_weight for row in states) or 1.0
+    headroom = len(states) * sum(
+        prior_by_id[row["household_id"]].population_weight
+        * max(0.0, row["revolving_credit_limit_usd"] - row["revolving_debt_usd"])
         for row in household_rows
-    )
+    ) / weight_total
     next_credit = dataclasses.asdict(
         CreditIntermediaryState(
             intermediary_id=credit.intermediary_id,
@@ -358,10 +437,17 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
     ) / total_weight
     debt_start = sum(row.revolving_debt_start_usd * weights[row.household_id] for row in result.households) / total_weight
     debt_end = sum(row.revolving_debt_end_usd * weights[row.household_id] for row in result.households) / total_weight
-    employed_weight = sum(
-        weights[row.household_id] for row in result.households if row.actual_hours_worked > 0
+    prior_employed_weight = sum(
+        weights[row.household_id]
+        * (row.employment_share if row.employment_share is not None else float(row.baseline_monthly_hours > 0))
+        for row in states
     ) / total_weight
-    saving = weighted("wage_income_usd") + weighted("borrowing_usd") - weighted("consumption_usd") - weighted("debt_payment_usd")
+    employed_weight = sum(
+        weights[row.household_id] * row.employment_share_end for row in result.households
+    ) / total_weight
+    # Personal saving is income less consumption. Borrowing and debt repayment
+    # change financing composition; they are not personal saving or dissaving.
+    saving = weighted("wage_income_usd") - weighted("consumption_usd")
     saving_rate = 100.0 * saving / max(weighted("wage_income_usd"), 1.0)
     price_growth = 100.0 * (result.employer.next_price_per_unit_usd / result.employer.current_price_per_unit_usd - 1.0)
     return {
@@ -369,6 +455,7 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         "saving_rate_pct": saving_rate,
         "revolving_credit_growth_pct": 100.0 * (debt_end / max(debt_start, 1.0) - 1.0),
         "employment_rate_pct": 100.0 * employed_weight,
+        "employment_rate_change_pp": 100.0 * (employed_weight - prior_employed_weight),
         "unemployment_rate_pct": 100.0 * (1.0 - employed_weight),
         "price_growth_pct": price_growth,
         "output_units": result.employer.output_units,
@@ -392,7 +479,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     worker_count = int(getattr(args, "workers", 1))
     if worker_count <= 0:
         raise ValueError("--workers must be positive")
-    call_budget = LiveCallBudget(args.max_live_calls, output / "live_attempts")
+    attempt_journal_dir = (
+        args.cache_dir
+        / "live_attempts"
+        / HOUSEHOLD_PROMPT_VERSION
+        / str(args.origin)
+    )
+    call_budget = LiveCallBudget(args.max_live_calls, attempt_journal_dir)
     employer = _initial_employer(states)
     credit = _initial_credit(states, origin)
     states, employer, credit, recursive_rows, prior_macro_state, parent_scenario = _load_recursive_state(
@@ -412,7 +505,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if str(row.get("public_availability_date", "")) <= origin["as_of_date"]
         ]
         card_state = households.loc[households["type_id"].eq(state.household_id)].iloc[0].to_dict()
+        # Prompts must see the exact state that the engine will execute, including
+        # the first origin. Survey fields remain available for profile metadata.
+        card_state.update(dataclasses.asdict(state))
         card_state.update(recursive_rows.get(state.household_id, {}))
+        card_state["state_provenance"] = (
+            "prior_simulated_month"
+            if state.household_id in recursive_rows
+            else "survey_seeded_initial_state"
+        )
         card = household_card(
             card_state,
             origin=origin,
@@ -459,7 +560,49 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "scenarios": {name: _jsonable(result) for name, result in scenarios.items()},
         }
     )
-    expected_replay_sha256 = getattr(args, "expected_replay_sha256", None)
+    reference_path, request_set_sha256 = _live_reference_path(
+        args.cache_dir,
+        origin=args.origin,
+        provider=args.provider,
+        model=args.model,
+        card_sha256s=[event["card_sha256"] for event in events],
+    )
+    explicit_expected = getattr(args, "expected_replay_sha256", None)
+    reference_payload: dict[str, Any] | None = None
+    if args.mode == "live":
+        reference_payload = {
+            "schema_version": LIVE_REFERENCE_SCHEMA_VERSION,
+            "request_set_sha256": request_set_sha256,
+            "replay_equivalence_sha256": replay_equivalence_sha256,
+            "provider": args.provider,
+            "model": args.model,
+            "origin_month": args.origin,
+            "prompt_version": HOUSEHOLD_PROMPT_VERSION,
+            "tool_isolation_version": CODEX_TOOL_ISOLATION_VERSION,
+            "instruction_context_version": CODEX_INSTRUCTION_CONTEXT_VERSION,
+            "engine_source_sha256": _source_sha256(),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        reference_payload["reference_sha256"] = canonical_sha256(reference_payload)
+        reference_path.parent.mkdir(parents=True, exist_ok=True)
+        if reference_path.exists():
+            existing = _read_live_reference(reference_path, request_set_sha256)
+            if existing["replay_equivalence_sha256"] != replay_equivalence_sha256:
+                raise ValueError("live replay reference already exists with a different result")
+            reference_payload = existing
+        else:
+            _write_json(reference_path, reference_payload)
+        expected_replay_sha256 = explicit_expected
+    elif args.mode == "replay":
+        if not reference_path.exists():
+            raise ValueError("replay requires an immutable live reference")
+        reference_payload = _read_live_reference(reference_path, request_set_sha256)
+        reference_expected = str(reference_payload["replay_equivalence_sha256"])
+        if explicit_expected is not None and explicit_expected != reference_expected:
+            raise ValueError("explicit replay hash disagrees with immutable live reference")
+        expected_replay_sha256 = reference_expected
+    else:
+        expected_replay_sha256 = explicit_expected
     if expected_replay_sha256 is not None and expected_replay_sha256 != replay_equivalence_sha256:
         raise ValueError("replay equivalence hash mismatch")
     for scenario, result in scenarios.items():
@@ -509,12 +652,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "household_count": len(states),
         "accepted_household_response_count": len(records),
-        "one_call_per_household": True,
+        "one_accepted_response_per_household": True,
+        "population_mass_formula": "household_count * population_weight / sum(population_weight)",
+        "institutional_aggregation": "population_mass_weighted",
+        "employment_transition": "expected_mass_from_constant_monthly_hazard_implied_by_annual_job_loss_probability_with_fractional_hiring",
+        "one_call_per_household": (
+            args.mode == "live" and call_budget.used == len(records) and call_budget.failed == 0
+        ),
         "live_call_count": call_budget.used,
+        "fresh_accepted_response_count": call_budget.accepted,
+        "failed_provider_attempt_count": call_budget.failed,
+        "live_attempt_journal_sha256": (
+            _artifact_sha256(attempt_journal_dir)
+            if attempt_journal_dir.exists() and any(attempt_journal_dir.iterdir())
+            else None
+        ),
         "cache_hit_count": sum(bool(record.get("cache_hit", False)) for record in records),
         "provider_response_count": sum("response_created_utc" in record for record in records),
         "worker_count": worker_count,
         "household_prompt_version": HOUSEHOLD_PROMPT_VERSION,
+        "codex_tool_isolation_version": (
+            CODEX_TOOL_ISOLATION_VERSION if args.mode in {"live", "replay"} else None
+        ),
+        "codex_instruction_context_version": (
+            CODEX_INSTRUCTION_CONTEXT_VERSION if args.mode in {"live", "replay"} else None
+        ),
+        "local_text_file_tools_available_to_model": (
+            False if args.mode in {"live", "replay"} else None
+        ),
         "bundle_sha256": bundle_sha,
         "household_input_sha256": _file_sha256(args.households),
         "history_input_sha256": _file_sha256(args.history),
@@ -534,6 +699,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "replay_equivalence_sha256": replay_equivalence_sha256,
         "expected_replay_sha256": expected_replay_sha256,
         "replay_verified": expected_replay_sha256 == replay_equivalence_sha256 if expected_replay_sha256 else None,
+        "live_reference_sha256": (
+            reference_payload.get("reference_sha256") if reference_payload else None
+        ),
+        "live_reference_request_set_sha256": request_set_sha256,
+        "replay_reference_kind": (
+            "immutable_live_run" if reference_payload is not None else None
+        ),
         "artifacts": {},
     }
     weights = {state.household_id: state.population_weight for state in states}
@@ -544,8 +716,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for household_id, weight in weights.items()
         ) / weight_sum
     median_result = scenarios["median"]
-    median_baseline = sum(row.baseline_consumption_usd for row in median_result.households)
-    median_desired = sum(row.desired_consumption_usd for row in median_result.households)
+    median_by_id = {row.household_id: row for row in median_result.households}
+    population_scale = float(len(states))
+    median_baseline = population_scale * sum(
+        weights[row.household_id] * median_by_id[row.household_id].baseline_consumption_usd
+        for row in states
+    ) / weight_sum
+    median_desired = population_scale * sum(
+        weights[row.household_id] * median_by_id[row.household_id].desired_consumption_usd
+        for row in states
+    ) / weight_sum
     target_label = pd.Timestamp(target_month).strftime("%B %Y")
     report = [
         "# Household-First Rolling Microeconomy",
@@ -571,7 +751,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "```text",
         "survey-seeded household state + own history + as-of public information",
         "                              |",
-        "                    one isolated LLM call",
+        "              one tool-isolated LLM elicitation",
         "                              |",
         "                 beliefs and intended choices",
         "                              |",
@@ -587,6 +767,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         f"- Provider/model: `{args.provider}` / `{args.model}`.",
         f"- Accepted household responses: `{manifest['accepted_household_response_count']}`; "
         f"provider-created records represented: `{manifest['provider_response_count']}`.",
+        f"- Provider attempts in this execution: `{manifest['live_call_count']}`; "
+        f"accepted fresh responses: `{manifest['fresh_accepted_response_count']}`; "
+        f"failed attempts: `{manifest['failed_provider_attempt_count']}`.",
+        f"- Model tool isolation: `{manifest['codex_tool_isolation_version']}`; "
+        "each live call ran in a fresh empty directory with local-file, shell, web, browser, app, memory, and multi-agent access disabled.",
         f"- Replay cache hits in this execution: `{manifest['cache_hit_count']}`; fresh calls: `{manifest['live_call_count']}`.",
         f"- Accounting: **{'PASS' if manifest['accounting_passed'] else 'FAIL'}**; maximum residual `{manifest['max_abs_accounting_residual']:.3g}`.",
         f"- Origin snapshot hash: `{bundle_sha}`.",
@@ -608,13 +793,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "",
             "## Household Signal",
             "",
-            f"Population-weighted median beliefs imply inflation of **{weighted_response('expected_inflation_pct'):.2f}%**, "
+            f"The population-weighted mean of household p50 beliefs implies inflation of **{weighted_response('expected_inflation_pct'):.2f}%**, "
             f"income growth of **{weighted_response('expected_income_growth_pct'):.2f}%**, and a "
             f"**{weighted_response('job_loss_probability_pct'):.2f}%** one-year job-loss probability.",
             "",
-            f"The median economy executes `${sum(row.consumption_usd for row in median_result.households):,.0f}` of consumption, "
-            f"`${sum(row.debt_payment_usd for row in median_result.households):,.0f}` of debt payments, and "
-            f"`${sum(row.borrowing_usd for row in median_result.households):,.0f}` of new borrowing across the {len(states)} simulated household units.",
+            f"The population-mass-weighted median economy executes `${median_result.employer.revenue_usd:,.0f}` of consumption, "
+            f"`${median_result.credit.debt_payments_received_usd:,.0f}` of debt payments, and "
+            f"`${median_result.credit.borrowing_total_usd:,.0f}` of new borrowing across {len(states)} household types representing {len(states)} population-equivalent units.",
             "",
             "The cross-section is not a repeated representative household: low-liquidity agents plan larger consumption cuts, beliefs vary materially, and balance-sheet constraints alter feasible actions household by household.",
             "",

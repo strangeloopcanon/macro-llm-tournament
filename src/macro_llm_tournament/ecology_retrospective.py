@@ -6,17 +6,24 @@ import argparse
 import json
 import math
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
 
-from .ecology import _artifact_sha256, _file_sha256, _write_json, run as run_ecology
+from .ecology import (
+    _artifact_sha256,
+    _file_sha256,
+    _source_sha256,
+    _write_json,
+    run as run_ecology,
+)
 
 
-SCHEMA_VERSION = "household_ecology_retrospective_v1"
-MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v1"
+SCHEMA_VERSION = "household_ecology_retrospective_v3"
+MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v2"
 METRIC_MAPPINGS: dict[str, dict[str, str]] = {
     "consumption_growth_pct": {
         "target_name": "pce_growth_pct",
@@ -24,7 +31,8 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "actual_field": "target_value",
         "actual_transform": "identity",
         "mapping_quality": "closest_aggregate_proxy",
-        "note": "Ecology nominal household consumption growth mapped to nominal PCE growth.",
+        "score_mode": "full",
+        "note": "Month-over-month ecology nominal household consumption growth mapped to month-over-month nominal PCE growth.",
     },
     "saving_rate_pct": {
         "target_name": "personal_saving_rate_change",
@@ -33,7 +41,8 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "actual_transform": "identity",
         "source_value_semantics": "first_release_series_level_not_derived_change_target",
         "mapping_quality": "directional_proxy",
-        "note": "Ecology saving-rate level mapped to the raw first-release PSAVERT series level stored on the change-target row; target_value is deliberately not used.",
+        "score_mode": "descriptive_only",
+        "note": "Ecology income-less-consumption saving-rate level mapped to the raw first-release PSAVERT level; taxes and transfers are absent from the ecology.",
     },
     "revolving_credit_growth_pct": {
         "target_name": "revolving_credit_growth_pct",
@@ -41,15 +50,17 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "actual_field": "target_value",
         "actual_transform": "identity",
         "mapping_quality": "directional_proxy",
+        "score_mode": "direction_only",
         "note": "Ecology revolving-debt growth mapped to aggregate revolving consumer-credit growth.",
     },
-    "employment_rate_pct": {
+    "employment_rate_change_pp": {
         "target_name": "unemployment_rate_level",
         "series_id": "UNRATE",
         "actual_field": "first_release_value",
-        "actual_transform": "one_hundred_minus",
+        "actual_transform": "negative_first_difference",
         "mapping_quality": "directional_proxy",
-        "note": "Ecology employed-household share mapped to 100 minus the first-release unemployment rate.",
+        "score_mode": "direction_only",
+        "note": "Change in the ecology employed-household share mapped to the negative first-release change in UNRATE; levels are not compared because the cohort denominator is not the official labor force.",
     },
     "price_growth_pct": {
         "target_name": "pce_price_growth_pct",
@@ -57,6 +68,7 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "actual_field": "target_value",
         "actual_transform": "identity",
         "mapping_quality": "directional_proxy",
+        "score_mode": "direction_only",
         "note": "Ecology unit-price growth mapped to PCE price-index growth.",
     },
 }
@@ -78,6 +90,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--prospective-run",
+        type=Path,
+        help="Optional unscored ecology run to show as a separate prospective marker.",
+    )
     return parser
 
 
@@ -105,6 +122,8 @@ def _mapped_actual(row: pd.Series, mapping: dict[str, str]) -> float:
     value = float(row[mapping["actual_field"]])
     if mapping["actual_transform"] == "one_hundred_minus":
         value = 100.0 - value
+    elif mapping["actual_transform"] == "negative_first_difference":
+        value = -(value - float(row["first_release_denominator_value"]))
     if not math.isfinite(value):
         raise ValueError("mapped actual must be finite")
     return value
@@ -118,6 +137,7 @@ def _realization_rows(targets_path: Path, target_months: list[str]) -> pd.DataFr
         "target_observation_date",
         "first_release_as_of_date",
         "first_release_value",
+        "first_release_denominator_value",
         "target_value",
     }
     missing = required.difference(targets.columns)
@@ -153,8 +173,222 @@ def _realization_rows(targets_path: Path, target_months: list[str]) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
+def _prospective_rows(run_dir: Path | None) -> pd.DataFrame:
+    if run_dir is None:
+        return pd.DataFrame(columns=["target_month", "metric", "scenario", "prediction"])
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    paths = pd.read_csv(run_dir / "macro_forecast_paths.csv")
+    long = paths.melt(
+        id_vars=["scenario"],
+        value_vars=list(METRIC_MAPPINGS),
+        var_name="metric",
+        value_name="prediction",
+    )
+    long.insert(0, "target_month", str(manifest["target_month"]))
+    return long
+
+
+def _chart_subtitle(joined: pd.DataFrame, model: str) -> str:
+    origins = pd.to_datetime(joined["origin_month"])
+    return (
+        f"{model} rolling origins {origins.min():%b %Y}-{origins.max():%b %Y}; first origin is "
+        "survey-seeded and unscored; later origins are recursive. Shading is downside-upside."
+    )
+
+
+def _cumulative_growth_index(values: Sequence[float], *, base: float = 100.0) -> np.ndarray:
+    growth = np.asarray(values, dtype=float)
+    if not np.all(np.isfinite(growth)) or np.any(growth < -100.0):
+        raise ValueError("growth rates must be finite and no smaller than -100 percent")
+    return np.concatenate(([base], base * np.cumprod(1.0 + growth / 100.0)))
+
+
+def _write_chart(
+    joined: pd.DataFrame,
+    prospective: pd.DataFrame,
+    output: Path,
+    *,
+    model: str,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    labels = {
+        "cumulative_consumption_index": "Nominal consumption index (start=100)",
+        "consumption_growth_pct": "Consumption growth (%)",
+        "revolving_credit_growth_pct": "Credit growth (sign proxy)",
+        "employment_rate_change_pp": "Employment change (sign proxy)",
+        "price_growth_pct": "Price growth (sign proxy)",
+    }
+    fig, axes = plt.subplots(len(labels), 1, figsize=(11.5, 11.5), sharex=True)
+    actual_color = "#2463A6"
+    prediction_color = "#B23A2B"
+    band_color = "#E8B5AD"
+    for axis, (metric, label) in zip(axes, labels.items(), strict=True):
+        if metric == "cumulative_consumption_index":
+            subset = joined.loc[
+                joined["metric"].eq("consumption_growth_pct")
+                & joined["state_provenance"].eq("prior_simulated_month")
+            ].copy()
+            pivot = subset.pivot(index="target_month", columns="scenario", values="prediction")
+            dates = pd.to_datetime(pivot.index)
+            actual_growth = (
+                subset.drop_duplicates("target_month")
+                .set_index("target_month")
+                .loc[pivot.index, "actual"]
+                .to_numpy(dtype=float)
+            )
+            index_dates = pd.DatetimeIndex([pd.to_datetime(subset["origin_month"]).min(), *dates])
+            axis.plot(
+                index_dates,
+                _cumulative_growth_index(pivot["median"].to_numpy(dtype=float)),
+                color=prediction_color,
+                marker="s",
+                linewidth=1.8,
+                label="LLM recursive median",
+            )
+            axis.plot(
+                index_dates,
+                _cumulative_growth_index(actual_growth),
+                color=actual_color,
+                marker="o",
+                linewidth=2.1,
+                label="First-release actual",
+            )
+            axis.set_ylabel(label, fontsize=9, labelpad=9)
+            axis.grid(axis="y", color="#D7D7D7", linewidth=0.6)
+            axis.spines[["top", "right"]].set_visible(False)
+            continue
+        subset = joined.loc[joined["metric"].eq(metric)].copy()
+        pivot = subset.pivot(index="target_month", columns="scenario", values="prediction")
+        dates = pd.to_datetime(pivot.index)
+        actual = (
+            subset.drop_duplicates("target_month")
+            .set_index("target_month")
+            .loc[pivot.index, "actual"]
+            .to_numpy(dtype=float)
+        )
+        axis.fill_between(
+            dates,
+            pivot["downside"].to_numpy(dtype=float),
+            pivot["upside"].to_numpy(dtype=float),
+            color=band_color,
+            alpha=0.38,
+            linewidth=0,
+            label="One-step scenario range" if metric == "consumption_growth_pct" else None,
+        )
+        axis.plot(
+            dates,
+            pivot["median"].to_numpy(dtype=float),
+            color=prediction_color,
+            marker="s",
+            linewidth=1.8,
+            label="LLM one-step median" if metric == "consumption_growth_pct" else None,
+        )
+        axis.plot(
+            dates,
+            actual,
+            color=actual_color,
+            marker="o",
+            linewidth=2.1,
+            label="First-release actual" if metric == "consumption_growth_pct" else None,
+        )
+        initialization = subset.loc[
+            subset["state_provenance"].eq("survey_seeded_initial_state")
+            & subset["scenario"].eq("median")
+        ]
+        if not initialization.empty:
+            axis.scatter(
+                pd.to_datetime(initialization["target_month"]),
+                initialization["prediction"],
+                marker="s",
+                s=58,
+                facecolors="white",
+                edgecolors="#777777",
+                linewidths=1.8,
+                zorder=5,
+                label=(
+                    "Survey-seeded transition, not scored"
+                    if metric == "consumption_growth_pct"
+                    else None
+                ),
+            )
+        marker = prospective.loc[
+            prospective["metric"].eq(metric) & prospective["scenario"].eq("median")
+        ]
+        if not marker.empty:
+            axis.scatter(
+                pd.to_datetime(marker["target_month"]),
+                marker["prediction"],
+                marker="D",
+                s=54,
+                facecolors="white",
+                edgecolors=prediction_color,
+                linewidths=1.8,
+                zorder=4,
+                label="Prospective, not yet scored" if metric == "consumption_growth_pct" else None,
+            )
+        axis.axhline(0.0, color="#888888", linewidth=0.7)
+        axis.set_ylabel(label, fontsize=9, labelpad=9)
+        axis.grid(axis="y", color="#D7D7D7", linewidth=0.6)
+        axis.spines[["top", "right"]].set_visible(False)
+    axes[-1].xaxis.set_major_locator(mdates.MonthLocator())
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    fig.suptitle(
+        "Household ecology: one-month predictions vs first-release outcomes",
+        x=0.10,
+        y=0.995,
+        ha="left",
+        fontsize=15,
+    )
+    fig.text(
+        0.08,
+        0.971,
+        _chart_subtitle(joined, model),
+        ha="left",
+        fontsize=10,
+        color="#4A4A4A",
+    )
+    handles: list[Any] = []
+    legend_labels: list[str] = []
+    for axis in axes:
+        for handle, label in zip(*axis.get_legend_handles_labels(), strict=True):
+            if label not in legend_labels:
+                handles.append(handle)
+                legend_labels.append(label)
+    fig.legend(
+        handles,
+        legend_labels,
+        loc="upper center",
+        bbox_to_anchor=(0.57, 0.953),
+        frameon=False,
+        ncol=3,
+        fontsize=9,
+    )
+    fig.subplots_adjust(left=0.14, right=0.98, top=0.91, bottom=0.06, hspace=0.11)
+    fig.text(
+        0.08,
+        0.012,
+        f"Sources: recursive {model} household ecology; ALFRED/FRED first releases. First transition is unscored; credit, employment, and price mappings support signs only.",
+        ha="left",
+        fontsize=8.5,
+        color="#555555",
+    )
+    fig.savefig(output, dpi=180, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def _joined_rows(forecasts: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame:
-    id_columns = ["origin_month", "target_month", "as_of_date", "scenario"]
+    id_columns = [
+        "origin_month",
+        "target_month",
+        "as_of_date",
+        "state_provenance",
+        "scenario",
+    ]
     long = forecasts.melt(
         id_vars=id_columns,
         value_vars=list(METRIC_MAPPINGS),
@@ -164,6 +398,11 @@ def _joined_rows(forecasts: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame
     joined = long.merge(actuals, on=["target_month", "metric"], how="left", validate="many_to_one")
     if joined["actual"].isna().any():
         raise ValueError("forecast-to-actual join produced missing outcomes")
+    if (
+        pd.to_datetime(joined["first_release_as_of_date"])
+        <= pd.to_datetime(joined["as_of_date"])
+    ).any():
+        raise ValueError("realization was available at or before its forecast cutoff")
     joined["error"] = joined["actual"] - joined["prediction"]
     joined["absolute_error"] = joined["error"].abs()
     return joined.sort_values(["target_month", "metric", "scenario"]).reset_index(drop=True)
@@ -172,25 +411,44 @@ def _joined_rows(forecasts: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame
 def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for (scenario, metric), group in joined.groupby(["scenario", "metric"], sort=True):
-        error = group["prediction"].to_numpy(dtype=float) - group["actual"].to_numpy(dtype=float)
-        actual = group["actual"].to_numpy(dtype=float)
-        prediction = group["prediction"].to_numpy(dtype=float)
+        eligible = group.loc[group["state_provenance"].eq("prior_simulated_month")]
+        if eligible.empty:
+            raise ValueError("retrospective score has no recursive observations")
+        error = eligible["prediction"].to_numpy(dtype=float) - eligible["actual"].to_numpy(dtype=float)
+        actual = eligible["actual"].to_numpy(dtype=float)
+        prediction = eligible["prediction"].to_numpy(dtype=float)
         correlation = (
             float(np.corrcoef(actual, prediction)[0, 1])
-            if len(group) > 1 and np.std(actual) > 0 and np.std(prediction) > 0
+            if len(eligible) > 1 and np.std(actual) > 0 and np.std(prediction) > 0
             else float("nan")
         )
-        direction_match = np.sign(prediction) == np.sign(actual)
+        score_mode = METRIC_MAPPINGS[str(metric)]["score_mode"]
+        direction_mask = (np.abs(prediction) > 1e-12) | (np.abs(actual) > 1e-12)
+        direction_match = (
+            np.sign(prediction[direction_mask]) == np.sign(actual[direction_mask])
+            if score_mode in {"full", "direction_only"}
+            else np.asarray([], dtype=bool)
+        )
         rows.append(
             {
                 "scenario": scenario,
                 "metric": metric,
-                "n": len(group),
-                "mae": float(np.mean(np.abs(error))),
-                "rmse": float(np.sqrt(np.mean(np.square(error)))),
-                "correlation": correlation,
-                "direction_accuracy": float(np.mean(direction_match)),
+                "n": len(eligible),
+                "mae": float(np.mean(np.abs(error))) if score_mode == "full" else float("nan"),
+                "rmse": (
+                    float(np.sqrt(np.mean(np.square(error))))
+                    if score_mode == "full"
+                    else float("nan")
+                ),
+                "correlation": correlation if score_mode == "full" else float("nan"),
+                "direction_accuracy": (
+                    float(np.mean(direction_match))
+                    if score_mode in {"full", "direction_only"} and direction_match.size
+                    else float("nan")
+                ),
+                "direction_n": int(direction_match.size),
                 "mapping_quality": str(group["mapping_quality"].iloc[0]),
+                "score_mode": score_mode,
             }
         )
     return pd.DataFrame(rows)
@@ -203,6 +461,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("non-live retrospective runs must use --max-live-calls 0")
     if args.mode == "live" and args.max_live_calls < args.household_count * len(origins):
         raise ValueError("live-call cap must cover at least one call per household and origin")
+    # Validate the optional chart marker before any paid child run starts.
+    prospective = _prospective_rows(getattr(args, "prospective_run", None))
 
     output = args.output_dir.resolve()
     if output.exists():
@@ -236,10 +496,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 cache_dir=args.cache_dir,
                 output_dir=run_dir,
             )
+            state_provenance = (
+                "prior_simulated_month" if prior_state is not None else "survey_seeded_initial_state"
+            )
             manifest = run_ecology(child_args)
             remaining_calls -= int(manifest["live_call_count"])
             child_manifests.append(manifest)
             frame = pd.read_csv(run_dir / "macro_forecast_paths.csv")
+            frame.insert(0, "state_provenance", state_provenance)
             frame.insert(0, "as_of_date", manifest["as_of_date"])
             frame.insert(0, "target_month", manifest["target_month"])
             frame.insert(0, "origin_month", manifest["origin_month"])
@@ -256,6 +520,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         actuals.to_csv(staging / "realized_outcomes_by_target.csv", index=False)
         joined.to_csv(staging / "predicted_vs_actual.csv", index=False)
         scores.to_csv(staging / "retrospective_scores.csv", index=False)
+        _write_chart(
+            joined,
+            prospective,
+            staging / "predicted_vs_actual.png",
+            model=args.model,
+        )
 
         manifest = {
             "schema_version": SCHEMA_VERSION,
@@ -263,14 +533,47 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "evaluation_status": "retrospective_diagnostic_not_confirmatory",
             "state_policy": "median_recursive_spine",
             "outcomes_loaded_after_all_forecasts": True,
+            "forecast_process_opened_realization_files": False,
+            "score_eligibility": "prior_simulated_month_only",
+            "initialization_transition": "survey_seeded_initial_state_unscored",
+            "forecast_semantics": {
+                "consumption_growth_pct": "current simulated month versus immediately preceding simulated month",
+                "price_growth_pct": "current to next simulated unit-price change",
+                "revolving_credit_growth_pct": "simulated month opening to closing debt-stock change",
+                "saving_rate_pct": "simulated wage income less consumption, divided by wage income",
+                "employment_rate_change_pp": "simulated employed-household share change from prior month",
+            },
             "origin_months": origins,
             "target_months": target_months,
             "mode": args.mode,
             "provider": args.provider,
             "model": args.model,
+            "git_commit": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True
+            ).strip(),
+            "source_sha256": _source_sha256(),
             "household_count": args.household_count,
+            "accepted_household_response_count": sum(
+                int(row["accepted_household_response_count"]) for row in child_manifests
+            ),
+            "provider_response_count": sum(
+                int(row["provider_response_count"]) for row in child_manifests
+            ),
             "live_call_count": sum(int(row["live_call_count"]) for row in child_manifests),
+            "fresh_accepted_response_count": sum(
+                int(row["fresh_accepted_response_count"]) for row in child_manifests
+            ),
+            "failed_provider_attempt_count": sum(
+                int(row["failed_provider_attempt_count"]) for row in child_manifests
+            ),
             "cache_hit_count": sum(int(row["cache_hit_count"]) for row in child_manifests),
+            "codex_tool_isolation_version": child_manifests[0]["codex_tool_isolation_version"],
+            "codex_instruction_context_version": child_manifests[0][
+                "codex_instruction_context_version"
+            ],
+            "local_text_file_tools_available_to_model": (
+                False if args.mode in {"live", "replay"} else None
+            ),
             "accounting_passed": all(bool(row["accounting_passed"]) for row in child_manifests),
             "mapping_contract": METRIC_MAPPINGS,
             "inputs_sha256": {
@@ -283,13 +586,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 row["origin_month"]: _file_sha256(staging / "runs" / row["origin_month"] / "manifest.json")
                 for row in child_manifests
             },
+            "child_replay_verified_against_live_reference": {
+                row["origin_month"]: row["replay_verified"] for row in child_manifests
+            },
             "artifacts": {},
         }
         report = [
             "# Household Ecology Retrospective",
             "",
             "This diagnostic runs the current household ecology recursively over historical origin vintages. "
-            "The median simulated state is carried into the next origin; realized outcomes are loaded only after every forecast is complete.",
+            "The first transition is survey-seeded and excluded from scores; the median simulated state is then carried into each later origin. "
+            "The forecast process opens only origin and history files. Realized outcomes are loaded only after every forecast is complete.",
             "",
             "It is not confirmatory evidence. The dates are historical and the model may know them. Its purpose is to reveal sign, scale, and mapping failures before prospective outcomes arrive.",
             "",
@@ -303,7 +610,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         median_scores = scores.loc[scores["scenario"].eq("median")]
         report.extend(["", "## Median-Path Scores", "", "| Metric | MAE | RMSE | Direction |", "| --- | ---: | ---: | ---: |"])
         for row in median_scores.itertuples(index=False):
-            report.append(f"| `{row.metric}` | {row.mae:.3f} | {row.rmse:.3f} | {row.direction_accuracy:.1%} |")
+            mae = f"{row.mae:.3f}" if math.isfinite(row.mae) else "not scored"
+            rmse = f"{row.rmse:.3f}" if math.isfinite(row.rmse) else "not scored"
+            direction = (
+                f"{row.direction_accuracy:.1%} (n={row.direction_n})"
+                if math.isfinite(row.direction_accuracy)
+                else "not scored"
+            )
+            report.append(f"| `{row.metric}` | {mae} | {rmse} | {direction} |")
         report.extend(["", f"Accounting passed across all child runs: **{manifest['accounting_passed']}**."])
         (staging / "retrospective_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
         for path in sorted(staging.iterdir()):

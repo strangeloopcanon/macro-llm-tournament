@@ -143,6 +143,7 @@ class HouseholdState:
     hourly_wage_usd: float
     baseline_monthly_hours: float
     baseline_monthly_consumption_usd: float
+    employment_share: float | None = None
     layoff_threshold_pct: float = 50.0
     liquid_buffer_floor_months: float = 0.5
     subsistence_consumption_share: float = 0.45
@@ -167,6 +168,10 @@ class HouseholdState:
             self.baseline_monthly_consumption_usd,
             "baseline_monthly_consumption_usd",
         )
+        if self.employment_share is not None:
+            share = _require_finite(self.employment_share, "employment_share")
+            if share < 0.0 or share > 1.0:
+                raise ValueError("employment_share must be between 0 and 1")
         _require_probability(self.layoff_threshold_pct, "layoff_threshold_pct")
         _require_nonnegative(
             self.liquid_buffer_floor_months,
@@ -188,7 +193,7 @@ class EmployerState:
     monthly_capacity_units: float
     inventory_units: float
     price_per_unit_usd: float
-    target_headcount: int
+    target_headcount: float
     wage_offer_usd: float
     target_inventory_units: float = 0.0
     fixed_cost_usd: float = 0.0
@@ -203,8 +208,7 @@ class EmployerState:
         _require_nonnegative(self.monthly_capacity_units, "monthly_capacity_units")
         _require_nonnegative(self.inventory_units, "inventory_units")
         _require_nonnegative(self.price_per_unit_usd, "price_per_unit_usd")
-        if int(self.target_headcount) < 0:
-            raise ValueError("target_headcount must be nonnegative")
+        _require_nonnegative(self.target_headcount, "target_headcount")
         _require_nonnegative(self.wage_offer_usd, "wage_offer_usd")
         _require_nonnegative(self.target_inventory_units, "target_inventory_units")
         _require_nonnegative(self.fixed_cost_usd, "fixed_cost_usd")
@@ -286,6 +290,10 @@ class HouseholdMonthResult:
     employer_id: str
     trajectory: HouseholdTrajectory
     realized_job_loss: bool
+    employment_share_start: float
+    job_loss_share: float
+    hired_share: float
+    employment_share_end: float
     actual_hours_worked: float
     actual_job_search_hours: float
     wage_income_usd: float
@@ -318,8 +326,8 @@ class EmployerMonthResult:
     inventory_start_units: float
     inventory_end_units: float
     units_sold: float
-    employment_count: int
-    vacancies: int
+    employment_count: float
+    vacancies: float
     average_hourly_wage_usd: float
     current_price_per_unit_usd: float
     next_price_per_unit_usd: float
@@ -369,11 +377,11 @@ class MonthlyEcologyResult:
 
     @property
     def aggregate_consumption_usd(self) -> float:
-        return float(sum(row.consumption_usd for row in self.households))
+        return float(self.employer.revenue_usd)
 
     @property
     def aggregate_borrowing_usd(self) -> float:
-        return float(sum(row.borrowing_usd for row in self.households))
+        return float(self.credit.borrowing_total_usd)
 
     def max_abs_residual(self) -> float:
         return max((abs(row.residual) for row in self.accounting_residuals), default=0.0)
@@ -409,7 +417,7 @@ def household_response_schema() -> dict[str, Any]:
             "reason_codes",
         ],
         "properties": {
-            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v1"},
+            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v7"},
             "household_id": {"type": "string", "minLength": 1},
             "expected_inflation_pct": quantile_block,
             "expected_income_growth_pct": quantile_block,

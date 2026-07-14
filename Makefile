@@ -1,18 +1,19 @@
-.PHONY: all check test ecology-fixture ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize ecology-retrospective-live household-cohort vintage-bundle origin-snapshot
+.PHONY: all check test ecology-fixture ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay household-cohort vintage-bundle origin-snapshot
 
 ORIGIN ?= 2026-07-01
 AS_OF ?= 2026-07-10
 MODEL ?= gpt-5.5
+ECOLOGY_WORKERS ?= 8
+RETROSPECTIVE_WORKERS ?= 16
 ORIGIN_SNAPSHOT ?= work/ecology_origins/$(AS_OF).json
-ECOLOGY_CACHE ?= work/ecology_cache_200_july_v1
+ECOLOGY_CACHE ?= work/ecology_cache_200_july_v7
 ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv
 ECOLOGY_HISTORY ?= work/persona_beliefs/persistent_household_scale_v1/selected_observed_history.csv
 ECOLOGY_BUNDLE ?= work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
 ECOLOGY_FIXTURE_DIR := examples/ecology_fixture
-CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_replay_current
-REPLAY_REFERENCE_DIR ?= outputs/.household_ecology_replay_reference
-RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04
-RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04
+CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v7_current
+RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v7
+RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v7
 
 all: check test
 
@@ -36,7 +37,7 @@ ecology-fixture:
 		--households $(ECOLOGY_FIXTURE_DIR)/households.csv \
 		--history $(ECOLOGY_FIXTURE_DIR)/history.csv \
 		--bundle $(ECOLOGY_FIXTURE_DIR)/origin_snapshot.json \
-		--workers 4 \
+		--workers $(ECOLOGY_WORKERS) \
 		--max-live-calls 0 \
 		--output-dir outputs/household_ecology_fixture_v1
 
@@ -52,7 +53,7 @@ ecology-live-canary:
 		--households $(ECOLOGY_HOUSEHOLDS) \
 		--history $(ECOLOGY_HISTORY) \
 		--bundle $(ECOLOGY_BUNDLE) \
-		--workers 4 \
+		--workers $(ECOLOGY_WORKERS) \
 		--max-live-calls 14 \
 		--output-dir outputs/household_ecology_canary_v1
 
@@ -68,13 +69,13 @@ ecology-live-200:
 		--provider codex_cli \
 		--model $(MODEL) \
 		--household-count 200 \
-		--workers 4 \
-		--max-live-calls 210 \
+		--workers $(ECOLOGY_WORKERS) \
+		--max-live-calls 230 \
 		--cache-dir $(ECOLOGY_CACHE) \
 		--output-dir $(CURRENT_RUN_DIR)
 
 ecology-current-replay:
-	rm -rf $(CURRENT_RUN_DIR) $(REPLAY_REFERENCE_DIR)
+	rm -rf $(CURRENT_RUN_DIR)
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
 		--origin $(ORIGIN) \
 		--bundle $(ORIGIN_SNAPSHOT) \
@@ -86,24 +87,8 @@ ecology-current-replay:
 		--household-count 200 \
 		--workers 4 \
 		--max-live-calls 0 \
-		--cache-dir $(ECOLOGY_CACHE) \
-		--output-dir $(REPLAY_REFERENCE_DIR)
-	@expected=$$(python3 -c 'import json; print(json.load(open("$(REPLAY_REFERENCE_DIR)/manifest.json"))["replay_equivalence_sha256"])'); \
-	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
-		--origin $(ORIGIN) \
-		--bundle $(ORIGIN_SNAPSHOT) \
-		--households $(ECOLOGY_HOUSEHOLDS) \
-		--history $(ECOLOGY_HISTORY) \
-		--mode replay \
-		--provider codex_cli \
-		--model $(MODEL) \
-		--household-count 200 \
-		--workers 4 \
-		--max-live-calls 0 \
-		--expected-replay-sha256 $$expected \
 		--cache-dir $(ECOLOGY_CACHE) \
 		--output-dir $(CURRENT_RUN_DIR)
-	rm -rf $(REPLAY_REFERENCE_DIR)
 
 ecology-realize:
 	@test -n "$(REALIZATIONS_CSV)" || (echo "REALIZATIONS_CSV is required" >&2; exit 2)
@@ -117,16 +102,35 @@ ecology-retrospective-live:
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_retrospective \
 		--origins 2026-01-01:2026-04-01 \
 		--bundle work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
-		--targets work/dynamic_macro/frozen_2026_01_2026_06_v1/targets.csv \
+		--targets work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1/targets.csv \
 		--households $(ECOLOGY_HOUSEHOLDS) \
 		--history $(ECOLOGY_HISTORY) \
 		--mode live \
 		--provider codex_cli \
 		--model $(MODEL) \
 		--household-count 200 \
-		--workers 8 \
-		--max-live-calls 840 \
+		--workers $(RETROSPECTIVE_WORKERS) \
+		--max-live-calls 920 \
 		--cache-dir $(RETROSPECTIVE_CACHE) \
+		--prospective-run $(CURRENT_RUN_DIR) \
+		--output-dir $(RETROSPECTIVE_DIR)
+
+ecology-retrospective-replay:
+	rm -rf $(RETROSPECTIVE_DIR)
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_retrospective \
+		--origins 2026-01-01:2026-04-01 \
+		--bundle work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1 \
+		--targets work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1/targets.csv \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--history $(ECOLOGY_HISTORY) \
+		--mode replay \
+		--provider codex_cli \
+		--model $(MODEL) \
+		--household-count 200 \
+		--workers $(RETROSPECTIVE_WORKERS) \
+		--max-live-calls 0 \
+		--cache-dir $(RETROSPECTIVE_CACHE) \
+		--prospective-run $(CURRENT_RUN_DIR) \
 		--output-dir $(RETROSPECTIVE_DIR)
 
 household-cohort:

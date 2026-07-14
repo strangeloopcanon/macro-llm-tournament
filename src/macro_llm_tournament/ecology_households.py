@@ -6,22 +6,29 @@ import hashlib
 import json
 import math
 import threading
+import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .ecology_provider import CodexJSONClient
+from .ecology_provider import (
+    CODEX_INSTRUCTION_CONTEXT_VERSION,
+    CODEX_TOOL_ISOLATION_VERSION,
+    CodexJSONClient,
+)
 from .ecology_models import HouseholdResponse, QuantileTriplet
 
 
-HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v1"
+HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v7"
 
 
 class LiveCallBudget:
     def __init__(self, maximum: int, journal_dir: Path | None = None) -> None:
         self.maximum = max(0, int(maximum))
         self.used = 0
+        self.accepted = 0
+        self.failed = 0
         self._lock = threading.Lock()
         self.journal_dir = journal_dir
         self._attempts: dict[str, Path] = {}
@@ -33,7 +40,9 @@ class LiveCallBudget:
             self.used += 1
             if self.journal_dir is not None:
                 self.journal_dir.mkdir(parents=True, exist_ok=True)
-                path = self.journal_dir / f"attempt_{self.used:04d}.json"
+                path = self.journal_dir / (
+                    f"attempt_{self.used:04d}_{cache_name[:12]}_{uuid.uuid4().hex}.json"
+                )
                 payload = {
                     "attempt_number": self.used,
                     "cache_name": cache_name,
@@ -53,6 +62,10 @@ class LiveCallBudget:
                 return
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["status"] = "accepted" if error is None else "failed"
+            if error is None:
+                self.accepted += 1
+            else:
+                self.failed += 1
             payload["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
             payload["response_sha256"] = canonical_sha256(response) if response is not None else None
             payload["error_sha256"] = hashlib.sha256(error.encode()).hexdigest() if error is not None else None
@@ -94,6 +107,42 @@ def household_card(
     }
     if origin.get("prior_simulated_state"):
         public["prior_simulated_state"] = origin["prior_simulated_state"]
+    recursive = "baseline_monthly_consumption_usd" in state
+    state_provenance = str(
+        state.get(
+            "state_provenance",
+            "prior_simulated_month" if recursive else "survey_seeded_initial_state",
+        )
+    )
+    if state_provenance not in {"survey_seeded_initial_state", "prior_simulated_month"}:
+        raise ValueError(f"unsupported household state provenance: {state_provenance}")
+    monthly_consumption = (
+        state.get("baseline_monthly_consumption_usd")
+        if recursive
+        else state.get(
+            "monthly_consumption",
+            float(state.get("baseline_consumption_annual", 0.0)) / 12.0,
+        )
+    )
+    hours_worked = (
+        state.get("baseline_monthly_hours")
+        if recursive
+        else state.get("hours_worked", 160.0)
+    )
+    employed = (
+        float(hours_worked or 0.0) > 0.0
+        if recursive
+        else state.get(
+            "employed",
+            str(state.get("employment_status", "unknown")).lower()
+            not in {"unemployed", "not_employed"},
+        )
+    )
+    annualized_wage_income = (
+        float(state.get("hourly_wage_usd") or 0.0) * float(hours_worked or 0.0) * 12.0
+        if recursive
+        else state.get("annual_income", 0.0)
+    )
     private = {
         "household_id": household_id,
         "profile": {
@@ -106,20 +155,22 @@ def household_card(
             )
         },
         "current_state": {
-            "annual_income": state.get("annual_income", 0.0),
-            "monthly_consumption": state.get(
-                "monthly_consumption",
-                float(state.get("baseline_consumption_annual", 0.0)) / 12.0,
-            ),
+            "provenance": state_provenance,
+            "annualized_wage_income": annualized_wage_income,
+            "monthly_consumption": monthly_consumption,
             "liquid_assets": state.get("deposit_balance_usd", state.get("liquid_assets", 0.0)),
             "revolving_debt": state.get(
                 "revolving_debt_usd", state.get("revolving_debt", state.get("debt", 0.0))
             ),
-            "credit_limit": state.get("credit_limit"),
-            "hours_worked": state.get("hours_worked", 160.0),
-            "employed": state.get(
-                "employed",
-                str(state.get("employment_status", "unknown")).lower() not in {"unemployed", "not_employed"},
+            "credit_limit": state.get(
+                "revolving_credit_limit_usd", state.get("credit_limit")
+            ),
+            "hourly_wage": state.get("hourly_wage_usd"),
+            "hours_worked": hours_worked,
+            "employed": employed,
+            "employment_share": state.get(
+                "employment_share",
+                1.0 if employed else 0.0,
             ),
         },
         "previous_beliefs": {
@@ -149,6 +200,26 @@ household's own state/history and the dated public information below. Do not
 invent a biography. Report intended choices, not socially desirable choices.
 You do not directly execute transactions; deterministic accounting code will
 enforce budgets and credit limits.
+
+The inflation and income-growth fields are expected percentage changes over
+the next 12 months. Job-loss probability is the chance of losing the current
+job within the next 12 months. Planned consumption change is next month's
+nominal-dollar consumption relative to current_state.monthly_consumption.
+Work and job-search hours are totals for next month. current_state.provenance
+states whether the engine state is survey-seeded at the first origin or inherited
+from the immediately preceding simulated month.
+current_state.annualized_wage_income is current hourly wage times current
+monthly hours times 12; it is not a separate survey-income measure.
+
+For every p10/p50/p90 block, return finite numbers satisfying p10 <= p50 <=
+p90. Inflation must be within [-25, 40], income growth within [-50, 50], job
+loss probability within [0, 100], consumption change within [-100, 200], work
+hours within [0, 320], and job-search hours within [0, 200]. Planned work hours
+are hours conditional on being employed next month; if currently unemployed,
+report hours conditional on finding work. The deterministic labor market uses
+the job-loss probability and employment_share to determine the expected employed
+share, then applies these conditional hours. Buffer months and all dollar
+intentions must be nonnegative.
 
 INPUT
 {json.dumps(card, indent=2, sort_keys=True)}
@@ -275,7 +346,7 @@ class HouseholdElicitor:
             model=self.model,
             cache_dir=self.cache_dir,
             mode=self.mode,
-            max_live_calls=1 if self.call_budget is not None else self.max_live_calls,
+            max_live_calls=2 if self.call_budget is not None else self.max_live_calls,
             execution_cwd=self.execution_cwd,
         )
 
@@ -286,18 +357,27 @@ class HouseholdElicitor:
         prompt, instructions, cache_name = household_request_identity(
             self.provider, self.model, card
         )
-        cache_miss = not self.client.cache_path(cache_name).exists()
-        if cache_miss and self.mode == "live" and self.call_budget is not None:
-            self.call_budget.reserve(cache_name)
-        try:
-            result = self.client.json_call(prompt, cache_name, instructions=instructions)
-        except Exception as exc:
-            if cache_miss and self.call_budget is not None:
-                self.call_budget.complete(cache_name, error=f"{type(exc).__name__}: {exc}")
-            raise
-        if cache_miss and self.call_budget is not None:
-            self.call_budget.complete(cache_name, response=result.get("payload"))
-        return result
+        cache_path = self.client.cache_path(cache_name)
+        for attempt in range(2):
+            cache_miss = not cache_path.exists()
+            reserved = cache_miss and self.mode == "live" and self.call_budget is not None
+            if reserved:
+                self.call_budget.reserve(cache_name)
+            try:
+                result = self.client.json_call(prompt, cache_name, instructions=instructions)
+                normalize_household_payload(result["payload"], str(card["household"]["household_id"]))
+            except Exception as exc:
+                if self.mode == "live":
+                    cache_path.unlink(missing_ok=True)
+                if reserved and self.call_budget is not None:
+                    self.call_budget.complete(cache_name, error=f"{type(exc).__name__}: {exc}")
+                if attempt == 0 and self.mode == "live":
+                    continue
+                raise
+            if reserved and self.call_budget is not None:
+                self.call_budget.complete(cache_name, response=result.get("payload"))
+            return result
+        raise AssertionError("unreachable household elicitation retry state")
 
     @property
     def live_call_count(self) -> int:
@@ -306,6 +386,10 @@ class HouseholdElicitor:
     @property
     def cache_hit_count(self) -> int:
         return self.client.cache_hit_count if self.client is not None else 0
+
+    @property
+    def tool_isolation_version(self) -> str | None:
+        return CODEX_TOOL_ISOLATION_VERSION if self.client is not None else None
 
 
 def household_request_identity(
@@ -322,6 +406,8 @@ def household_request_identity(
             "model": model,
             "prompt": prompt,
             "instructions": instructions,
+            "tool_isolation_version": CODEX_TOOL_ISOLATION_VERSION,
+            "instruction_context_version": CODEX_INSTRUCTION_CONTEXT_VERSION,
         }
     )
     return prompt, instructions, cache_name
