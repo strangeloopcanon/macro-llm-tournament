@@ -1,73 +1,82 @@
-# LLM Household Economy
+# Macro LLM Tournament
 
-This project builds a macro economy from 200 persistent, anonymized households.
-Real New York Fed Survey of Consumer Expectations histories supply individual
-belief priors. Public 2022 SCF records supply matched family income, liquidity,
-spending, and debt states. GPT-5.5 then writes each household's next-month
-beliefs and conditional dollar policy.
+This repository now contains a runnable 200-household LLM economy. Real SCE
+histories supply household priors, matched SCF records supply continuous financial
+states, GPT-5.5 supplies household beliefs and conditional dollar policies, and
+ordinary code enforces budgets and settlement. A small producer then turns demand
+into output, inventory, aggregate employment, wages, and family income before the
+same households decide again.
 
-The result is an **LLM household economy**. Code enforces budgets, credit limits,
-goods-market settlement, and stock-flow accounting; it does not invent another
-representative household or overwrite the LLM choices.
+The latest result is an improvement, not a finished forecast. On four historical
+monthly origins, the LLM household economy gets all four consumption directions
+right and lowers RMSE from `0.701` to `0.508` percentage points. It still
+underpredicts every increase, and a simple origin-visible spending drift remains
+better at `0.243` points.
+
+## Active Economy
 
 ```text
-200 SCE histories + matched SCF financial states + as-of public information
-                                  |
-                     one isolated GPT-5.5 call each
-                                  |
-         household beliefs + employed/not-employed dollar policies
-                                  |
-           code-enforced budgets, credit, production, settlement
-                                  |
-                  population-weighted household demand
-                                  |
-       output + inventory -> employment + wages -> family income
-                                  |
-            same LLM households decide again in period two
+200 anonymized SCE histories + matched SCF financial states
+                              +
+                 public information known at the origin
+                              |
+                              v
+                one isolated GPT-5.5 call per household
+                              |
+                              v
+       beliefs + employed/not-employed policies in nominal dollars
+                              |
+                              v
+          code-enforced household budgets, credit, and settlement
+                              |
+                              v
+                    population-weighted demand
+                              |
+                              v
+     producer output + inventory -> employment + wages -> family income
+                              |
+                              v
+               fresh period-two household decisions
 ```
 
-The producer loop is intentionally small and mechanical. Period-one demand sets
-expected sales; the producer closes 35% of its inventory gap, 25% of its labor
-gap, and 10% of the resulting employment-rate change into wages, capped at 2%
-per month. There are no LLM firms or banks.
+The producer is deliberately mechanical. Prior demand sets expected sales; it
+closes 35% of the inventory gap, 25% of the aggregate labor gap, and 10% of the
+employment-rate change into wages, capped at 2% per month. There are no LLM firms
+or banks.
 
-## Current Result
+## Latest Diagnostic
 
-The economy runs, closes its accounts, carries household stocks forward, changes
-producer employment and wages, and elicits a fresh second decision from every
-household. That is a genuine two-period dynamic economy.
-
-It does not yet forecast macro consumption well. On four retrospective monthly
-origins, it ranks stronger and weaker months reasonably well (`r = 0.81`) but
-keeps consumption growth near zero. RMSE is **0.70 percentage points**, sign
-accuracy is **1 of 4**, and an origin-visible nominal-spending drift remains much
-better at **0.24 points**.
-
-| Origin | Target | LLM household economy | First-release PCE | Routine drift |
+| Origin | Target | LLM household economy | First-release PCE | Origin-visible drift |
 | --- | --- | ---: | ---: | ---: |
-| Jan 2026 | Feb 2026 | -0.24% | +0.48% | +0.37% |
-| Feb 2026 | Mar 2026 | +0.11% | +0.90% | +0.51% |
-| Mar 2026 | Apr 2026 | -0.02% | +0.51% | +0.38% |
-| Apr 2026 | May 2026 | -0.02% | +0.71% | +0.48% |
+| Jan 2026 | Feb 2026 | +0.15% | +0.48% | +0.37% |
+| Feb 2026 | Mar 2026 | +0.26% | +0.90% | +0.51% |
+| Mar 2026 | Apr 2026 | +0.11% | +0.51% | +0.38% |
+| Apr 2026 | May 2026 | +0.12% | +0.71% | +0.48% |
 
-The frozen July-to-August forecast is **+0.03%**. August outcomes were unavailable
-and excluded. The first recursive period then moves producer employment to
-`1.00015`, wages to `1.00001`, and household consumption by **-0.06%** relative
-to period one. This recursive result is an unscored mechanism experiment.
+- Consumption direction: **4/4**.
+- Consumption RMSE: **0.508 pp**.
+- Consumption correlation: **0.759**.
+- Origin-visible drift RMSE: **0.243 pp**.
+- Revolving-credit direction: **1/4**.
 
-## Deposit Correction
+The frozen July-to-August forecast is **+0.19%**. August remains unscored. In the
+unscored second period, settled aggregate employment rises `0.0013%`, the average
+wage rises `0.00013%`, and fresh household spending rises **0.23%** from period
+one. This proves the recursive mechanism executes; it is not a September forecast
+or a causal estimate of the firm-feedback effect.
 
-Earlier prompts asked the LLM for consumption, debt, borrowing, and a separate
-deposit contribution. That overdetermined the household budget. Deposits are now
-the cash residual after income, fixed outflows, spending, debt service, and
-borrowing.
+## Household Saving
 
-The SCF income anchor is gross while its spending proxy omits taxes and some
-recurring obligations. The state therefore records a declared fixed-outflow
-calibration: at least 10% of gross family income, or more when the household's
-existing saving-rate field requires it. This lowers the aggregate gross-income
-cash residual from roughly 17% to about **7%**. It is an internal budget measure,
-not the national personal saving rate.
+The LLM no longer chooses deposits separately. Deposits are the cash residual
+after income, spending, debt service, borrowing, and fixed outflows.
+
+The current state also stops routing every dollar of household saving into liquid
+deposits. Each household has a total-saving target from its existing saving-rate
+field. Code uses deposits and the household's buffer target to close any liquid
+shortfall gradually over twelve months; the rest is recorded with taxes, recurring
+obligations, and non-deposit saving. Households whose matched expenditure exceeds
+income retain an explicit cash deficit. In the 200-household cohort, 49.5% of
+population weight has no baseline liquid-saving target.
 
 ## Run It
 
@@ -77,39 +86,37 @@ make ecology-current-replay
 make ecology-retrospective-replay
 make ecology-feedback-replay
 make ecology-observability
+make check
+make test
 ```
 
-Fresh calls use Codex CLI only. `make ecology-live-200` elicits the first period;
-`make ecology-feedback-live` elicits the second. Every call runs in a fresh empty
-directory without shell, local-file, web, browser, app, memory, plugin, or
-subagent access.
+Fresh model calls use Codex CLI only:
 
-Every run emits prompt cards, accepted responses, household decisions, firm and
-credit ledgers, accounting audits, source hashes, event hashes, and a manifest.
-The feedback run additionally emits household and firm state transitions plus a
-two-period macro path.
+```bash
+make ecology-live-200
+make ecology-retrospective-live
+make ecology-feedback-live
+```
+
+Every model call runs in an empty directory without local-file, shell, web,
+browser, app, memory, plugin, or subagent access. Replays bind the prompt, cards,
+accepted payloads, consumed parent artifacts, input files, source revision, and
+economic result.
 
 ## Evidence Boundary
 
 - January-April 2026 is retrospective development evidence and may be in model
   knowledge.
 - The July 2026 origin is frozen for August and remains unscored.
-- The recursive second period is a mechanism test, not a forecast score.
-- Financial states are SCE-conditioned public SCF matches, not linked household
-  accounts.
-- The current bottleneck is behavioral amplitude. Better budget accounting and a
-  real feedback loop do not make the households respond strongly enough to
-  ordinary nominal growth.
+- Household budgets, goods inventory, bank stocks, and named counterparty flows
+  reconcile. A firm balance sheet and full external-sector stocks are not modeled.
+- The historical firm shadow and the recursive producer loop are distinct,
+  separately named mechanisms.
+- The remaining macro problem is amplitude: households move in the right direction
+  but not far enough.
 
-See [CURRENT.md](CURRENT.md) for the milestone,
+See [CURRENT.md](CURRENT.md) for the current milestone,
 [reports/current_ecology_report.md](reports/current_ecology_report.md) for the
-sendable result, and [research_history.md](research_history.md) for the experiment
-trail.
-
-```bash
-make check
-make test
-```
-
-The previous weighted-demand economy is recoverable at Git tag
+sendable result, and [research_history.md](research_history.md) for the full
+experiment trail. The previous weighted-demand economy is recoverable at Git tag
 `macro-v1-weighted-demand`.

@@ -119,10 +119,43 @@ positive first-release PCE growth in every month. RMSE rose to 0.70 points and s
 accuracy fell to 1/4, although correlation improved to 0.81. The model ranks the
 months better while remaining too compressed around zero.
 
-Finally, the producer shadow became a genuine two-period loop without adding an LLM
-firm. Prior demand changes output, inventory, aggregate producer employment, wages,
-and family wage income. Deposits and debt carry forward, and all 200 households make
-fresh period-two choices from the simulated state. In the first unscored run,
-employment rose 0.015%, wages rose 0.0015%, and period-two consumption fell 0.06% as
-inventories accumulated. The loop works and accounts balance; weak household demand
-remains the binding failure.
+Finally, the producer shadow was wired into a two-period runner without adding an
+LLM firm. Prior demand changed planned output, inventory, an aggregate employment
+index, wages, and family wage income before all 200 households made fresh choices.
+The first unscored trace reported employment up 0.015%, wages up 0.0015%, and
+period-two consumption down 0.06%.
+
+A major-change integrity review then found that v21's aggregate headcount remained a
+planning target while settlement still reported unchanged realized employment. It
+also found that the 10% fixed-outflow floor overrode most household saving-rate
+contracts, that feedback parent artifacts were not all hash-checked, and that the
+observability report still described the older non-recursive shadow. Those findings
+make v21 a useful development record, not the current result.
+
+## V22 Natural Budgets And Realized Producer Feedback
+
+V22 replaced the outflow floor with an explicit saving allocation. The household's
+existing saving rate supplies a total-saving target, capped by cash capacity. Liquid
+deposits close any buffer gap over twelve months; taxes, recurring obligations, and
+remaining saving sit outside deposits. Matched households whose expenditure exceeds
+income retain an explicit deficit. The 200-household baseline identity reconciles to
+floating-point tolerance. Half the weighted cohort has no liquid-saving target.
+
+The household prompt was rerun through Codex CLI for 200 prospective and 800
+historical household-origin pairs. The historical consumption forecasts became
++0.15%, +0.26%, +0.11%, and +0.12%. Direction improved from 1/4 to 4/4 and RMSE
+fell from 0.701 to 0.508 percentage points. The simple origin-visible drift still
+wins at 0.243 points, and revolving-credit direction remains 1/4. The architecture
+now gets the sign right but still compresses the amplitude.
+
+The producer runner now realizes aggregate employment in settlement and derives its
+average wage from the family wage bill per producer worker. The period-two parent
+binding covers replay equivalence, every consumed parent artifact, and both source
+input files. An explicit feedback input fails closed when its schema, accounting,
+replay, household count, parent binding, or dynamic artifact is wrong. The historical
+firm shadow and recursive mechanism use distinct metrics.
+
+In the corrected unscored trace, settled employment rises 0.0013%, the average wage
+rises 0.00013%, and fresh period-two consumption rises 0.23%. That establishes a
+working two-period state transition. It is not a causal feedback estimate because no
+matched no-feedback household-call arm was run.
