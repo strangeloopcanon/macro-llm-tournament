@@ -18,6 +18,7 @@ from .ecology import (
     PROJECT_ROOT,
     _artifact_sha256,
     _file_sha256,
+    _git_state,
     _initial_credit,
     _jsonable,
     _source_sha256,
@@ -288,17 +289,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     )
     reference = args.cache_dir / "feedback_live_references" / f"{request_sha}.json"
+    reference_payload = {
+        "request_sha256": request_sha,
+        "replay_equivalence_sha256": replay_sha,
+    }
+    reference_payload["reference_sha256"] = canonical_sha256(reference_payload)
     if args.mode == "live":
         reference.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"request_sha256": request_sha, "replay_equivalence_sha256": replay_sha}
-        if reference.exists() and json.loads(reference.read_text(encoding="utf-8")) != payload:
+        if reference.exists() and json.loads(reference.read_text(encoding="utf-8")) != reference_payload:
             raise ValueError("feedback live reference already exists with a different result")
-        _write_json(reference, payload)
+        _write_json(reference, reference_payload)
     else:
         if not reference.exists():
             raise ValueError("feedback replay requires an immutable live reference")
         expected = json.loads(reference.read_text(encoding="utf-8"))
-        if expected != {"request_sha256": request_sha, "replay_equivalence_sha256": replay_sha}:
+        if expected != reference_payload:
             raise ValueError("feedback replay equivalence mismatch")
 
     _write_json(staging / "period_2_household_cards.json", cards)
@@ -346,6 +351,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         paths["consumption_usd"] / max(period_1_consumption, 1.0) - 1.0
     )
     paths.to_csv(staging / "dynamic_macro_paths.csv", index=False)
+    period_2_target_month = (
+        pd.Timestamp(period_1_manifest["target_month"]) + pd.DateOffset(months=1)
+    ).strftime("%Y-%m-%d")
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "evaluation_status": "unscored_two_period_mechanism_experiment",
@@ -354,7 +362,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "period_1_run": str(args.period_1_run.resolve()),
         "period_1_manifest_sha256": _file_sha256(args.period_1_run / "manifest.json"),
+        "origin_month": period_1_manifest["origin_month"],
+        "period_2_target_month": period_2_target_month,
         "household_count": len(period_2_states),
+        "accepted_household_response_count": len(records),
         "live_call_count": budget.used,
         "cache_hit_count": sum(bool(row.get("cache_hit")) for row in records),
         "failed_provider_attempt_count": budget.failed,
@@ -372,9 +383,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "respondent_employment_status_changed": False,
         "target_values_loaded_into_prompts": False,
         "period_2_output_planned_from_period_1_demand": True,
+        "period_2_public_information_policy": (
+            "reuse origin-safe public information; add simulated producer state only; "
+            "no future observations"
+        ),
+        "period_2_status_quo_policy": (
+            "period-1 settled household consumption with the origin-visible routine "
+            "drift continuation"
+        ),
         "request_sha256": request_sha,
         "replay_equivalence_sha256": replay_sha,
+        "replay_verified": args.mode == "replay",
+        "live_reference_sha256": reference_payload["reference_sha256"],
         "source_sha256": _source_sha256(),
+        **_git_state(),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "artifacts": {},
     }
