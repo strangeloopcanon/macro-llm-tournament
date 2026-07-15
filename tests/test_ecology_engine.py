@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 from macro_llm_tournament.ecology_engine import (
-    annual_probability_to_monthly,
     build_household_trajectory,
     run_monthly_ecology,
 )
@@ -27,22 +26,25 @@ def _response(
     consumption: tuple[float, float, float] = (-12.0, 2.0, 10.0),
     work_hours: tuple[float, float, float] = (120.0, 150.0, 170.0),
     search_hours: tuple[float, float, float] = (2.0, 5.0, 12.0),
-    target_buffer_months: float = 1.8,
-    buffer_contribution_intent_usd: float = 150.0,
     debt_payment_intent_usd: float = 50.0,
     borrowing_intent_usd: float = 0.0,
 ) -> HouseholdResponse:
+    discretionary_change_usd = 10.0 * consumption[1]
+    policy = HouseholdPolicyBranch(
+        committed_consumption_change_usd=0.0,
+        discretionary_consumption_change_usd=discretionary_change_usd,
+        one_off_purchase_usd=0.0,
+        extra_debt_payment_usd=debt_payment_intent_usd,
+        borrowing_intent_usd=borrowing_intent_usd,
+    )
     return HouseholdResponse(
         expected_inflation_pct=QuantileTriplet(*inflation),
         expected_income_growth_pct=QuantileTriplet(*income),
         job_loss_probability_pct=QuantileTriplet(*job_loss),
-        planned_consumption_change_pct=QuantileTriplet(*consumption),
         planned_work_hours=QuantileTriplet(*work_hours),
         planned_job_search_hours=QuantileTriplet(*search_hours),
-        target_buffer_months=target_buffer_months,
-        buffer_contribution_intent_usd=buffer_contribution_intent_usd,
-        debt_payment_intent_usd=debt_payment_intent_usd,
-        borrowing_intent_usd=borrowing_intent_usd,
+        employed_policy=policy,
+        not_employed_policy=policy,
     )
 
 
@@ -102,19 +104,14 @@ class EcologyEngineTests(unittest.TestCase):
                 expected_inflation_pct=QuantileTriplet(2.0, 3.0, 4.0),
                 expected_income_growth_pct=QuantileTriplet(-1.0, 1.0, 3.0),
                 job_loss_probability_pct=QuantileTriplet(job_loss, job_loss, job_loss),
-                planned_consumption_change_pct=None,
                 planned_work_hours=QuantileTriplet(
                     80.0 if job_loss else 200.0,
                     80.0 if job_loss else 200.0,
                     80.0 if job_loss else 200.0,
                 ),
                 planned_job_search_hours=QuantileTriplet(0.0, 0.0, 0.0),
-                target_buffer_months=0.0,
-                buffer_contribution_intent_usd=0.0,
-                debt_payment_intent_usd=0.0,
-                borrowing_intent_usd=0.0,
-                employed_policy=HouseholdPolicyBranch(450.0, 550.0, 0.0, 0.0),
-                not_employed_policy=HouseholdPolicyBranch(250.0, 250.0, 0.0, 0.0),
+                employed_policy=HouseholdPolicyBranch(0.0, 0.0, 0.0, 0.0, 0.0),
+                not_employed_policy=HouseholdPolicyBranch(-400.0, -100.0, 0.0, 0.0, 0.0),
             )
 
         employer = EmployerState(
@@ -161,11 +158,11 @@ class EcologyEngineTests(unittest.TestCase):
         schema = household_response_schema()
         self.assertEqual(
             schema["schema_version"],
-            "household_conditional_nominal_policy_v6",
+            "household_conditional_nominal_policy_v7",
         )
         self.assertEqual(
             schema["properties"]["prompt_version"]["const"],
-            "household_ecology_monthly_v17",
+            "household_ecology_monthly_v23",
         )
         self.assertIn("expected_inflation_pct", schema["required"])
         self.assertIn("not_employed_policy", schema["required"])
@@ -229,8 +226,6 @@ class EcologyEngineTests(unittest.TestCase):
                 consumption=(-35.0, -10.0, 4.0),
                 work_hours=(0.0, 40.0, 120.0),
                 search_hours=(10.0, 24.0, 40.0),
-                target_buffer_months=0.8,
-                buffer_contribution_intent_usd=10.0,
                 debt_payment_intent_usd=10.0,
                 borrowing_intent_usd=260.0,
             ),
@@ -260,7 +255,7 @@ class EcologyEngineTests(unittest.TestCase):
 
         result = run_monthly_ecology(households, responses, employer, credit)
 
-        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v6")
+        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v7")
         self.assertEqual(len(result.households), 2)
         self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
         self.assertLess(result.credit.rationing_ratio, 1.0)
@@ -278,8 +273,8 @@ class EcologyEngineTests(unittest.TestCase):
         h2 = next(row for row in result.households if row.household_id == "h2")
         self.assertTrue(h1.realized_job_loss)
         self.assertTrue(h2.realized_job_loss)
-        self.assertAlmostEqual(h1.job_loss_share, annual_probability_to_monthly(18.0))
-        self.assertAlmostEqual(h2.job_loss_share, annual_probability_to_monthly(55.0))
+        self.assertAlmostEqual(h1.job_loss_share, 0.18)
+        self.assertAlmostEqual(h2.job_loss_share, 0.55)
         self.assertAlmostEqual(h2.actual_hours_worked, 40.0)
         self.assertGreaterEqual(h2.actual_job_search_hours, 12.0)
         self.assertGreater(h2.borrowing_requested_usd, h2.borrowing_usd)
@@ -346,6 +341,38 @@ class EcologyEngineTests(unittest.TestCase):
         self.assertGreaterEqual(result.employer.units_sold, 0.0)
         self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
 
+    def test_unfunded_fixed_outflows_fail_before_negative_debt_payment(self) -> None:
+        household = HouseholdState(
+            household_id="h1",
+            employer_id="firm",
+            deposit_balance_usd=0.0,
+            revolving_debt_usd=500.0,
+            revolving_credit_limit_usd=500.0,
+            hourly_wage_usd=0.0,
+            baseline_monthly_hours=0.0,
+            baseline_monthly_consumption_usd=100.0,
+            monthly_omitted_fixed_outflow_usd=1_000.0,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot fund fixed outflows"):
+            run_monthly_ecology(
+                [household],
+                {"h1": _response()},
+                EmployerState(
+                    employer_id="firm",
+                    productivity_per_hour=1.0,
+                    monthly_capacity_units=1_000.0,
+                    inventory_units=500.0,
+                    price_per_unit_usd=1.0,
+                    target_headcount=0.0,
+                    wage_offer_usd=0.0,
+                ),
+                CreditIntermediaryState(
+                    intermediary_id="bank",
+                    annual_interest_rate_pct=20.0,
+                    minimum_payment_rate_pct=4.0,
+                    new_lending_budget_usd=0.0,
+                ),
+            )
     def test_vacancy_and_job_search_can_move_an_unemployed_household_into_work(self) -> None:
         household = HouseholdState(
             household_id="h1",
@@ -415,8 +442,6 @@ class EcologyEngineTests(unittest.TestCase):
                 job_loss=(0.0, 0.0, 0.0),
                 consumption=(0.0, 0.0, 0.0),
                 work_hours=(160.0, 160.0, 160.0),
-                target_buffer_months=0.0,
-                buffer_contribution_intent_usd=0.0,
             )
             for row in households
         }
@@ -522,10 +547,7 @@ class EcologyEngineTests(unittest.TestCase):
                     credit,
                 )
             )
-        expected_share_difference = (
-            (1.0 - 0.499) ** (1.0 / 12.0)
-            - (1.0 - 0.5) ** (1.0 / 12.0)
-        )
+        expected_share_difference = 0.001
         self.assertAlmostEqual(
             results[0].households[0].employment_share_end
             - results[1].households[0].employment_share_end,
@@ -552,7 +574,6 @@ class EcologyEngineTests(unittest.TestCase):
             consumption=(-5.0, 0.0, 5.0),
             work_hours=(150.0, 160.0, 170.0),
             debt_payment_intent_usd=2_500.0,
-            buffer_contribution_intent_usd=500.0,
         )
         result = run_monthly_ecology(
             [household],
@@ -575,7 +596,11 @@ class EcologyEngineTests(unittest.TestCase):
         row = result.households[0]
         self.assertAlmostEqual(row.consumption_usd, row.desired_consumption_usd)
         self.assertGreaterEqual(row.debt_payment_usd, row.minimum_payment_due_usd)
-        self.assertLess(row.debt_payment_usd, response.debt_payment_intent_usd)
+        self.assertLessEqual(
+            row.debt_payment_usd,
+            row.minimum_payment_due_usd
+            + response.employed_policy.extra_debt_payment_usd,
+        )
 
 
 if __name__ == "__main__":

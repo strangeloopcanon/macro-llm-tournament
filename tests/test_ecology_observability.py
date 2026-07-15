@@ -87,8 +87,9 @@ class EcologyObservabilityTests(unittest.TestCase):
                         "expected_income_growth_pct": {"p50": 1.0},
                         "job_loss_probability_pct": {"p50": 3.0},
                         "employed_policy": {
-                            "next_month_committed_consumption_nominal_usd": 700.0,
-                            "next_month_discretionary_consumption_nominal_usd": 200.0,
+                            "committed_consumption_change_usd": 50.0,
+                            "discretionary_consumption_change_usd": -25.0,
+                            "one_off_purchase_usd": 10.0,
                             "extra_debt_payment_usd": 50.0,
                             "borrowing_intent_usd": 25.0,
                         },

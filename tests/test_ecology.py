@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -35,6 +36,7 @@ from macro_llm_tournament.ecology_households import (
 from macro_llm_tournament.ecology_models import (
     CreditIntermediaryState,
     EmployerState,
+    HouseholdPolicyBranch,
     HouseholdResponse,
     QuantileTriplet,
     household_response_schema,
@@ -170,6 +172,66 @@ class HouseholdEcologyTests(unittest.TestCase):
         self.assertEqual(current["annualized_wage_income"], 0.0)
         self.assertEqual(current["provenance"], "fixed_survey_scf_anchor")
 
+    def test_card_uses_latest_available_observed_prior_without_spending_anchor(self) -> None:
+        card = household_card(
+            {
+                "type_id": "h1",
+                "employment_status": "employed",
+                "annual_income": 60_000,
+                "baseline_consumption_annual": 42_000,
+                "inflation_expectation_1y": 9.0,
+                "personal_job_loss_probability_1y": 7.0,
+            },
+            origin={
+                "origin_month": "2026-04-01",
+                "as_of_date": "2026-04-15",
+                "routine_nominal_spending_drift_pct": 0.7,
+                "origin_visible_macro_context": {},
+                "origin_visible_macro_history": {},
+            },
+            own_history=[
+                {
+                    "event_date": "2025-04-01",
+                    "public_availability_date": "2026-01-01",
+                    "observation_status": "observed",
+                    "responded": True,
+                    "actual_expected_inflation_1y": 3.0,
+                    "sce_personal_job_loss_probability_1y": 8.0,
+                },
+                {
+                    "event_date": "2025-05-01",
+                    "public_availability_date": "2026-02-01",
+                    "observation_status": "observed",
+                    "responded": True,
+                    "actual_expected_inflation_1y": 4.0,
+                    "sce_personal_job_loss_probability_1y": None,
+                },
+                {
+                    "event_date": "2025-06-01",
+                    "public_availability_date": "2026-03-01",
+                    "observation_status": "nonresponse",
+                    "responded": False,
+                    "actual_expected_inflation_1y": None,
+                },
+            ],
+        )
+
+        self.assertEqual(card["household"]["previous_beliefs"]["source_event_date"], "2025-05-01")
+        self.assertEqual(card["household"]["previous_beliefs"]["inflation_expectation_1y"], 4.0)
+        self.assertEqual(
+            card["household"]["previous_beliefs"]["personal_job_loss_probability_1y"],
+            8.0,
+        )
+        self.assertEqual(
+            card["household"]["previous_beliefs"]["field_source_event_dates"]
+            ["personal_job_loss_probability_1y"],
+            "2025-04-01",
+        )
+        current = card["household"]["current_state"]
+        self.assertEqual(current["recent_visible_aggregate_consumption_growth_pct"], 0.7)
+        self.assertNotIn("status_quo_next_month_committed_consumption", current)
+        self.assertNotIn("status_quo_next_month_discretionary_consumption", current)
+
     def test_annual_income_matches_twelve_simulated_work_months(self) -> None:
         state = _state_from_row(pd.Series({
             "type_id": "h1",
@@ -235,13 +297,10 @@ class HouseholdEcologyTests(unittest.TestCase):
             expected_inflation_pct=QuantileTriplet(2.0, 2.0, 2.0),
             expected_income_growth_pct=QuantileTriplet(0.0, 0.0, 0.0),
             job_loss_probability_pct=QuantileTriplet(0.0, 0.0, 0.0),
-            planned_consumption_change_pct=QuantileTriplet(0.0, 0.0, 0.0),
             planned_work_hours=QuantileTriplet(160.0, 160.0, 160.0),
             planned_job_search_hours=QuantileTriplet(0.0, 0.0, 0.0),
-            target_buffer_months=0.0,
-            buffer_contribution_intent_usd=0.0,
-            debt_payment_intent_usd=0.0,
-            borrowing_intent_usd=0.0,
+            employed_policy=HouseholdPolicyBranch(0.0, 0.0, 0.0, 0.0, 0.0),
+            not_employed_policy=HouseholdPolicyBranch(0.0, 0.0, 0.0, 0.0, 0.0),
         )
         result = run_monthly_ecology(
             [state],
@@ -429,6 +488,90 @@ class HouseholdEcologyTests(unittest.TestCase):
             set(household_response_schema()["required"]),
             set(fixture_response(card)),
         )
+
+    def test_history_materialization_manifest_is_hash_bound(self) -> None:
+        from macro_llm_tournament.ecology import _history_materialization_binding
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.csv"
+            history.write_text("household_id\nh1\n", encoding="utf-8")
+            digest = hashlib.sha256(history.read_bytes()).hexdigest()
+            provenance = {
+                name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "row_count": 1}
+                for name in ("base_history", "normalized_sce_microdata", "private_registry")
+            }
+            (root / "history_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "ecology_history_materialization_v1",
+                        "through_event_month": "2025-09-01",
+                        "publication_lag_months": 9,
+                        "input_provenance": provenance,
+                        "public_history": {
+                            "sha256": digest,
+                            "row_count": 1,
+                            "event_count": 1,
+                            "columns": ["household_id"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _history_materialization_binding(history, required=True)["history_sha256"], digest
+            )
+            history.write_text("household_id\nh2\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "does not bind"):
+                _history_materialization_binding(history, required=True)
+
+    def test_history_materialization_manifest_rejects_wrong_schema(self) -> None:
+        from macro_llm_tournament.ecology import _history_materialization_binding
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.csv"
+            history.write_text("household_id\nh1\n", encoding="utf-8")
+            (root / "history_manifest.json").write_text(
+                json.dumps({"schema_version": "wrong", "public_history": {}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unsupported schema"):
+                _history_materialization_binding(history, required=True)
+
+    def test_history_materialization_manifest_rejects_missing_provenance(self) -> None:
+        from macro_llm_tournament.ecology import _history_materialization_binding
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.csv"
+            history.write_text("household_id\nh1\n", encoding="utf-8")
+            (root / "history_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "ecology_history_materialization_v1",
+                        "through_event_month": "2025-09-01",
+                        "publication_lag_months": 9,
+                        "input_provenance": {},
+                        "public_history": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "incomplete input provenance"):
+                _history_materialization_binding(history, required=True)
+
+    def test_nonfixture_history_requires_materialization_manifest(self) -> None:
+        from macro_llm_tournament.ecology import _history_materialization_binding
+
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "history.csv"
+            history.write_text("household_id\nh1\n", encoding="utf-8")
+            self.assertIsNone(
+                _history_materialization_binding(history, required=False)
+            )
+            with self.assertRaisesRegex(ValueError, "require a history"):
+                _history_materialization_binding(history, required=True)
 
     def test_malformed_cached_payload_is_evicted_and_retried_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

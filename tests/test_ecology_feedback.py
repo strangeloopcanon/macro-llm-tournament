@@ -17,11 +17,14 @@ from macro_llm_tournament.ecology_feedback import (
 from macro_llm_tournament.ecology import _artifact_sha256, _file_sha256
 from macro_llm_tournament.ecology_feedback_runner import (
     _load_period_one,
+    _period_one_history_binding,
     _period_one_replay_binding,
-    _period_two_states,
+    _settled_period_one,
     _validate_source_inputs,
 )
 from macro_llm_tournament.ecology_households import HOUSEHOLD_PROMPT_VERSION
+from macro_llm_tournament.ecology import _state_from_row
+from macro_llm_tournament.ecology_transition import transition_household_states
 
 
 def _period_one(
@@ -58,6 +61,34 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
             history = root / "history.csv"
             households.write_text("type_id\nh1\n", encoding="utf-8")
             history.write_text("household_id\nh1\n", encoding="utf-8")
+            history_digest = _file_sha256(history)
+            input_provenance = {
+                name: {"sha256": "a" * 64, "row_count": 1}
+                for name in ("base_history", "normalized_sce_microdata", "private_registry")
+            }
+            history_manifest = {
+                "schema_version": "ecology_history_materialization_v1",
+                "through_event_month": "2025-09-01",
+                "publication_lag_months": 9,
+                "input_provenance": input_provenance,
+                "public_history": {
+                    "sha256": history_digest,
+                    "row_count": 1,
+                    "event_count": 1,
+                    "columns": ["household_id"],
+                },
+            }
+            (root / "history_manifest.json").write_text(
+                json.dumps(history_manifest), encoding="utf-8"
+            )
+            history_binding = {
+                "schema_version": "ecology_history_materialization_v1",
+                "manifest_sha256": _file_sha256(root / "history_manifest.json"),
+                "history_sha256": history_digest,
+                "through_event_month": "2025-09-01",
+                "publication_lag_months": 9,
+                "input_provenance": input_provenance,
+            }
             artifacts = {
                 name: _artifact_sha256(root / name)
                 for name in (
@@ -73,6 +104,7 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
                 "replay_equivalence_sha256": "period-one-equivalence",
                 "household_input_sha256": _file_sha256(households),
                 "history_input_sha256": _file_sha256(history),
+                "history_materialization": history_binding,
                 "artifacts": artifacts,
             }
             (root / "manifest.json").write_text(
@@ -96,6 +128,22 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
             wrong.write_text("type_id\nh2\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "household input"):
                 _validate_source_inputs(manifest, wrong, history)
+
+            missing_history_binding = dict(manifest)
+            missing_history_binding.pop("history_materialization")
+            (root / "manifest.json").write_text(
+                json.dumps(missing_history_binding), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "history materialization provenance"):
+                _load_period_one(root)
+
+            malformed_history_binding = dict(manifest)
+            malformed_history_binding["history_materialization"] = {
+                **history_binding,
+                "schema_version": "wrong",
+            }
+            with self.assertRaisesRegex(ValueError, "schema is unsupported"):
+                _period_one_history_binding(malformed_history_binding)
 
     def test_positive_demand_lifts_output_labor_employment_and_wages(self) -> None:
         feedback = compute_aggregate_firm_feedback(
@@ -211,12 +259,21 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
             "deposit_balance_end_usd": 5_250.0,
             "revolving_debt_end_usd": 1_900.0,
             "consumption_usd": 3_100.0,
+            "committed_consumption_usd": 2_150.0,
+            "discretionary_consumption_usd": 850.0,
+            "one_off_purchase_usd": 100.0,
         }])
         feedback = compute_aggregate_firm_feedback(_period_one(demand_units=1_200.0, sales_units=1_200.0, opening_inventory_units=280.0, closing_inventory_units=80.0))
-        states, transitions = _period_two_states(source, decisions, feedback)
+        initial_states = [_state_from_row(row) for _, row in source.iterrows()]
+        states, transitions = transition_household_states(
+            initial_states, decisions, feedback
+        )
         state = states[0]
         self.assertEqual(state.deposit_balance_usd, 5_250.0)
         self.assertEqual(state.revolving_debt_usd, 1_900.0)
+        self.assertEqual(state.baseline_monthly_consumption_usd, 3_000.0)
+        self.assertEqual(state.baseline_committed_consumption_usd, 2_150.0)
+        self.assertEqual(state.baseline_discretionary_consumption_usd, 850.0)
         self.assertEqual(state.employment_share, 1.0)
         self.assertEqual(state.monthly_family_business_income_usd, 500.0)
         self.assertEqual(state.monthly_nonwage_income_usd, 200.0)
@@ -229,6 +286,59 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
             transitions[0]["deposit_balance_period_1_close_period_2_open_usd"],
             5_250.0,
         )
+
+    def test_firm_feedback_uses_settled_not_desired_household_demand(self) -> None:
+        source = pd.DataFrame([{
+            "type_id": "h1",
+            "employment_status": "employed",
+            "baseline_consumption_annual": 12_000.0,
+            "liquid_deposits_usd": 1_000.0,
+            "population_weight": 1.0,
+        }])
+        states = [_state_from_row(row) for _, row in source.iterrows()]
+        decisions = pd.DataFrame([{
+            "household_id": "h1",
+            "desired_consumption_usd": 1_500.0,
+            "consumption_usd": 800.0,
+        }])
+        period_one = _settled_period_one(
+            states,
+            decisions,
+            {
+                "current_price_per_unit_usd": 2.0,
+                "units_sold": 400.0,
+                "inventory_start_units": 80.0,
+                "inventory_end_units": 80.0,
+                "output_units": 400.0,
+            },
+        )
+        self.assertEqual(period_one.demand_units, 400.0)
+        self.assertNotEqual(period_one.demand_units, 750.0)
+
+    def test_transition_rejects_unreconciled_consumption_categories(self) -> None:
+        source = pd.DataFrame([{
+            "type_id": "h1",
+            "employment_status": "employed",
+            "baseline_consumption_annual": 12_000.0,
+            "liquid_deposits_usd": 1_000.0,
+            "population_weight": 1.0,
+        }])
+        states = [_state_from_row(row) for _, row in source.iterrows()]
+        decisions = pd.DataFrame([{
+            "household_id": "h1",
+            "deposit_balance_end_usd": 1_000.0,
+            "revolving_debt_end_usd": 0.0,
+            "consumption_usd": 1_000.0,
+            "committed_consumption_usd": 600.0,
+            "discretionary_consumption_usd": 300.0,
+            "one_off_purchase_usd": 50.0,
+        }])
+        with self.assertRaisesRegex(ValueError, "categories do not reconcile"):
+            transition_household_states(
+                states,
+                decisions,
+                compute_aggregate_firm_feedback(_period_one()),
+            )
 
 
 if __name__ == "__main__":
