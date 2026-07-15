@@ -1,4 +1,4 @@
-.PHONY: all check test ecology-fixture ecology-financial-states ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay household-cohort vintage-bundle origin-snapshot
+.PHONY: all check test ecology-fixture ecology-financial-states ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay ecology-observability household-cohort vintage-bundle origin-snapshot
 
 ORIGIN ?= 2026-07-01
 AS_OF ?= 2026-07-10
@@ -14,6 +14,7 @@ ECOLOGY_FIXTURE_DIR := examples/ecology_fixture
 CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v20_current
 RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v20
 RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v20
+OBSERVABILITY_DIR ?= outputs/household_ecology_observability_v1
 
 all: check test
 
@@ -139,6 +140,14 @@ ecology-retrospective-replay:
 		--max-live-calls 0 \
 		--cache-dir $(RETROSPECTIVE_CACHE) \
 		--output-dir $(RETROSPECTIVE_DIR)
+
+ecology-observability:
+	rm -rf $(OBSERVABILITY_DIR)
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_observability \
+		--retrospective-run $(RETROSPECTIVE_DIR) \
+		--prospective-run $(CURRENT_RUN_DIR) \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--output-dir $(OBSERVABILITY_DIR)
 
 household-cohort:
 	PYTHONPATH=src python3 -m macro_llm_tournament.persistent_households \

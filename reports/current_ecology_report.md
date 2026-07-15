@@ -71,13 +71,40 @@ No simulated balance, forecast error, or future observation carries forward.
 | Compounded first-release PCE index | 102.63 |
 | Compounded routine-drift index | 101.75 |
 
-![Rolling one-month forecasts versus first-release outcomes](current_ecology_predicted_vs_actual.png)
+![Diagnostic economic observability surface](current_ecology_observability_surface.png)
 
 The sign result is real; the weak correlation is equally important.
 The model produces positive nominal growth every month, but does not rank stronger
 and weaker months correctly in this four-month sample. Credit is also wrong in
 three of four months: households pay revolving balances down while the aggregate
 series usually rises.
+
+## What The Expanded Surface Adds
+
+The top row preserves the two observed comparisons. The remaining rows expose the
+internal causal chain rather than adding more scores:
+
+- population-weighted inflation beliefs rise from 4.16% to 5.04% across the shown
+  origins, income-growth beliefs stay negative at -1.07% to -1.61%, and
+  personal next-month job-loss risk stays near 0.93% to 0.97%;
+- intended deposit additions equal 13.4% to 18.8% of baseline monthly consumption,
+  while extra debt payments remain below 0.38% and new borrowing below 0.14%;
+- intended consumption growth is only 0.01% to 0.16%, and deterministic execution
+  leaves it almost unchanged; and
+- the resulting revolving-debt stock falls 2.0% to 2.8% per month.
+
+This identifies the current amplitude problem more sharply. The accounting engine
+is not clipping a healthy demand signal. The household policies themselves combine
+negative income expectations with unusually large intended deposit additions, so
+weak demand enters before production and settlement.
+
+The bottom-right panel adds the smallest defensible firm-side structure. Expected
+sales inherit household-demand growth; target output closes 35% of the inventory
+gap; fixed productivity maps output into required labor; planned employment closes
+25% of that requirement; and a declared index combines demand and inventory into
+price pressure. These are unscored deterministic mechanics. They do not feed wages,
+employment, prices, or income back into another household decision, and they do not
+improve any historical score.
 
 ## Frozen August Forecast
 
@@ -150,8 +177,14 @@ That is the next model-building problem. Firms and banks should remain mechanica
 until repeated prospective errors show that a missing institutional response,
 rather than household elicitation, is responsible.
 
+The expanded surface strengthens that sequencing: the household policy is now the
+visibly dominant bottleneck. A recursive firm-labor loop would require an identified
+allocation of SCF family earnings to respondent labor income; inventing that split
+would make the economy look fuller while weakening its empirical basis.
+
 ## Current Evidence
 
 - Prospective run: `outputs/household_ecology_200_july_v20_current/`
 - Historical diagnostic: `outputs/household_ecology_retrospective_2026_01_04_v20/`
+- Economic observability surface: `outputs/household_ecology_observability_v1/`
 - Retired research record: `research_history.md`

@@ -79,3 +79,21 @@ It retains 4/4 consumption signs with RMSE 0.61 percentage points, versus 0.24 f
 origin-visible routine-drift anchor. Correlation is 0.10 and credit direction is 1/4.
 The prospective July-to-August forecast is frozen at +0.08%. This v20 result is the
 active evidence surface.
+
+## Full Observability And Firm Shadow
+
+The v20 response bank was next expanded into a six-layer diagnostic surface rather
+than another forecasting variant. It records observed proxy comparisons, weighted
+beliefs, household dollar policies, feasible household outcomes, firm and credit
+accounts, and a one-step firm-response shadow in separate source classes. The panel
+shows that the weak demand amplitude is already present in household intentions:
+deposit additions equal 13% to 19% of baseline monthly consumption, while intended
+consumption growth remains below 0.2%. Feasibility changes little.
+
+An audit rejected switching the real household states into the engine's old dynamic
+labor mode. The matched SCF data identifies family earnings, not the respondent's
+wage share; assigning all family earnings to the respondent or hiring at the current
+zero wage would be fabricated structure. The retained firm shadow therefore stops at
+sales, inventory-adjusted output, labor requirement, partial employment adjustment,
+and price pressure. It is a diagnostic projection, not a scored forecast or a closed
+feedback loop.

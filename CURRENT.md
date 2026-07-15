@@ -29,6 +29,30 @@ household-policy design produces positive demand at all four diagnostic origins.
 It remains too conservative and is not yet competitive with
 a simple current-information anchor.
 
+## Full Economic Surface
+
+The active diagnostic now exposes six layers across every rolling origin:
+
+1. first-release PCE and revolving-credit comparisons;
+2. population-weighted LLM inflation, income, and personal job-loss beliefs;
+3. household consumption, deposit, debt-payment, and borrowing intentions;
+4. feasible household spending and balance-sheet execution;
+5. firm and credit accounting; and
+6. an unscored next-period firm-response shadow.
+
+This is enough to observe the current household-demand economy end to end. It is
+not yet a full recursive macroeconomy: wages and employment do not feed back into
+income and another round of household decisions. The shadow deliberately stops
+before that unsupported step because the SCE-SCF state has family earnings but no
+identified respondent wage allocation.
+
+The surface localizes the amplitude failure. Intended deposit additions are
+13.4% to 18.8% of baseline monthly consumption across the five origins, while
+intended consumption growth is only 0.01% to 0.16%. Deterministic feasibility
+barely changes those intentions. The weak macro demand therefore begins in the
+household policy, rather than being created by rationing, firm settlement, or
+credit limits.
+
 ## Frozen Forecast
 
 The July 1 origin, using information through July 10, is frozen for August 2026.
@@ -42,12 +66,14 @@ matches the immutable live reference, and passes accounting with maximum residua
 1. Append the August first release without changing the frozen forecast.
 2. Continue the same rolling forecast at each new origin.
 3. Improve the household policy's response amplitude on spent historical origins,
-   while keeping the genuine SCE personal job-loss prior and fixed accounting
-   contract.
-4. Add LLM firms or banks only if repeated errors identify a missing institutional
-   mechanism rather than a household elicitation problem.
+   focusing on the unusually large intended deposit contribution while keeping
+   the genuine SCE personal job-loss prior and fixed accounting contract.
+4. Do not add LLM firms or banks yet. Promote the firm shadow into a genuine
+   feedback loop only after a defensible family-income-to-labor-state mapping
+   exists and household demand itself behaves credibly.
 
 The canonical evidence is in
 `outputs/household_ecology_200_july_v20_current/` and
-`outputs/household_ecology_retrospective_2026_01_04_v20/`. Earlier versions are
+`outputs/household_ecology_retrospective_2026_01_04_v20/`. The full panel is in
+`outputs/household_ecology_observability_v1/`. Earlier versions are
 superseded and belong in the local archive.

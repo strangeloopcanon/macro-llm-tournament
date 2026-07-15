@@ -17,12 +17,17 @@ budgets, credit limits, production feasibility, inventories, and settlement.
            deterministic budgets, credit, production, and settlement
                                    |
                  population-weighted macro demand forecast
+                                   |
+       unscored next-period firm response shadow (diagnostic only)
 ```
 
 Firms and banks are not LLM agents in the current version. Production follows
 expected sales with gradual inventory adjustment; credit and settlement are
 mechanical. Respondent employment and wages are fixed so the active test isolates
-household demand.
+household demand. A separate observability layer projects how that demand would
+move next-period sales, output, required labor, partial employment adjustment,
+and price pressure. It is a transparent mechanical shadow, not a closed feedback
+loop or an empirical forecast.
 
 ## Current Result
 
@@ -65,6 +70,7 @@ Codex CLI response caches:
 ```bash
 make ecology-current-replay
 make ecology-retrospective-replay
+make ecology-observability
 ```
 
 For a new month, set `ORIGIN`, `AS_OF`, `ORIGIN_SNAPSHOT`,
@@ -88,6 +94,11 @@ The realization file is long-form with one row per metric and the columns
 dates must be after the frozen forecast cutoff. The append is published atomically
 with the canonical input and hashes under the run's `realization_append/` folder.
 
+`make ecology-observability` combines the banked historical and prospective runs
+into two tidy diagnostic panels and a six-panel figure. It keeps observed outcomes,
+LLM beliefs and intentions, deterministic execution, and the firm shadow in
+separate source classes.
+
 ## Evidence Boundary
 
 - The historical four-month run is diagnostic. Those dates may be in model
@@ -102,7 +113,10 @@ with the canonical input and hashes under the run's `realization_append/` folder
   SCE `Q4new`, the chance that aggregate U.S. unemployment rises, remains a
   separate belief.
 - The next problem is behavioral amplitude: households preserve spending and get
-  its sign right, but underreact to ordinary nominal growth.
+  its sign right, but underreact to ordinary nominal growth. The full surface
+  shows the proximate mechanism: households intend deposit additions equal to
+  roughly 13% to 19% of baseline monthly consumption while expecting income
+  contraction.
 
 See [CURRENT.md](CURRENT.md) for the exact milestone,
 [reports/current_ecology_report.md](reports/current_ecology_report.md) for the
