@@ -547,6 +547,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 int(row["failed_provider_attempt_count"]) for row in child_manifests
             ),
             "cache_hit_count": sum(int(row["cache_hit_count"]) for row in child_manifests),
+            "replay_verified": (
+                args.mode == "replay"
+                and all(bool(row["replay_verified"]) for row in child_manifests)
+            ),
             "codex_tool_isolation_version": child_manifests[0]["codex_tool_isolation_version"],
             "codex_instruction_context_version": child_manifests[0][
                 "codex_instruction_context_version"
