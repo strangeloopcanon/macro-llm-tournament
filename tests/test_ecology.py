@@ -300,14 +300,77 @@ class HouseholdEcologyTests(unittest.TestCase):
             "baseline_discretionary_consumption_monthly_usd": 2_000.0,
             "recurring_minimum_debt_payment_usd": 0.0,
             "base_saving_rate": 0.10,
+            "target_buffer_months": 1.0,
+            "liquid_deposits_usd": 0.0,
         }))
-        self.assertAlmostEqual(state.monthly_omitted_fixed_outflow_usd, 2_100.0)
+        self.assertAlmostEqual(state.monthly_baseline_total_saving_target_usd, 900.0)
+        self.assertAlmostEqual(state.monthly_baseline_liquid_saving_target_usd, 500.0)
+        self.assertAlmostEqual(state.monthly_omitted_fixed_outflow_usd, 2_500.0)
         self.assertAlmostEqual(
             8_000.0 + 1_000.0
             - state.monthly_omitted_fixed_outflow_usd
             - state.baseline_monthly_consumption_usd,
-            900.0,
+            state.monthly_baseline_liquid_saving_target_usd,
         )
+
+    def test_declared_saving_is_split_between_liquid_and_nondeposit_uses(self) -> None:
+        source = pd.DataFrame(
+            [
+                {
+                    "type_id": "buffer_shortfall",
+                    "employment_status": "employed",
+                    "monthly_earned_income_usd": 5_000.0,
+                    "monthly_nonwage_income_usd": 0.0,
+                    "monthly_transfers_benefits_usd": 0.0,
+                    "baseline_committed_consumption_monthly_usd": 2_000.0,
+                    "baseline_discretionary_consumption_monthly_usd": 1_000.0,
+                    "recurring_minimum_debt_payment_usd": 100.0,
+                    "base_saving_rate": 0.20,
+                    "target_buffer_months": 2.0,
+                    "liquid_deposits_usd": 0.0,
+                },
+                {
+                    "type_id": "buffer_full",
+                    "employment_status": "employed",
+                    "monthly_earned_income_usd": 5_000.0,
+                    "monthly_nonwage_income_usd": 0.0,
+                    "monthly_transfers_benefits_usd": 0.0,
+                    "baseline_committed_consumption_monthly_usd": 2_000.0,
+                    "baseline_discretionary_consumption_monthly_usd": 1_000.0,
+                    "recurring_minimum_debt_payment_usd": 100.0,
+                    "base_saving_rate": 0.20,
+                    "target_buffer_months": 2.0,
+                    "liquid_deposits_usd": 10_000.0,
+                },
+            ]
+        )
+        liquid_targets = []
+        total_targets = []
+        for _, row in source.iterrows():
+            state = _state_from_row(row)
+            gross_income = (
+                state.monthly_household_earned_income_usd
+                + state.monthly_nonwage_income_usd
+                + state.monthly_transfer_income_usd
+            )
+            liquid_residual = (
+                gross_income
+                - state.baseline_monthly_consumption_usd
+                - state.minimum_debt_payment_usd
+                - state.monthly_omitted_fixed_outflow_usd
+            )
+            self.assertAlmostEqual(
+                liquid_residual,
+                state.monthly_baseline_liquid_saving_target_usd
+                - state.monthly_baseline_cash_deficit_usd,
+            )
+            self.assertLessEqual(
+                state.monthly_baseline_liquid_saving_target_usd,
+                state.monthly_baseline_total_saving_target_usd,
+            )
+            liquid_targets.append(state.monthly_baseline_liquid_saving_target_usd)
+            total_targets.append(state.monthly_baseline_total_saving_target_usd)
+        self.assertLess(sum(liquid_targets), sum(total_targets))
 
     def test_initial_institutions_use_population_mass(self) -> None:
         rows = []

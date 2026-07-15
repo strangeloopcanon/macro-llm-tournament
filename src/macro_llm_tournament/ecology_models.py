@@ -8,7 +8,7 @@ from typing import Any
 # Sub-micro-dollar tolerance absorbs floating-point summation at 200-household
 # scale while remaining far below any economically meaningful transaction.
 ACCOUNTING_TOLERANCE = 1e-6
-ECOLOGY_SCHEMA_VERSION = "household_first_monthly_ecology_v5"
+ECOLOGY_SCHEMA_VERSION = "household_first_monthly_ecology_v6"
 HOUSEHOLD_RESPONSE_SCHEMA_VERSION = "household_conditional_nominal_policy_v6"
 
 
@@ -199,6 +199,9 @@ class HouseholdState:
     monthly_nonwage_income_usd: float = 0.0
     monthly_transfer_income_usd: float = 0.0
     monthly_omitted_fixed_outflow_usd: float = 0.0
+    monthly_baseline_total_saving_target_usd: float = 0.0
+    monthly_baseline_liquid_saving_target_usd: float = 0.0
+    monthly_baseline_cash_deficit_usd: float = 0.0
     baseline_committed_consumption_usd: float | None = None
     baseline_discretionary_consumption_usd: float | None = None
     minimum_debt_payment_usd: float = 0.0
@@ -270,6 +273,26 @@ class HouseholdState:
         _require_nonnegative(
             self.monthly_omitted_fixed_outflow_usd,
             "monthly_omitted_fixed_outflow_usd",
+        )
+        _require_nonnegative(
+            self.monthly_baseline_total_saving_target_usd,
+            "monthly_baseline_total_saving_target_usd",
+        )
+        liquid_saving_target = _require_nonnegative(
+            self.monthly_baseline_liquid_saving_target_usd,
+            "monthly_baseline_liquid_saving_target_usd",
+        )
+        if (
+            liquid_saving_target
+            - self.monthly_baseline_total_saving_target_usd
+            > ACCOUNTING_TOLERANCE
+        ):
+            raise ValueError(
+                "monthly liquid saving target cannot exceed total saving target"
+            )
+        _require_nonnegative(
+            self.monthly_baseline_cash_deficit_usd,
+            "monthly_baseline_cash_deficit_usd",
         )
         for field_name, value in (
             ("baseline_committed_consumption_usd", self.baseline_committed_consumption_usd),

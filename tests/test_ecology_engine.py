@@ -260,7 +260,7 @@ class EcologyEngineTests(unittest.TestCase):
 
         result = run_monthly_ecology(households, responses, employer, credit)
 
-        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v5")
+        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v6")
         self.assertEqual(len(result.households), 2)
         self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
         self.assertLess(result.credit.rationing_ratio, 1.0)
@@ -473,9 +473,11 @@ class EcologyEngineTests(unittest.TestCase):
             ),
             institution_mode="household_demand",
             planned_output_units=600.0,
+            producer_employment_count=1.2,
         )
         self.assertEqual(result.households[0].employment_share_end, 1.0)
         self.assertEqual(result.employer.output_units, 600.0)
+        self.assertEqual(result.employer.employment_count, 1.2)
         self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
 
     def test_job_loss_probability_enters_smoothly_without_threshold_cliff(self) -> None:

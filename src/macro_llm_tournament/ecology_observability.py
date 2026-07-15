@@ -16,6 +16,7 @@ from .ecology import _artifact_sha256, _file_sha256, _write_json
 
 SCHEMA_VERSION = "household_ecology_observability_v1"
 FIRM_SHADOW_VERSION = "demand_inventory_firm_shadow_v1"
+FEEDBACK_SCHEMA_VERSION = "household_ecology_two_period_feedback_v2"
 TARGET_INVENTORY_SHARE = 0.08
 INVENTORY_ADJUSTMENT_SPEED = 0.35
 EMPLOYMENT_ADJUSTMENT_SPEED = 0.25
@@ -398,16 +399,40 @@ def _observed_panel(retrospective_dir: Path, prospective_dir: Path | None) -> pd
     return result.sort_values(["target_month", "metric", "series_role"]).reset_index(drop=True)
 
 
-def _feedback_period_two_rows(feedback_dir: Path | None) -> tuple[list[dict[str, Any]], str | None]:
+def _feedback_period_two_rows(
+    feedback_dir: Path | None,
+    *,
+    expected_period_one_manifest_sha256: str | None = None,
+    expected_household_count: int | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
     """Return the bound period-two feedback marker, when the optional artifact exists."""
 
     if feedback_dir is None:
         return [], None
+    if not feedback_dir.is_dir():
+        raise ValueError("explicit feedback run directory does not exist")
     path = feedback_dir / "dynamic_macro_paths.csv"
     if not path.is_file():
-        return [], None
+        raise ValueError("explicit feedback run is missing dynamic_macro_paths.csv")
 
     manifest = _read_json(feedback_dir / "manifest.json")
+    if manifest.get("schema_version") != FEEDBACK_SCHEMA_VERSION:
+        raise ValueError("feedback run schema version mismatch")
+    if manifest.get("accounting_passed") is not True:
+        raise ValueError("feedback run must pass accounting")
+    if manifest.get("replay_verified") is not True:
+        raise ValueError("feedback run must be a verified replay")
+    if (
+        expected_household_count is not None
+        and int(manifest.get("household_count", -1)) != expected_household_count
+    ):
+        raise ValueError("feedback household count does not match observability panel")
+    if (
+        expected_period_one_manifest_sha256 is not None
+        and manifest.get("period_1_manifest_sha256")
+        != expected_period_one_manifest_sha256
+    ):
+        raise ValueError("feedback run is not bound to the prospective period-1 run")
     _validate_artifact(feedback_dir, manifest, "dynamic_macro_paths.csv")
     frame = pd.read_csv(path)
     required = {
@@ -415,6 +440,7 @@ def _feedback_period_two_rows(feedback_dir: Path | None) -> tuple[list[dict[str,
         "consumption_usd",
         "output_units",
         "producer_employment_index",
+        "producer_wage_index",
         "consumption_growth_from_period_1_pct",
     }
     missing = required.difference(frame.columns)
@@ -484,11 +510,16 @@ def _feedback_period_two_rows(feedback_dir: Path | None) -> tuple[list[dict[str,
         }
     )
     for metric, period_two_field, period_one_field in (
-        ("firm_target_output_index", "output_units", "output_units"),
+        ("recursive_producer_output_index", "output_units", "output_units"),
         (
-            "firm_planned_employment_index",
+            "recursive_producer_employment_index",
             "producer_employment_index",
             "producer_employment_index",
+        ),
+        (
+            "recursive_producer_wage_index",
+            "producer_wage_index",
+            "producer_wage_index",
         ),
     ):
         baseline = _require_finite(period_one_row[period_one_field], period_one_field)
@@ -497,14 +528,14 @@ def _feedback_period_two_rows(feedback_dir: Path | None) -> tuple[list[dict[str,
         rows.append(
             {
                 **common,
-                "layer": "firm_response_shadow",
+                "layer": "recursive_firm_feedback",
                 "metric": metric,
                 "value": 100.0
                 * _require_finite(row[period_two_field], period_two_field)
                 / baseline,
                 "unit": "index",
                 "source_class": "mechanical_firm_feedback",
-                "interpretation": "Unscored period_2 mechanical firm feedback marker; it is not an LLM output.",
+                "interpretation": "Unscored period_2 realized aggregate firm feedback; it is mechanical, not an LLM output.",
             }
         )
     return rows, _artifact_sha256(feedback_dir / "manifest.json")
@@ -669,6 +700,17 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
     for metric, label in shadow_labels.items():
         rows = simulation.loc[(simulation["layer"] == "firm_response_shadow") & (simulation["metric"] == metric)].sort_values("target_month")
         plot_simulation(axes[2, 1], rows, label=label)
+    recursive_labels = {
+        "recursive_producer_output_index": "Recursive output (period 2)",
+        "recursive_producer_employment_index": "Recursive employment (period 2)",
+        "recursive_producer_wage_index": "Recursive wage (period 2)",
+    }
+    for metric, label in recursive_labels.items():
+        rows = simulation.loc[
+            (simulation["layer"] == "recursive_firm_feedback")
+            & (simulation["metric"] == metric)
+        ].sort_values("target_month")
+        plot_simulation(axes[2, 1], rows, label=label)
     axes[2, 1].axhline(100.0, color="#B8B8B8", linewidth=0.8)
     axes[2, 1].set_title("Producer response and two-period feedback")
     axes[2, 1].set_ylabel("Index (origin baseline = 100)")
@@ -724,16 +766,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "source_child_status": manifest["evaluation_status"],
             "panel_evaluation_status": "retrospective_diagnostic_not_confirmatory",
         }
+    prospective_manifest_sha256: str | None = None
     if prospective is not None:
         manifest, rows = _run_payload(prospective, weights)
         simulation_rows.extend(rows)
+        prospective_manifest_sha256 = _artifact_sha256(prospective / "manifest.json")
         source_runs[str(manifest["origin_month"])] = {
             "path": str(prospective),
-            "manifest_sha256": _artifact_sha256(prospective / "manifest.json"),
+            "manifest_sha256": prospective_manifest_sha256,
             "source_child_status": manifest["evaluation_status"],
             "panel_evaluation_status": "prospective_frozen",
         }
-    feedback_rows, feedback_manifest_sha256 = _feedback_period_two_rows(feedback)
+    feedback_rows, feedback_manifest_sha256 = _feedback_period_two_rows(
+        feedback,
+        expected_period_one_manifest_sha256=prospective_manifest_sha256,
+        expected_household_count=expected_count,
+    )
     simulation_rows.extend(feedback_rows)
 
     observed = _observed_panel(retrospective, prospective)
@@ -743,6 +791,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     _write_chart(observed, simulation, output / "economic_observability_surface.png")
 
     status_counts = simulation.groupby(["evaluation_status", "source_class"]).size().to_dict()
+    recursive_description = (
+        "The bound period-two run then carries household deposits and debt forward, "
+        "realizes aggregate producer output, employment, wages, and family wage income, "
+        "and elicits a fresh decision from every LLM household. It uses no future "
+        "observed data and remains an unscored mechanism trace."
+        if feedback is not None
+        else "No recursive period-two feedback run was supplied."
+    )
     report = [
         "# Full Economic Observability Surface",
         "",
@@ -752,7 +808,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "",
         "The mechanical firm-feedback shadow inherits household-demand growth as expected sales, closes 35% of the inventory gap in target output, maps output one-for-one to required labor at fixed productivity, and closes 25% of that labor requirement through planned employment. The price-pressure index combines 15% of demand growth with 10% of the inventory gap. These declared coefficients are diagnostic mechanics, not fitted estimates.",
         "",
-        "It does not feed wages, employment, prices, or income back into the household calls. Calling it a closed macro feedback loop would be wrong; it is the smallest honest firm-side response that the current family-income data supports.",
+        "That historical shadow does not feed wages, employment, prices, or income back into household calls. It is distinct from the recursive mechanism and uses separate metric names.",
+        "",
+        recursive_description,
         "",
         "## Evidence Boundary",
         "",
@@ -760,7 +818,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "- The prospective point remains frozen and unscored.",
         "- The gross-income residual is internal household accounting, not national saving.",
         "- Revolving credit remains a direction-only proxy.",
-        "- Mechanical firm feedback is unscored; it cannot improve the historical forecast score and is not an LLM output.",
+        "- Both firm mechanisms are unscored; neither can improve the historical forecast score and neither is an LLM output.",
+        "- Household budgets, goods inventory, bank stocks, and named counterparty flows are audited; a firm balance sheet and full external-sector stocks are not modeled.",
         "",
         "## Output Contract",
         "",
@@ -784,7 +843,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "price_pressure_inventory_weight": PRICE_PRESSURE_INVENTORY_WEIGHT,
         },
         "retrospective_manifest_sha256": _artifact_sha256(retrospective / "manifest.json"),
-        "prospective_manifest_sha256": _artifact_sha256(prospective / "manifest.json") if prospective else None,
+        "prospective_manifest_sha256": prospective_manifest_sha256,
         "feedback_manifest_sha256": feedback_manifest_sha256,
         "household_input_sha256": _file_sha256(args.households),
         "source_runs": source_runs,

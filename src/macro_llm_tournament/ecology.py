@@ -35,9 +35,9 @@ from .ecology_provider import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = PROJECT_ROOT / "work/ecology_cache"
-SCHEMA_VERSION = "household_first_rolling_microeconomy_v3"
+SCHEMA_VERSION = "household_first_rolling_microeconomy_v4"
 LIVE_REFERENCE_SCHEMA_VERSION = "household_ecology_live_reference_v2"
-MINIMUM_OMITTED_FIXED_OUTFLOW_SHARE = 0.10
+LIQUID_BUFFER_CLOSURE_MONTHS = 12.0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -296,28 +296,51 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
     minimum_payment = max(
         0.0, float(row.get("recurring_minimum_debt_payment_usd", 0.0))
     )
+    deposits = max(
+        0.0,
+        float(row.get("liquid_deposits_usd", row.get("liquid_assets", 0.0))),
+    )
     base_saving_rate = row.get("base_saving_rate")
     omitted_fixed_outflow = 0.0
+    total_saving_target = 0.0
+    liquid_saving_target = 0.0
+    baseline_cash_deficit = 0.0
     if has_reported_earned and pd.notna(base_saving_rate):
         gross_income = monthly_earned + nonwage_income + transfer_income
-        target_liquid_residual = min(1.0, max(0.0, float(base_saving_rate))) * gross_income
-        omitted_fixed_outflow = min(
-            gross_income,
-            max(
-                MINIMUM_OMITTED_FIXED_OUTFLOW_SHARE * gross_income,
-                gross_income
-                - monthly_consumption
-                - minimum_payment
-                - target_liquid_residual,
-            ),
+        declared_total_saving = (
+            min(1.0, max(0.0, float(base_saving_rate))) * gross_income
         )
+        saving_capacity = max(
+            0.0,
+            gross_income - monthly_consumption - minimum_payment,
+        )
+        baseline_cash_deficit = max(
+            0.0,
+            monthly_consumption + minimum_payment - gross_income,
+        )
+        total_saving_target = min(declared_total_saving, saving_capacity)
+        target_buffer_months = max(0.0, float(row.get("target_buffer_months", 0.0)))
+        liquid_buffer_gap = max(
+            0.0,
+            target_buffer_months * monthly_consumption - deposits,
+        )
+        liquid_saving_target = min(
+            total_saving_target,
+            liquid_buffer_gap / LIQUID_BUFFER_CLOSURE_MONTHS,
+        )
+        taxes_and_recurring_outflows = max(
+            0.0,
+            gross_income
+            - monthly_consumption
+            - minimum_payment
+            - total_saving_target,
+        )
+        nondeposit_saving = total_saving_target - liquid_saving_target
+        omitted_fixed_outflow = taxes_and_recurring_outflows + nondeposit_saving
     return HouseholdState(
         household_id=str(row["type_id"]),
         employer_id="aggregate_employer",
-        deposit_balance_usd=max(
-            0.0,
-            float(row.get("liquid_deposits_usd", row.get("liquid_assets", 0.0))),
-        ),
+        deposit_balance_usd=deposits,
         revolving_debt_usd=debt,
         revolving_credit_limit_usd=max(debt, credit_limit),
         hourly_wage_usd=hourly_wage,
@@ -334,6 +357,9 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
         monthly_nonwage_income_usd=nonwage_income,
         monthly_transfer_income_usd=transfer_income,
         monthly_omitted_fixed_outflow_usd=omitted_fixed_outflow,
+        monthly_baseline_total_saving_target_usd=total_saving_target,
+        monthly_baseline_liquid_saving_target_usd=liquid_saving_target,
+        monthly_baseline_cash_deficit_usd=baseline_cash_deficit,
         baseline_committed_consumption_usd=(float(committed) if has_components else None),
         baseline_discretionary_consumption_usd=(
             float(discretionary) if has_components else None
@@ -735,9 +761,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "latest origin-visible one-month PCE change; zero only when unavailable"
         ),
         "omitted_fixed_outflow_calibration": {
-            "minimum_share_of_scf_gross_income": MINIMUM_OMITTED_FIXED_OUTFLOW_SHARE,
-            "purpose": "taxes_and_recurring_obligations_absent_from_the_scf_spending_proxy",
-            "saving_rate_input": "household base_saving_rate when it implies a larger outflow",
+            "purpose": (
+                "taxes_recurring_obligations_and_nondeposit_saving_absent_from_"
+                "the_scf_spending_proxy"
+            ),
+            "total_saving_input": "household base_saving_rate, capped by cash capacity",
+            "liquid_saving_rule": (
+                "close the household target-buffer gap over 12 months, capped by "
+                "the total saving target"
+            ),
+            "liquid_buffer_closure_months": LIQUID_BUFFER_CLOSURE_MONTHS,
         },
         "employment_transition": (
             "origin_employment_state_frozen_for_household_demand_diagnostic"

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
@@ -11,7 +14,13 @@ from macro_llm_tournament.ecology_feedback import (
     build_simulated_environment_payload,
     compute_aggregate_firm_feedback,
 )
-from macro_llm_tournament.ecology_feedback_runner import _period_two_states
+from macro_llm_tournament.ecology import _artifact_sha256, _file_sha256
+from macro_llm_tournament.ecology_feedback_runner import (
+    _load_period_one,
+    _period_two_states,
+    _validate_source_inputs,
+)
+from macro_llm_tournament.ecology_households import HOUSEHOLD_PROMPT_VERSION
 
 
 def _period_one(
@@ -34,6 +43,55 @@ def _period_one(
 
 
 class AggregateFirmFeedbackTests(unittest.TestCase):
+    def test_period_one_artifacts_and_source_inputs_are_hash_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "median_economy.json").write_text("{}", encoding="utf-8")
+            pd.DataFrame(
+                [{"scenario": "median", "household_id": "h1"}]
+            ).to_csv(root / "household_decisions.csv", index=False)
+            (root / "normalized_origin_information.json").write_text(
+                json.dumps({"as_of_date": "2026-07-15"}), encoding="utf-8"
+            )
+            households = root / "households.csv"
+            history = root / "history.csv"
+            households.write_text("type_id\nh1\n", encoding="utf-8")
+            history.write_text("household_id\nh1\n", encoding="utf-8")
+            artifacts = {
+                name: _artifact_sha256(root / name)
+                for name in (
+                    "median_economy.json",
+                    "household_decisions.csv",
+                    "normalized_origin_information.json",
+                )
+            }
+            manifest = {
+                "accounting_passed": True,
+                "household_prompt_version": HOUSEHOLD_PROMPT_VERSION,
+                "household_count": 1,
+                "household_input_sha256": _file_sha256(households),
+                "history_input_sha256": _file_sha256(history),
+                "artifacts": artifacts,
+            }
+            (root / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            _load_period_one(root)
+            self.assertEqual(
+                _validate_source_inputs(manifest, households, history),
+                (_file_sha256(households), _file_sha256(history)),
+            )
+            (root / "median_economy.json").write_text(
+                '{"tampered": true}', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "artifact hash mismatch"):
+                _load_period_one(root)
+            wrong = root / "wrong.csv"
+            wrong.write_text("type_id\nh2\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "household input"):
+                _validate_source_inputs(manifest, wrong, history)
+
     def test_positive_demand_lifts_output_labor_employment_and_wages(self) -> None:
         feedback = compute_aggregate_firm_feedback(
             _period_one(

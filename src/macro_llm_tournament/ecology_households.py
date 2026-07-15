@@ -20,7 +20,7 @@ from .ecology_provider import (
 from .ecology_models import HouseholdPolicyBranch, HouseholdResponse, QuantileTriplet
 
 
-HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v17"
+HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v18"
 
 
 class LiveCallBudget:
@@ -227,8 +227,17 @@ def household_card(
                 "monthly_family_business_income_usd", 0.0
             ),
             "monthly_transfer_income": state.get("monthly_transfer_income_usd", 0.0),
-            "monthly_taxes_and_omitted_recurring_outflows": state.get(
+            "monthly_taxes_nondeposit_saving_and_omitted_outflows": state.get(
                 "monthly_omitted_fixed_outflow_usd", 0.0
+            ),
+            "monthly_baseline_total_saving_target": state.get(
+                "monthly_baseline_total_saving_target_usd", 0.0
+            ),
+            "monthly_baseline_liquid_saving_target": state.get(
+                "monthly_baseline_liquid_saving_target_usd", 0.0
+            ),
+            "monthly_baseline_cash_deficit": state.get(
+                "monthly_baseline_cash_deficit_usd", 0.0
             ),
             "baseline_committed_consumption": state.get(
                 "baseline_committed_consumption_usd"
@@ -332,10 +341,14 @@ current_state.monthly_household_earned_income is SCF family earned income. It is
 held fixed in this household-demand forecast because the data do not identify
 this respondent's wage share. Respondent employment must not be interpreted as
 the employment status of every earner in the household.
-current_state.monthly_taxes_and_omitted_recurring_outflows is a fixed budget
-outflow calibrated from the declared baseline saving rate because the SCF
-spending proxy omits taxes and some recurring obligations. Do not count it as
-money available for spending or debt repayment.
+current_state.monthly_taxes_nondeposit_saving_and_omitted_outflows is a fixed
+budget outflow calibrated from the declared total-saving rate and the household's
+liquid-buffer gap. It includes taxes, recurring obligations, and saving routed
+outside liquid deposits. The separate liquid-saving target closes any buffer gap
+gradually over twelve months. Do not count the fixed outflow as money available
+for spending or debt repayment. A positive baseline cash deficit means the matched
+income and expenditure sources imply that this household normally draws down cash
+or borrows; do not silently turn it into a saver.
 
 For every p10/p50/p90 block, return finite numbers satisfying p10 <= p50 <=
 p90. Inflation must be within [-25, 40], income growth within [-50, 50], job

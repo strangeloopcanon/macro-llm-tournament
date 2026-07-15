@@ -44,7 +44,7 @@ from .ecology_households import (
 from .ecology_models import EmployerState
 
 
-SCHEMA_VERSION = "household_ecology_two_period_feedback_v1"
+SCHEMA_VERSION = "household_ecology_two_period_feedback_v2"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -71,20 +71,58 @@ def _population_masses(states: list[Any]) -> dict[str, float]:
     }
 
 
-def _load_period_one(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame]:
+def _validated_parent_artifact(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    name: str,
+) -> Path:
+    path = run_dir / name
+    expected = manifest.get("artifacts", {}).get(name)
+    if not isinstance(expected, str) or not expected:
+        raise ValueError(f"period-1 manifest does not bind {name}")
+    if not path.is_file() or _artifact_sha256(path) != expected:
+        raise ValueError(f"period-1 artifact hash mismatch: {name}")
+    return path
+
+
+def _load_period_one(
+    run_dir: Path,
+) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame, dict[str, Any]]:
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     if not manifest.get("accounting_passed"):
         raise ValueError("period-1 run must pass accounting")
     if manifest.get("household_prompt_version") != HOUSEHOLD_PROMPT_VERSION:
         raise ValueError("period-1 run prompt version does not match current feedback runner")
-    economy = json.loads((run_dir / "median_economy.json").read_text(encoding="utf-8"))
-    decisions = pd.read_csv(run_dir / "household_decisions.csv")
+    economy_path = _validated_parent_artifact(run_dir, manifest, "median_economy.json")
+    decisions_path = _validated_parent_artifact(
+        run_dir, manifest, "household_decisions.csv"
+    )
+    origin_path = _validated_parent_artifact(
+        run_dir, manifest, "normalized_origin_information.json"
+    )
+    economy = json.loads(economy_path.read_text(encoding="utf-8"))
+    decisions = pd.read_csv(decisions_path)
+    origin = json.loads(origin_path.read_text(encoding="utf-8"))
     decisions = decisions.loc[decisions["scenario"].astype(str).eq("median")].copy()
     if len(decisions) != int(manifest["household_count"]):
         raise ValueError("period-1 decisions must contain one median row per household")
     if decisions["household_id"].astype(str).duplicated().any():
         raise ValueError("period-1 household decisions contain duplicate identities")
-    return manifest, economy, decisions
+    return manifest, economy, decisions, origin
+
+
+def _validate_source_inputs(
+    manifest: dict[str, Any],
+    households: Path,
+    history: Path,
+) -> tuple[str, str]:
+    household_input_sha256 = _file_sha256(households)
+    history_input_sha256 = _file_sha256(history)
+    if household_input_sha256 != manifest.get("household_input_sha256"):
+        raise ValueError("household input does not match the period-1 run")
+    if history_input_sha256 != manifest.get("history_input_sha256"):
+        raise ValueError("history input does not match the period-1 run")
+    return household_input_sha256, history_input_sha256
 
 
 def _period_two_states(
@@ -163,8 +201,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
-    period_1_manifest, period_1_economy, decisions = _load_period_one(
+    period_1_manifest, period_1_economy, decisions, origin = _load_period_one(
         args.period_1_run.resolve()
+    )
+    household_input_sha256, history_input_sha256 = _validate_source_inputs(
+        period_1_manifest,
+        args.households,
+        args.history,
     )
     source = pd.read_csv(args.households)
     ids = set(decisions["household_id"].astype(str))
@@ -191,9 +234,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     feedback = compute_aggregate_firm_feedback(period_one)
     period_2_states, transitions = _period_two_states(source, decisions, feedback)
-    origin = json.loads(
-        (args.period_1_run / "normalized_origin_information.json").read_text(encoding="utf-8")
-    )
     history = pd.read_csv(args.history)
     histories = {
         str(key): group.to_dict("records") for key, group in history.groupby("household_id")
@@ -254,7 +294,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             1.0,
             float(employer_1["employment_count"]) * feedback.producer_employment_index,
         ),
-        wage_offer_usd=float(employer_1["next_wage_offer_usd"]) * feedback.producer_wage_index,
+        wage_offer_usd=float(employer_1["average_hourly_wage_usd"])
+        * feedback.producer_wage_index,
         target_inventory_units=feedback.target_inventory_units,
         variable_nonlabor_cost_per_unit_usd=0.15,
         inventory_carry_cost_per_unit_usd=0.005,
@@ -268,10 +309,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         scenario="median",
         institution_mode="household_demand",
         planned_output_units=feedback.planned_output_units,
+        producer_employment_count=employer_2.target_headcount,
     )
     replay_sha = canonical_sha256(
         {
             "period_1_manifest_sha256": _file_sha256(args.period_1_run / "manifest.json"),
+            "household_input_sha256": household_input_sha256,
+            "history_input_sha256": history_input_sha256,
             "cards": cards,
             "payloads": [record["payload"] for record in records],
             "feedback": _jsonable(feedback),
@@ -282,6 +326,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         {
             "schema_version": SCHEMA_VERSION,
             "period_1_manifest_sha256": _file_sha256(args.period_1_run / "manifest.json"),
+            "household_input_sha256": household_input_sha256,
+            "history_input_sha256": history_input_sha256,
             "source_sha256": _source_sha256(),
             "provider": args.provider,
             "model": args.model,
@@ -317,6 +363,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         [_jsonable(row) | {"period": 2} for row in result_2.accounting_residuals]
     ).to_csv(staging / "accounting_audit.csv", index=False)
     period_1_consumption = float(employer_1["revenue_usd"])
+    producer_employment_index_2 = float(result_2.employer.employment_count) / max(
+        float(employer_1["employment_count"]), 1e-12
+    )
+    producer_wage_index_2 = float(result_2.employer.average_hourly_wage_usd) / max(
+        float(employer_1["average_hourly_wage_usd"]), 1e-12
+    )
     paths = pd.DataFrame(
         [
             {
@@ -338,8 +390,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "consumption_usd": float(result_2.employer.revenue_usd),
                 "output_units": float(result_2.employer.output_units),
                 "inventory_units": float(result_2.employer.inventory_end_units),
-                "producer_employment_index": feedback.producer_employment_index,
-                "producer_wage_index": feedback.producer_wage_index,
+                "producer_employment_index": producer_employment_index_2,
+                "producer_wage_index": producer_wage_index_2,
                 "family_wage_income_usd": sum(
                     masses[row.household_id] * row.monthly_family_wage_income_usd
                     for row in period_2_states
@@ -362,6 +414,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "period_1_run": str(args.period_1_run.resolve()),
         "period_1_manifest_sha256": _file_sha256(args.period_1_run / "manifest.json"),
+        "household_input_sha256": household_input_sha256,
+        "history_input_sha256": history_input_sha256,
         "origin_month": period_1_manifest["origin_month"],
         "period_2_target_month": period_2_target_month,
         "household_count": len(period_2_states),
@@ -381,6 +435,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "public_information_reused_from_period_1": True,
         "simulated_environment_separately_labelled": True,
         "respondent_employment_status_changed": False,
+        "aggregate_producer_employment_realized_in_settlement": True,
         "target_values_loaded_into_prompts": False,
         "period_2_output_planned_from_period_1_demand": True,
         "period_2_public_information_policy": (
@@ -403,13 +458,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     report = [
         "# Two-Period LLM Household Economy",
         "",
-        "This unscored mechanism run closes one feedback loop: period-one household demand changes producer output, inventories, employment, wages, and family wage income; the same LLM households then decide again from their carried balances and updated income.",
+        "This unscored mechanism run closes one feedback loop: period-one household demand changes producer output, inventories, aggregate employment, wages, and family wage income; the same LLM households then decide again from their carried balances and updated income.",
         "",
-        f"Period-two household consumption changes **{paths.iloc[1]['consumption_growth_from_period_1_pct']:+.2f}%** from period one. Producer employment moves to **{feedback.producer_employment_index:.3f}** and the wage index to **{feedback.producer_wage_index:.3f}** (period one = 1).",
+        f"Period-two household consumption changes **{paths.iloc[1]['consumption_growth_from_period_1_pct']:+.2f}%** from period one. Settled producer employment moves to **{producer_employment_index_2:.3f}** and the average-wage index to **{producer_wage_index_2:.3f}** (period one = 1).",
         "",
         f"Accounting: **{'PASS' if manifest['accounting_passed'] else 'FAIL'}**; maximum residual `{manifest['max_abs_accounting_residual']:.3g}`.",
         "",
-        "The firm is deliberately mechanical, not another LLM. It plans output from prior demand and adjusts employment and wages gradually. Period-two sales still emerge from fresh household choices.",
+        "The firm is deliberately mechanical, not another LLM. It plans output from prior demand and realizes aggregate employment and wages in settlement. Respondent job statuses remain fixed because the data do not identify which family earner changes hours. Period-two sales still emerge from fresh household choices.",
+        "",
+        "This run is a mechanism trace, not a causal estimate of the feedback effect: it has no matched no-feedback household-call arm.",
     ]
     (staging / "feedback_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
     for path in sorted(staging.iterdir()):

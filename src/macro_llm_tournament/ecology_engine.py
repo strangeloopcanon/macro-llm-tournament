@@ -101,6 +101,7 @@ def run_monthly_ecology(
     scenario: str = "median",
     institution_mode: str = "dynamic",
     planned_output_units: float | None = None,
+    producer_employment_count: float | None = None,
 ) -> MonthlyEcologyResult:
     if scenario not in {"downside", "median", "upside"}:
         raise ValueError("scenario must be downside, median, or upside")
@@ -110,6 +111,11 @@ def run_monthly_ecology(
         not math.isfinite(planned_output_units) or planned_output_units < 0.0
     ):
         raise ValueError("planned_output_units must be finite and nonnegative")
+    if producer_employment_count is not None and (
+        not math.isfinite(producer_employment_count)
+        or producer_employment_count < 0.0
+    ):
+        raise ValueError("producer_employment_count must be finite and nonnegative")
     if not households:
         raise ValueError("households must be non-empty")
     employer.validate()
@@ -443,11 +449,16 @@ def run_monthly_ecology(
         else 0.0
     )
     inventory_end_units = employer.inventory_units + output_units - units_sold
-    employment_count = aggregate(
+    household_employment_count = aggregate(
         {
             household_id: row.employment_share_end
             for household_id, row in results_by_id.items()
         }
+    )
+    employment_count = (
+        producer_employment_count
+        if producer_employment_count is not None
+        else household_employment_count
     )
     vacancies = max(0.0, employer.target_headcount - employment_count)
     wage_bill_usd = aggregate(
@@ -510,7 +521,13 @@ def run_monthly_ecology(
         employment_count=employment_count,
         vacancies=vacancies,
         average_hourly_wage_usd=(
-            wage_bill_usd / total_hours if total_hours > 0.0 else employer.wage_offer_usd
+            wage_bill_usd / (employment_count * 160.0)
+            if producer_employment_count is not None and employment_count > 0.0
+            else (
+                wage_bill_usd / total_hours
+                if total_hours > 0.0
+                else employer.wage_offer_usd
+            )
         ),
         current_price_per_unit_usd=employer.price_per_unit_usd,
         next_price_per_unit_usd=next_price,
@@ -612,6 +629,8 @@ def run_monthly_ecology(
         households=household_results,
         employer=employer_result,
         credit=credit_result,
+        external_income_total_usd=external_income_total,
+        omitted_fixed_outflows_total_usd=omitted_fixed_outflows_total,
     )
     return MonthlyEcologyResult(
         schema_version=ECOLOGY_SCHEMA_VERSION,
@@ -865,7 +884,7 @@ def _counterparty_flows(
                 from_party_type="household",
                 to_party_id="external_fixed_outflow_sector",
                 to_party_type="external_sector",
-                category="taxes_and_omitted_recurring_outflows",
+                category="taxes_nondeposit_saving_and_omitted_outflows",
                 amount_usd=omitted_fixed_outflow_usd * population_mass,
             )
         )
@@ -922,6 +941,8 @@ def _accounting_residuals(
     households: list[HouseholdMonthResult],
     employer: EmployerMonthResult,
     credit: CreditMonthResult,
+    external_income_total_usd: float,
+    omitted_fixed_outflows_total_usd: float,
 ) -> list[AccountingResidual]:
     residuals: list[AccountingResidual] = []
     for row in households:
@@ -989,6 +1010,27 @@ def _accounting_residuals(
                     for row in households
                     for flow in row.counterparties
                     if flow.category == "debt_payment"
+                ),
+            ),
+            AccountingResidual(
+                name="counterparty:external_income",
+                residual=external_income_total_usd
+                - sum(
+                    flow.amount_usd
+                    for row in households
+                    for flow in row.counterparties
+                    if flow.category == "nonwage_and_transfer_income"
+                ),
+            ),
+            AccountingResidual(
+                name="counterparty:taxes_nondeposit_saving_and_omitted_outflows",
+                residual=omitted_fixed_outflows_total_usd
+                - sum(
+                    flow.amount_usd
+                    for row in households
+                    for flow in row.counterparties
+                    if flow.category
+                    == "taxes_nondeposit_saving_and_omitted_outflows"
                 ),
             ),
         ]

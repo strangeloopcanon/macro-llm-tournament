@@ -205,6 +205,7 @@ class EcologyObservabilityTests(unittest.TestCase):
                         "consumption_usd": 100.0,
                         "output_units": 100.0,
                         "producer_employment_index": 1.0,
+                        "producer_wage_index": 1.0,
                         "consumption_growth_from_period_1_pct": 0.0,
                     },
                     {
@@ -212,6 +213,7 @@ class EcologyObservabilityTests(unittest.TestCase):
                         "consumption_usd": 101.0,
                         "output_units": 102.0,
                         "producer_employment_index": 1.005,
+                        "producer_wage_index": 1.001,
                         "consumption_growth_from_period_1_pct": 1.0,
                     }
                 ]
@@ -219,7 +221,11 @@ class EcologyObservabilityTests(unittest.TestCase):
             (feedback_dir / "manifest.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": ecology_observability.FEEDBACK_SCHEMA_VERSION,
                         "origin_month": "2026-07-01",
+                        "household_count": 1,
+                        "accounting_passed": True,
+                        "replay_verified": True,
                         "period_1_run": str(period_one_dir),
                         "period_1_manifest_sha256": _artifact_sha256(
                             period_one_dir / "manifest.json"
@@ -238,7 +244,7 @@ class EcologyObservabilityTests(unittest.TestCase):
                 feedback_dir
             )
 
-        self.assertEqual(len(rows), 3)
+        self.assertEqual(len(rows), 4)
         self.assertIsNotNone(manifest_sha256)
         self.assertTrue(all(row["target_month"] == "2026-09-01" for row in rows))
         self.assertTrue(
@@ -253,7 +259,7 @@ class EcologyObservabilityTests(unittest.TestCase):
             {
                 row["source_class"]
                 for row in rows
-                if row["layer"] == "firm_response_shadow"
+                if row["layer"] == "recursive_firm_feedback"
             },
             {"mechanical_firm_feedback"},
         )
@@ -267,6 +273,10 @@ class EcologyObservabilityTests(unittest.TestCase):
             (feedback_dir / "manifest.json").write_text(
                 json.dumps(
                     {
+                        "schema_version": ecology_observability.FEEDBACK_SCHEMA_VERSION,
+                        "household_count": 1,
+                        "accounting_passed": True,
+                        "replay_verified": True,
                         "artifacts": {
                             "dynamic_macro_paths.csv": _artifact_sha256(
                                 feedback_dir / "dynamic_macro_paths.csv"
@@ -279,6 +289,11 @@ class EcologyObservabilityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "missing fields"):
                 ecology_observability._feedback_period_two_rows(feedback_dir)
+
+    def test_explicit_feedback_run_missing_artifact_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ValueError, "missing dynamic_macro_paths"):
+                ecology_observability._feedback_period_two_rows(Path(temporary))
 
     def test_observed_panel_keeps_prospective_rows_unscored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
