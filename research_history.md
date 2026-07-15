@@ -10,7 +10,7 @@ The durable findings are:
 - demographic or backstory personas flattened real household heterogeneity;
 - prior-conditioned belief updating worked better than generating beliefs from a
   profile alone;
-- raw allocation answers were unstable, while deterministic feasibility and
+- raw allocation answers were unstable, while code-enforced feasibility and
   LLM-authored conditional policies were more useful;
 - the earlier recursive 200-household economy ran and balanced, but its output was
   still effectively demand-defined, labor and credit barely moved, and large belief
@@ -20,7 +20,7 @@ The durable findings are:
 
 The active architecture therefore keeps the parts that survived: survey-seeded
 household state supplies heterogeneity, the LLM updates beliefs and states intentions,
-and deterministic institutions execute and settle actions. Historical implementation
+and code-enforced institutions execute and settle actions. Historical implementation
 and evidence are preserved at Git tag `macro-v1-weighted-demand`; they are not part
 of the active code surface.
 
@@ -73,12 +73,12 @@ later 2025 waves. It also found that the prompt described job-loss execution whi
 rolling engine held employment fixed. The v19 arithmetic was reproducible, but the run
 is invalid as evidence and is preserved only in the local archive.
 
-The active v20 campaign preserves wave-specific missingness, describes the fixed-labor
-executor truthfully, and reruns all 1,000 household calls from fresh cache identities.
-It retains 4/4 consumption signs with RMSE 0.61 percentage points, versus 0.24 for the
+The v20 campaign preserved wave-specific missingness, described the fixed-labor
+executor truthfully, and reran all 1,000 household calls from fresh cache identities.
+It retained 4/4 consumption signs with RMSE 0.61 percentage points, versus 0.24 for the
 origin-visible routine-drift anchor. Correlation is 0.10 and credit direction is 1/4.
-The prospective July-to-August forecast is frozen at +0.08%. This v20 result is the
-active evidence surface.
+The prospective July-to-August forecast was frozen at +0.08%. It was superseded by
+the v21 prompt and budget contract described below.
 
 ## Full Observability And Firm Shadow
 
@@ -97,3 +97,32 @@ zero wage would be fabricated structure. The retained firm shadow therefore stop
 sales, inventory-adjusted output, labor requirement, partial employment adjustment,
 and price pressure. It is a diagnostic projection, not a scored forecast or a closed
 feedback loop.
+
+## Deposit Residual And Two-Period Producer Loop
+
+The observability pass also overturned its own deposit diagnosis. Counterfactual
+execution showed that the LLM's explicit deposit contribution did not constrain
+consumption for 198 of 200 households; it mainly changed extra debt repayment. Asking
+for consumption, debt, borrowing, and deposits separately had overdetermined the
+budget. V21 removed the deposit field and made deposits the cash residual.
+
+The large remaining residual came from a different mismatch: SCF gross family income
+was being compared with a spending proxy that excludes taxes and some recurring
+obligations. V21 records those omitted outflows explicitly, using a declared 10% of
+gross-income floor and the existing household saving-rate field when it implies more.
+The weighted gross-income residual fell from roughly 17% to about 7%.
+
+The prompt also gained an origin-visible next-month spending anchor and clearer
+instructions to preserve ordinary nominal inertia. Fresh calls did not improve the
+macro score. The four forecasts became -0.24%, +0.11%, -0.02%, and -0.02% against
+positive first-release PCE growth in every month. RMSE rose to 0.70 points and sign
+accuracy fell to 1/4, although correlation improved to 0.81. The model ranks the
+months better while remaining too compressed around zero.
+
+Finally, the producer shadow became a genuine two-period loop without adding an LLM
+firm. Prior demand changes output, inventory, aggregate producer employment, wages,
+and family wage income. Deposits and debt carry forward, and all 200 households make
+fresh period-two choices from the simulated state. In the first unscored run,
+employment rose 0.015%, wages rose 0.0015%, and period-two consumption fell 0.06% as
+inventories accumulated. The loop works and accounts balance; weak household demand
+remains the binding failure.

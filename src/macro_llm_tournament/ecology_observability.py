@@ -24,6 +24,7 @@ PRICE_PRESSURE_INVENTORY_WEIGHT = 0.10
 LLM_HOUSEHOLD_ECONOMY_SETTLEMENT_LABEL = (
     "LLM household economy - code-enforced budgets and settlement"
 )
+LLM_HOUSEHOLD_ECONOMY_CHART_LABEL = "LLM household economy"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -523,7 +524,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
         subset = observed.loc[observed["metric"].eq(metric)]
         styles = {
             "first_release_actual": ("actual", "o", "-", "First-release actual"),
-            "llm_household_economy": ("llm", "s", "-", LLM_HOUSEHOLD_ECONOMY_SETTLEMENT_LABEL),
+            "llm_household_economy": ("llm", "s", "-", LLM_HOUSEHOLD_ECONOMY_CHART_LABEL),
             "routine_visible_drift": ("routine", "^", "--", "Origin-visible drift"),
         }
         for role, (color, marker, line, label) in styles.items():
@@ -545,7 +546,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
             axis.set_ylim(-1.25, 1.25)
         else:
             axis.set_ylabel("Monthly growth (%)")
-        axis.legend(fontsize=8, frameon=False, ncol=2)
+        axis.legend(fontsize=8, frameon=False, ncol=1, loc="best")
 
     observed_axis(axes[0, 0], "consumption_growth_pct", "Observed comparison: nominal consumption")
     observed_axis(axes[0, 1], "revolving_credit_growth_pct", "Observed comparison: revolving credit (sign-only proxy)", True)
@@ -652,7 +653,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
             linestyle="--" if target_axis is credit_axis else "-",
         )
     axes[2, 0].axhline(0.0, color="#B8B8B8", linewidth=0.8)
-    axes[2, 0].set_title(LLM_HOUSEHOLD_ECONOMY_SETTLEMENT_LABEL)
+    axes[2, 0].set_title("LLM household economy: settled outcomes")
     axes[2, 0].set_ylabel("Growth (%) / residual change (pp)")
     credit_axis.set_ylabel("Revolving debt growth (%)", color="#E07A1F")
     handles, labels = axes[2, 0].get_legend_handles_labels()
@@ -669,7 +670,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
         rows = simulation.loc[(simulation["layer"] == "firm_response_shadow") & (simulation["metric"] == metric)].sort_values("target_month")
         plot_simulation(axes[2, 1], rows, label=label)
     axes[2, 1].axhline(100.0, color="#B8B8B8", linewidth=0.8)
-    axes[2, 1].set_title("Mechanical next-period firm response shadow")
+    axes[2, 1].set_title("Producer response and two-period feedback")
     axes[2, 1].set_ylabel("Index (origin baseline = 100)")
     axes[2, 1].legend(fontsize=8, frameon=False)
 

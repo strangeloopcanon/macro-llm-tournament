@@ -1,79 +1,74 @@
 # Current Project Surface
 
-The active system is a 200-household rolling demand economy. Real SCE histories
-supply household heterogeneity and personal belief priors. Deterministic matches
-to the 2022 SCF supply income, liquidity, spending, and debt states. GPT-5.5 writes
-paired state-contingent next-month dollar policies per household; code applies
-them to the fixed observed employment shares and closes the accounts.
+The active system is a 200-household LLM economy with one closed producer-income
+feedback step.
 
-Each forecast origin starts again from the same fixed SCE-SCF household anchor and
-receives newly available public information. It does not carry simulated balances,
-forecast errors, or later observations into the next origin. This is the sensible
-rolling procedure for period-by-period forecasts; free-running counterfactuals are
-not part of the active evidence path.
+```text
+real household priors -> LLM beliefs and dollar policies -> code-enforced
+budgets and settlement -> aggregate demand -> producer output/inventory ->
+employment/wages -> updated family income -> fresh LLM household decisions
+```
 
-## What We Know
+Rolling forecasts still re-anchor to observed SCE-SCF state at every historical
+origin. The separate two-period experiment carries simulated deposits, debt,
+inventory, employment, wages, and family income forward once. This keeps forecast
+evaluation and recursive simulation distinct while using the same household
+behavior.
 
-Across January-April 2026 origins, the ecology forecasts nominal consumption
-growth of **+0.01%, +0.02%, +0.06%, and +0.16%**. First-release PCE growth is
-**+0.48%, +0.90%, +0.51%, and +0.71%**.
+## What Works
 
-- Direction: **4/4 correct**.
-- RMSE: **0.61 percentage points**.
-- Origin-visible routine-drift RMSE: **0.24 points**.
-- Revolving-credit direction: **1/4 correct**.
-- Accounting: **PASS** in all four runs.
+- 200 distinct households receive private histories, financial states, and only
+  origin-visible information.
+- Household choices are expressed in nominal dollars for committed spending,
+  discretionary spending, debt repayment, and borrowing.
+- Deposits are a residual rather than a second, inconsistent choice.
+- The producer pays family wage income, plans output from prior demand, carries
+  inventory, and adjusts employment and wages gradually.
+- The same households decide again from carried balances and updated income.
+- All household, producer, credit, inventory, deposit, and debt identities pass.
+- Live and replay executions are hash-bound and equivalent.
 
-The result is narrower than “the simulated economy forecasts well.” It says the
-household-policy design produces positive demand at all four diagnostic origins.
-It remains too conservative and is not yet competitive with
-a simple current-information anchor.
+## What The Numbers Say
 
-## Full Economic Surface
+The fresh v21 retrospective forecasts are `-0.24%, +0.11%, -0.02%, -0.02%`
+against first-release PCE growth of `+0.48%, +0.90%, +0.51%, +0.71%`.
 
-The active diagnostic now exposes six layers across every rolling origin:
+- Consumption RMSE: **0.70 pp**.
+- Direction: **1/4**.
+- Correlation: **0.81**.
+- Routine-drift RMSE: **0.24 pp**.
+- Revolving-credit direction: **1/4**.
+- Accounting: **PASS** in all runs.
 
-1. first-release PCE and revolving-credit comparisons;
-2. population-weighted LLM inflation, income, and personal job-loss beliefs;
-3. household consumption, deposit, debt-payment, and borrowing intentions;
-4. feasible household spending and balance-sheet execution;
-5. firm and credit accounting; and
-6. an unscored next-period firm-response shadow.
+The correlation improvement means the model contains some information about
+relative month strength. The level and sign failures mean it is still too
+conservative to be a useful macro forecast.
 
-This is enough to observe the current household-demand economy end to end. It is
-not yet a full recursive macroeconomy: wages and employment do not feed back into
-income and another round of household decisions. The shadow deliberately stops
-before that unsupported step because the SCE-SCF state has family earnings but no
-identified respondent wage allocation.
+The July origin is frozen for August at **+0.03%**. In the two-period mechanism
+run, period-one demand produces a `+0.015%` employment-index change and a
+`+0.0015%` wage-index change; fresh period-two household spending then changes
+**-0.06%**. The loop works, but weak household demand naturally produces weak
+feedback.
 
-The surface localizes the amplitude failure. Intended deposit additions are
-13.4% to 18.8% of baseline monthly consumption across the five origins, while
-intended consumption growth is only 0.01% to 0.16%. Deterministic feasibility
-barely changes those intentions. The weak macro demand therefore begins in the
-household policy, rather than being created by rationing, firm settlement, or
-credit limits.
+## Deposit State
 
-## Frozen Forecast
+The old “deposit intention” was removed because it did not constrain consumption
+and overdetermined the budget. Taxes and omitted recurring outflows are now an
+explicit fixed household flow. The weighted gross-income residual is about 7%,
+down from about 17%; the remaining deposit change is a cash residual, not an LLM
+saving instruction or a national saving-rate forecast.
 
-The July 1 origin, using information through July 10, is frozen for August 2026.
-Its point forecast is **+0.08%** nominal consumption growth. The run used 200 fresh
-Codex CLI calls with zero failures; its replay uses 200 cache hits and zero calls,
-matches the immutable live reference, and passes accounting with maximum residual
-`1.30e-08`.
+## Next Model-Building Problem
 
-## Next Work
+The economy no longer lacks a feedback loop. It lacks enough realistic household
+response amplitude. The next development should improve how supplied beliefs,
+recent spending drift, and household state change committed and discretionary
+spending, using the spent historical origins. The frozen August result must remain
+untouched until its realization arrives.
 
-1. Append the August first release without changing the frozen forecast.
-2. Continue the same rolling forecast at each new origin.
-3. Improve the household policy's response amplitude on spent historical origins,
-   focusing on the unusually large intended deposit contribution while keeping
-   the genuine SCE personal job-loss prior and fixed accounting contract.
-4. Do not add LLM firms or banks yet. Promote the firm shadow into a genuine
-   feedback loop only after a defensible family-income-to-labor-state mapping
-   exists and household demand itself behaves credibly.
+Current local evidence:
 
-The canonical evidence is in
-`outputs/household_ecology_200_july_v20_current/` and
-`outputs/household_ecology_retrospective_2026_01_04_v20/`. The full panel is in
-`outputs/household_ecology_observability_v1/`. Earlier versions are
-superseded and belong in the local archive.
+- `outputs/household_ecology_200_july_v21_current/`
+- `outputs/household_ecology_retrospective_2026_01_04_v21/`
+- `outputs/household_ecology_feedback_200_july_v1/`
+- `outputs/household_ecology_observability_v2/`

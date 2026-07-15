@@ -822,10 +822,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     feasibility_wedge = executed_growth - intended_growth
     execution_sentence = (
-        "Deterministic execution leaves that aggregate intention unchanged."
+        "Code-enforced settlement leaves that aggregate intention unchanged."
         if abs(feasibility_wedge) < 0.005
         else (
-            f"Deterministic feasibility changes it by **{feasibility_wedge:+.2f} percentage points** "
+            f"Code-enforced feasibility changes it by **{feasibility_wedge:+.2f} percentage points** "
             "through debt service and binding household resources."
         )
     )
@@ -836,7 +836,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "## Bottom Line",
         "",
         f"This is a complete **{len(states)}-household** forecast from the household-first ecology. "
-        "Each household was elicited separately; deterministic code then enforced budgets, "
+        "Each household was elicited separately; the LLM household economy then enforced budgets, "
         "credit limits, production feasibility, and settlement.",
         "",
         f"The point path predicts consumption growth of **{executed_growth:.2f}%**. "
@@ -857,7 +857,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "                              |",
         "                 beliefs and intended choices",
         "                              |",
-        "          deterministic budgets, credit, and production",
+        "          code-enforced budgets, credit, and production",
         "                              |",
         "          household actions -> aggregate demand and balances",
         "```",
@@ -909,9 +909,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "",
             "## What This Establishes",
             "",
-            "This run is a household-demand microeconomy rather than an aggregate demand identity. Household policies generate demand from the bottom up; deterministic production follows expected sales with gradual inventory adjustment; loans, payments, deposits, and sales have explicit counterparties. Wages and respondent employment are held fixed in this diagnostic so an uncalibrated labor market cannot manufacture the consumption result.",
+            "This run is a household-demand microeconomy rather than an aggregate demand identity. Household policies generate demand from the bottom up; code-enforced production follows expected sales with gradual inventory adjustment; loans, payments, deposits, and sales have explicit counterparties. Wages and respondent employment are held fixed in this diagnostic so an uncalibrated labor market cannot manufacture the consumption result.",
             "",
-            "The cohort is initialized from March-April 2025 SCE observations, the latest common two-wave panel used here, while the public macro card is current to the forecast cutoff. Financial states are deterministic SCE-conditioned matches to public 2022 SCF households, not contemporaneous linked household accounts.",
+            "The cohort is initialized from March-April 2025 SCE observations, the latest common two-wave panel used here, while the public macro card is current to the forecast cutoff. Financial states are reproducible SCE-conditioned matches to public 2022 SCF households, not contemporaneous linked household accounts.",
             "",
             f"It does not yet establish predictive accuracy. The current run deliberately omits firm and bank decision agents, and one untouched forecast origin cannot validate dynamics. The next evidence comes from appending realized {target_label} outcomes and repeating the same frozen procedure over several new months.",
         ]
