@@ -16,13 +16,18 @@ from typing import Any, Sequence
 import pandas as pd
 
 from .ecology_engine import run_monthly_ecology
-from .ecology_history import ECOLOGY_HISTORY_SCHEMA_VERSION
+from .ecology_history import (
+    ECOLOGY_HISTORY_SCHEMA_VERSION,
+    SELECTED_HOUSEHOLD_COUNT,
+    validate_materialized_history,
+)
 from .ecology_inputs import load_origin_information
 from .ecology_information import build_macro_information_card
 from .ecology_households import (
     HOUSEHOLD_PROMPT_VERSION,
     HouseholdElicitor,
     LiveCallBudget,
+    accepted_call_journal_coverage,
     canonical_sha256,
     household_card,
     normalize_household_payload,
@@ -121,6 +126,8 @@ def _history_materialization_binding(
         or not public_history["columns"]
     ):
         raise ValueError("history materialization manifest has malformed public-history provenance")
+    if payload.get("selected_household_count") != SELECTED_HOUSEHOLD_COUNT:
+        raise ValueError("history materialization manifest has the wrong household count")
     if (
         not isinstance(payload.get("through_event_month"), str)
         or not payload["through_event_month"].strip()
@@ -132,6 +139,17 @@ def _history_materialization_binding(
     actual = _file_sha256(history_path)
     if expected != actual:
         raise ValueError("history materialization manifest does not bind the history CSV")
+    try:
+        validated_history = validate_materialized_history(pd.read_csv(history_path))
+    except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError) as exc:
+        raise ValueError("materialized public history is not a readable CSV") from exc
+    if (
+        public_history["row_count"] != len(validated_history)
+        or public_history["event_count"] != validated_history["event_date"].nunique()
+        or public_history["columns"] != list(validated_history.columns)
+        or payload["through_event_month"] != validated_history["event_date"].max()
+    ):
+        raise ValueError("history materialization manifest disagrees with the public history")
     return {
         "schema_version": payload.get("schema_version"),
         "manifest_sha256": _file_sha256(manifest_path),
@@ -218,6 +236,13 @@ def _load_inputs(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.DataFrame, 
         raise ValueError("--household-count exceeds available cohort")
     households = _coverage_sample(households, args.household_count)
     history = pd.read_csv(args.history)
+    household_ids = set(households["type_id"].astype(str))
+    history_ids = set(history["household_id"].astype(str))
+    missing_history = household_ids.difference(history_ids)
+    if missing_history:
+        raise ValueError(
+            "selected household cohort is not fully represented in household history"
+        )
     origin, bundle_sha = load_origin_information(args.bundle, args.origin)
     return households, history, origin, bundle_sha
 
@@ -795,6 +820,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     ]).to_csv(output / "accounting_audit.csv", index=False)
     target_month = (pd.Timestamp(args.origin) + pd.offsets.MonthBegin(1)).date().isoformat()
     forecast_frozen = pd.Timestamp(origin["as_of_date"]) < pd.Timestamp(target_month)
+    journal_coverage = accepted_call_journal_coverage(records, attempt_journal_dir)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "origin_month": args.origin,
@@ -847,6 +873,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if attempt_journal_dir.exists() and any(attempt_journal_dir.iterdir())
             else None
         ),
+        "accepted_call_journal_coverage": journal_coverage,
         "cache_hit_count": sum(bool(record.get("cache_hit", False)) for record in records),
         "provider_response_count": sum("response_created_utc" in record for record in records),
         "worker_count": worker_count,

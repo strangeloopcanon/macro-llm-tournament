@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from .ecology_provider import (
     CODEX_INSTRUCTION_CONTEXT_VERSION,
@@ -70,6 +70,42 @@ class LiveCallBudget:
             payload["response_sha256"] = canonical_sha256(response) if response is not None else None
             payload["error_sha256"] = hashlib.sha256(error.encode()).hexdigest() if error is not None else None
             path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def accepted_call_journal_coverage(
+    records: Sequence[Mapping[str, Any]], journal_dir: Path
+) -> dict[str, Any]:
+    """Match accepted response payloads to retained provider-attempt journals."""
+    eligible = [
+        record
+        for record in records
+        if record.get("request_sha256") and record.get("payload") is not None
+    ]
+    retained: set[tuple[str, str]] = set()
+    malformed_count = 0
+    if journal_dir.exists():
+        for path in journal_dir.glob("*.json"):
+            try:
+                row = json.loads(path.read_text(encoding="utf-8"))
+                if row.get("status") == "accepted":
+                    retained.add((str(row["cache_name"]), str(row["response_sha256"])))
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                malformed_count += 1
+    matched = sum(
+        (
+            str(record["request_sha256"]),
+            canonical_sha256(record["payload"]),
+        )
+        in retained
+        for record in eligible
+    )
+    return {
+        "eligible_response_count": len(eligible),
+        "matched_response_count": matched,
+        "missing_response_count": len(eligible) - matched,
+        "match_rate": matched / len(eligible) if eligible else None,
+        "malformed_journal_count": malformed_count,
+    }
 
 
 def canonical_sha256(value: Any) -> str:
@@ -430,7 +466,6 @@ Return exactly one JSON object with this shape:
 
 def fixture_response(card: Mapping[str, Any]) -> dict[str, Any]:
     state = card["household"]["current_state"]
-    profile = card["household"]["profile"]
     liquid = float(state.get("liquid_assets") or 0.0)
     monthly = max(1.0, float(state.get("monthly_consumption") or 1.0))
     debt = max(0.0, float(state.get("revolving_debt") or 0.0))

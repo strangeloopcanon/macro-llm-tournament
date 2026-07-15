@@ -41,6 +41,9 @@ first-release PCE growth of `+0.48%, +0.90%, +0.51%, +0.71%`.
 - Forecast/actual standard-deviation ratio: **0.563**.
 - Direction: **1/4**.
 - Origin-visible drift RMSE: **0.243 pp**.
+- Origin-visible drift demeaned RMSE: **0.113 pp**.
+- Origin-visible drift correlation: **0.974**.
+- Origin-visible drift direction: **4/4**.
 - Settlement audit: **PASS** in every final run.
 
 The July origin is frozen for August at **-0.13%**. In the two-period mechanism
@@ -54,16 +57,22 @@ the executable baseline, the households do not predict the absolute monthly grow
 rate well. They are about 0.75 points too pessimistic on average and produce a little
 over half the observed variation.
 
-But the cross-month ordering survives. A `0.683` correlation and `0.126`-point
-demeaned RMSE across four observations say the households react more strongly in the
-months when real consumption later grows more strongly. With four retrospective proxy
-observations, that is a hypothesis worth testing, not evidence of a durable signal.
+The cross-month ordering does not establish incremental signal. The PCE drift already
+shown in every household prompt has `0.974` correlation, `0.113`-point demeaned RMSE,
+and 4/4 direction, beating the household economy on every scored consumption
+diagnostic. The household layer currently turns its visible context into worse point
+forecasts.
 
 The economy is simulatable: household policies create demand, demand changes the
 producer state and family income, and households respond again. The next model
 problem is the level of ordinary nominal spending, especially the recurring baseline
 and the model's systematic tendency to cut discretionary purchases. Adding LLM firms
 or banks would not fix that.
+
+All cached payloads replay exactly. Retained accepted-call journals cover 200/200
+current payloads, 309/800 historical payloads, and 200/200 period-two payloads. The
+491 historical records without journals remain useful development artifacts, but their
+original provider attempts are not independently evidenced by the retained workspace.
 
 ## Active Evidence
 
