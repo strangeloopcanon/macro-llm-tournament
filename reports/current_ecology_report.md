@@ -1,15 +1,16 @@
-# The Household Economy Finds A Timing Pattern, Not Yet The Level
+# The Household Economy Runs, But Has Not Added Forecast Signal Yet
 
 The 200-household economy now produces its forecast from household decisions alone.
 That correction overturns the previous 4/4 directional result: across four historical
 months, the anchor-free forecasts have RMSE `0.782` percentage points and get one
-direction right. Yet they rank the months well. Correlation with first-release PCE is
-`0.683`, and RMSE after removing the common level bias is `0.126` points.
+direction right. Their correlation with first-release PCE is `0.683`, but this is not
+incremental forecast evidence. The origin-visible PCE drift supplied to every household
+does better on RMSE, correlation, demeaned RMSE, and direction.
 
-So we have a real simulated household economy and an intriguing relative pattern over
-four retrospective proxy observations. We do not yet have a good absolute macro
-forecast. The households are systematically too pessimistic by `0.771` points and
-generate a little over half the observed month-to-month variation.
+So we have a real simulated household economy, but not evidence that its household
+layer improves the public information it receives. The households are systematically
+too pessimistic by `0.771` points and generate a little over half the observed
+month-to-month variation.
 
 ## What The Economy Does
 
@@ -62,19 +63,20 @@ Code then applies cash, credit, goods, and counterparty constraints.
 | Forecast/actual standard-deviation ratio | 0.563 |
 | Consumption direction | 1/4 |
 | Origin-visible drift RMSE | 0.243 pp |
+| Origin-visible drift demeaned RMSE | 0.113 pp |
+| Origin-visible drift correlation | 0.974 |
+| Origin-visible drift direction | 4/4 |
 | Revolving-credit direction | 1/4 |
 | Settlement audit | PASS |
 
 ![Economic observability surface](current_ecology_observability_surface.png)
 
-The level and timing results are different facts. The households reduce spending in
-three months when nominal PCE rose in all four, so their point forecasts are poor. But
-February is their weakest month and March their strongest, matching the ranking of the
-real outcomes. The model seems to recognize changes in relative demand pressure while
-turning that information into excessively cautious household budgets.
-
-The simple origin-visible drift remains much better in levels. It is shown as context,
-not as part of the LLM economy.
+The households reduce spending in three months when nominal PCE rose in all four, so
+their point forecasts are poor. They rank the four months moderately well, but the
+visible drift ranks them better (`0.974` correlation versus `0.683`) and also has a
+lower demeaned RMSE (`0.113` versus `0.126`). We therefore cannot attribute the timing
+pattern to household reasoning. The current household layer transforms stronger public
+context into weaker forecasts.
 
 ## Why The Previous Result Changed
 
@@ -114,8 +116,11 @@ not a September forecast or an estimate of the causal value of feedback.
 
 ## Integrity Record
 
-- Final published runs replay 200 current, 800 historical, and 200 period-two banked
-  Codex CLI responses with no fresh calls.
+- Final published runs replay 200 current, 800 historical, and 200 period-two cached
+  Codex CLI payloads with no fresh calls. Retained accepted-call journals match 200/200
+  current and 200/200 period-two payloads, but only 309/800 historical payloads. The
+  remaining historical cache records are hash-bound and replayable, but no retained
+  journal independently proves their original provider attempt.
 - Prompt cards contain no realized targets. Historical cards expose only household
   observations and public information available at each origin.
 - The household-history manifest and public history file are hash-bound into every
@@ -130,9 +135,9 @@ not a September forecast or an estimate of the causal value of feedback.
 
 The architecture is now honest enough to diagnose. Survey data supplies household
 heterogeneity, the LLM writes state-dependent policies, settlement creates aggregate
-demand, and demand feeds back into income before the next decision. The four-point
-timing pattern is enough to justify improving this object, not enough to call it a
-durable signal.
+demand, and demand feeds back into income before the next decision. The first clean
+historical test says this object does not yet improve on the information in its own
+prompt.
 
 The next work is narrower than adding more agents. We need a better household spending
 state and a better elicitation of ordinary nominal inertia. The current SCF-conditioned

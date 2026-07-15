@@ -37,6 +37,7 @@ from .ecology_households import (
     HOUSEHOLD_PROMPT_VERSION,
     HouseholdElicitor,
     LiveCallBudget,
+    accepted_call_journal_coverage,
     canonical_sha256,
     household_card,
     normalize_household_payload,
@@ -417,6 +418,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     period_2_target_month = (
         pd.Timestamp(period_1_manifest["target_month"]) + pd.DateOffset(months=1)
     ).strftime("%Y-%m-%d")
+    journal_coverage = accepted_call_journal_coverage(records, journal)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "evaluation_status": "unscored_two_period_mechanism_experiment",
@@ -438,8 +440,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "household_count": len(period_2_states),
         "accepted_household_response_count": len(records),
         "live_call_count": budget.used,
+        "fresh_accepted_response_count": budget.accepted,
         "cache_hit_count": sum(bool(row.get("cache_hit")) for row in records),
         "failed_provider_attempt_count": budget.failed,
+        "accepted_call_journal_coverage": journal_coverage,
         "accounting_passed": all(row.passed for row in result_2.accounting_residuals),
         "max_abs_accounting_residual": result_2.max_abs_residual(),
         "feedback_parameters": {

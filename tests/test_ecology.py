@@ -27,6 +27,7 @@ from macro_llm_tournament.ecology_engine import run_monthly_ecology
 from macro_llm_tournament.ecology_households import (
     HouseholdElicitor,
     LiveCallBudget,
+    accepted_call_journal_coverage,
     canonical_sha256,
     fixture_response,
     household_card,
@@ -41,6 +42,7 @@ from macro_llm_tournament.ecology_models import (
     QuantileTriplet,
     household_response_schema,
 )
+from macro_llm_tournament.persistent_households import HISTORY_COLUMNS
 
 FIXTURE_ROOT = PROJECT_ROOT / "examples/ecology_fixture"
 FIXTURE_HOUSEHOLDS = FIXTURE_ROOT / "households.csv"
@@ -48,7 +50,99 @@ FIXTURE_HISTORY = FIXTURE_ROOT / "history.csv"
 FIXTURE_BUNDLE = FIXTURE_ROOT / "origin_snapshot.json"
 
 
+def _valid_materialized_history() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for index in range(200):
+        row = {column: None for column in HISTORY_COLUMNS}
+        row.update(
+            {
+                "household_id": f"household_{index:03d}",
+                "event_date": "2025-09-01",
+                "public_availability_date": "2026-06-01",
+                "source_name": "SCE respondent microdata",
+                "observation_status": "observed",
+                "responded": True,
+                "attrition_status": "responding",
+                "death_status": "alive_no_death_observation",
+                "replay_required_from_event_date": "2025-09-01",
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows).loc[:, HISTORY_COLUMNS]
+
+
+def _history_manifest(history: Path) -> dict[str, object]:
+    provenance = {
+        name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "row_count": 1}
+        for name in ("base_history", "normalized_sce_microdata", "private_registry")
+    }
+    frame = pd.read_csv(history)
+    return {
+        "schema_version": "ecology_history_materialization_v1",
+        "through_event_month": str(frame["event_date"].max()),
+        "publication_lag_months": 9,
+        "selected_household_count": 200,
+        "input_provenance": provenance,
+        "public_history": {
+            "sha256": hashlib.sha256(history.read_bytes()).hexdigest(),
+            "row_count": len(frame),
+            "event_count": int(frame["event_date"].nunique()),
+            "columns": list(frame.columns),
+        },
+    }
+
+
 class HouseholdEcologyTests(unittest.TestCase):
+    def test_accepted_call_journal_coverage_matches_payload_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            journal = Path(temporary)
+            payload = {"answer": 3}
+            cache_name = "household_ecology_abc"
+            (journal / "attempt.json").write_text(
+                json.dumps(
+                    {
+                        "cache_name": cache_name,
+                        "status": "accepted",
+                        "response_sha256": canonical_sha256(payload),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            coverage = accepted_call_journal_coverage(
+                [
+                    {"request_sha256": cache_name, "payload": payload},
+                    {"request_sha256": "household_ecology_missing", "payload": payload},
+                ],
+                journal,
+            )
+        self.assertEqual(coverage["eligible_response_count"], 2)
+        self.assertEqual(coverage["matched_response_count"], 1)
+        self.assertEqual(coverage["missing_response_count"], 1)
+        self.assertEqual(coverage["match_rate"], 0.5)
+
+    def test_load_inputs_rejects_history_from_a_different_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            households = root / "households.csv"
+            history = root / "history.csv"
+            pd.DataFrame([{"type_id": "household_expected"}]).to_csv(
+                households, index=False
+            )
+            pd.DataFrame([{"household_id": "household_other"}]).to_csv(
+                history, index=False
+            )
+            args = Namespace(
+                household_count=1,
+                households=households,
+                history=history,
+                bundle=root / "unused.json",
+                origin="2026-01-01",
+            )
+            with self.assertRaisesRegex(ValueError, "not fully represented"):
+                from macro_llm_tournament.ecology import _load_inputs
+
+                _load_inputs(args)
+
     def test_unknown_employment_uses_scf_donor_state_and_earned_income(self) -> None:
         not_working = _state_from_row(
             pd.Series(
@@ -495,34 +589,47 @@ class HouseholdEcologyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             history = root / "history.csv"
-            history.write_text("household_id\nh1\n", encoding="utf-8")
+            _valid_materialized_history().to_csv(history, index=False)
             digest = hashlib.sha256(history.read_bytes()).hexdigest()
-            provenance = {
-                name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "row_count": 1}
-                for name in ("base_history", "normalized_sce_microdata", "private_registry")
-            }
             (root / "history_manifest.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": "ecology_history_materialization_v1",
-                        "through_event_month": "2025-09-01",
-                        "publication_lag_months": 9,
-                        "input_provenance": provenance,
-                        "public_history": {
-                            "sha256": digest,
-                            "row_count": 1,
-                            "event_count": 1,
-                            "columns": ["household_id"],
-                        },
-                    }
-                ),
+                json.dumps(_history_manifest(history)),
                 encoding="utf-8",
             )
             self.assertEqual(
                 _history_materialization_binding(history, required=True)["history_sha256"], digest
             )
-            history.write_text("household_id\nh2\n", encoding="utf-8")
+            changed = _valid_materialized_history()
+            changed.loc[0, "household_id"] = "household_changed"
+            changed.to_csv(history, index=False)
             with self.assertRaisesRegex(ValueError, "does not bind"):
+                _history_materialization_binding(history, required=True)
+
+    def test_history_materialization_rejects_hash_matched_incomplete_wave(self) -> None:
+        from macro_llm_tournament.ecology import _history_materialization_binding
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.csv"
+            _valid_materialized_history().iloc[:-1].to_csv(history, index=False)
+            (root / "history_manifest.json").write_text(
+                json.dumps(_history_manifest(history)), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "exactly 200 households"):
+                _history_materialization_binding(history, required=True)
+
+    def test_history_materialization_rejects_hash_matched_bad_dates(self) -> None:
+        from macro_llm_tournament.ecology import _history_materialization_binding
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = root / "history.csv"
+            malformed = _valid_materialized_history()
+            malformed["public_availability_date"] = "2025-08-01"
+            malformed.to_csv(history, index=False)
+            (root / "history_manifest.json").write_text(
+                json.dumps(_history_manifest(history)), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "cannot be public before"):
                 _history_materialization_binding(history, required=True)
 
     def test_history_materialization_manifest_rejects_wrong_schema(self) -> None:
@@ -552,6 +659,7 @@ class HouseholdEcologyTests(unittest.TestCase):
                         "schema_version": "ecology_history_materialization_v1",
                         "through_event_month": "2025-09-01",
                         "publication_lag_months": 9,
+                        "selected_household_count": 200,
                         "input_provenance": {},
                         "public_history": {},
                     }

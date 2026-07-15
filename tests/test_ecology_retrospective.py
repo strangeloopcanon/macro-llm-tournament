@@ -41,6 +41,25 @@ class EcologyRetrospectiveTests(unittest.TestCase):
         self.assertEqual(row["direction_n"], 3)
         self.assertAlmostEqual(row["direction_accuracy"], 2 / 3)
 
+    def test_origin_visible_context_is_scored_separately(self) -> None:
+        joined = pd.DataFrame(
+            {
+                "scenario": ["median", "median"],
+                "metric": ["consumption_growth_pct", "consumption_growth_pct"],
+                "prediction": [-0.2, 0.1],
+                "actual": [0.4, 0.8],
+                "routine_nominal_spending_drift_pct": [0.3, 0.6],
+                "state_provenance": ["fixed_survey_scf_anchor"] * 2,
+                "mapping_quality": ["closest_aggregate_proxy"] * 2,
+                "target_month": ["2026-02-01", "2026-03-01"],
+            }
+        )
+        row = ecology_retrospective._origin_visible_context_score_rows(joined).iloc[0]
+        self.assertEqual(row["scenario"], "origin_visible_drift")
+        self.assertAlmostEqual(row["rmse"], (0.01 + 0.04) ** 0.5 / 2 ** 0.5)
+        self.assertEqual(row["direction_accuracy"], 1.0)
+        self.assertAlmostEqual(row["mean_bias"], -0.15)
+
     def test_cumulative_index_compounds_sequential_growth(self) -> None:
         values = ecology_retrospective._cumulative_growth_index([10.0, -10.0])
         for value, expected in zip(values, [100.0, 110.0, 99.0], strict=True):
@@ -142,6 +161,7 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                 pd.DataFrame([
                     {
                         "scenario": scenario,
+                        "routine_nominal_spending_drift_pct": 0.25,
                         **{metric: float(index + 1) for index, metric in enumerate(ecology_retrospective.METRIC_MAPPINGS)},
                     }
                     for scenario in ecology_retrospective.SCENARIOS
@@ -160,6 +180,12 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                     "codex_instruction_context_version": None,
                     "replay_verified": None,
                     "accounting_passed": True,
+                    "accepted_call_journal_coverage": {
+                        "eligible_response_count": 1,
+                        "matched_response_count": 1,
+                        "missing_response_count": 0,
+                        "malformed_journal_count": 0,
+                    },
                 }
                 (args.output_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
                 return manifest
@@ -197,6 +223,12 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             self.assertEqual(set(manifest["forecast_semantics"]), set(ecology_retrospective.METRIC_MAPPINGS))
             scored = pd.read_csv(output / "retrospective_scores.csv")
             self.assertTrue(scored["n"].eq(2).all())
+            self.assertEqual(
+                set(scored["scenario"]), {"median", "origin_visible_drift"}
+            )
+            self.assertEqual(
+                manifest["accepted_call_journal_coverage"]["matched_response_count"], 2
+            )
 
     def test_origin_range_must_be_ascending_month_starts(self) -> None:
         with self.assertRaisesRegex(ValueError, "ascending month starts"):

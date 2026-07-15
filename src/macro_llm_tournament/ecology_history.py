@@ -110,44 +110,100 @@ def _validate_private_registry(frame: pd.DataFrame) -> pd.DataFrame:
     return registry.sort_values("household_id").reset_index(drop=True)
 
 
-def _validate_base_history(frame: pd.DataFrame, *, selected_household_ids: set[str]) -> pd.DataFrame:
-    _require_exact_columns(frame, HISTORY_COLUMNS, label="base selected history")
-    _require_nonblank(frame, ("household_id", "event_date", "public_availability_date"), label="base selected history")
+def _validate_public_history(
+    frame: pd.DataFrame,
+    *,
+    selected_household_ids: set[str],
+    label: str,
+) -> pd.DataFrame:
+    _require_exact_columns(frame, HISTORY_COLUMNS, label=label)
+    _require_nonblank(
+        frame,
+        (
+            "household_id",
+            "event_date",
+            "public_availability_date",
+            "source_name",
+            "observation_status",
+            "responded",
+            "attrition_status",
+            "death_status",
+            "replay_required_from_event_date",
+        ),
+        label=label,
+    )
     history = frame.copy()
     history["household_id"] = history["household_id"].astype(str).str.strip()
-    history["responded"] = _parse_boolean(history["responded"], field="base selected history responded")
+    history["responded"] = _parse_boolean(history["responded"], field=f"{label} responded")
     if (~history["observation_status"].isin({"observed", "nonresponse"})).any():
-        raise EcologyHistoryError("base selected history has invalid observation_status values")
+        raise EcologyHistoryError(f"{label} has invalid observation_status values")
     response_status_matches = (
         history["responded"].eq(history["observation_status"].eq("observed"))
     )
     if not response_status_matches.all():
-        raise EcologyHistoryError("base selected history response flags disagree with observation_status")
+        raise EcologyHistoryError(f"{label} response flags disagree with observation_status")
     event_months = pd.to_datetime(history["event_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
     availability_months = (
         pd.to_datetime(history["public_availability_date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
     )
-    if event_months.isna().any() or availability_months.isna().any():
-        raise EcologyHistoryError("base selected history contains invalid event or availability dates")
+    replay_months = (
+        pd.to_datetime(history["replay_required_from_event_date"], errors="coerce")
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+    if event_months.isna().any() or availability_months.isna().any() or replay_months.isna().any():
+        raise EcologyHistoryError(f"{label} contains invalid event, availability, or replay dates")
     if (event_months > availability_months).any():
-        raise EcologyHistoryError(
-            "base selected history cannot be public before its survey event"
-        )
+        raise EcologyHistoryError(f"{label} cannot be public before its survey event")
     if not history["event_date"].astype(str).eq(event_months.map(_month_text)).all():
-        raise EcologyHistoryError("base selected history event_date values must be canonical month starts")
+        raise EcologyHistoryError(f"{label} event_date values must be canonical month starts")
     if not history["public_availability_date"].astype(str).eq(availability_months.map(_month_text)).all():
-        raise EcologyHistoryError("base selected history public_availability_date values must be canonical month starts")
+        raise EcologyHistoryError(f"{label} public_availability_date values must be canonical month starts")
+    if not history["replay_required_from_event_date"].astype(str).eq(replay_months.map(_month_text)).all():
+        raise EcologyHistoryError(
+            f"{label} replay_required_from_event_date values must be canonical month starts"
+        )
+    if not replay_months.eq(event_months).all():
+        raise EcologyHistoryError(f"{label} replay dates must match event dates")
     history["event_date"] = event_months.map(_month_text)
     history["public_availability_date"] = availability_months.map(_month_text)
+    history["replay_required_from_event_date"] = replay_months.map(_month_text)
     if history.duplicated(["event_date", "household_id"]).any():
-        raise EcologyHistoryError("base selected history has duplicate household_id+event_date rows")
+        raise EcologyHistoryError(f"{label} has duplicate household_id+event_date rows")
     for event_date, wave in history.groupby("event_date", sort=True):
         ids = set(wave["household_id"])
         if len(wave) != SELECTED_HOUSEHOLD_COUNT or ids != selected_household_ids:
             raise EcologyHistoryError(
-                f"base selected history event {event_date} does not contain exactly the selected {SELECTED_HOUSEHOLD_COUNT} households"
+                f"{label} event {event_date} does not contain exactly the selected {SELECTED_HOUSEHOLD_COUNT} households"
             )
     return history.loc[:, HISTORY_COLUMNS].sort_values(["event_date", "household_id"]).reset_index(drop=True)
+
+
+def _validate_base_history(frame: pd.DataFrame, *, selected_household_ids: set[str]) -> pd.DataFrame:
+    return _validate_public_history(
+        frame,
+        selected_household_ids=selected_household_ids,
+        label="base selected history",
+    )
+
+
+def validate_materialized_history(frame: pd.DataFrame) -> pd.DataFrame:
+    """Validate the complete public-history contract at every runtime boundary."""
+
+    if frame.empty:
+        raise EcologyHistoryError("materialized public history must contain at least one row")
+    if "household_id" not in frame:
+        raise EcologyHistoryError("materialized public history is missing household_id")
+    selected_household_ids = set(frame["household_id"].dropna().astype(str).str.strip())
+    if len(selected_household_ids) != SELECTED_HOUSEHOLD_COUNT:
+        raise EcologyHistoryError(
+            f"materialized public history must contain exactly {SELECTED_HOUSEHOLD_COUNT} households"
+        )
+    return _validate_public_history(
+        frame,
+        selected_household_ids=selected_household_ids,
+        label="materialized public history",
+    )
 
 
 def _assert_no_private_identifiers(frame: pd.DataFrame, raw_identifiers: Sequence[str], *, label: str) -> None:

@@ -22,7 +22,7 @@ from .ecology import (
 )
 
 
-SCHEMA_VERSION = "household_ecology_retrospective_v6"
+SCHEMA_VERSION = "household_ecology_retrospective_v7"
 MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v4"
 METRIC_MAPPINGS: dict[str, dict[str, str]] = {
     "consumption_growth_pct": {
@@ -420,6 +420,28 @@ def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
                     else float("nan")
                 ),
                 "correlation": correlation if score_mode == "full" else float("nan"),
+                "mean_bias": (
+                    float(np.mean(error)) if score_mode == "full" else float("nan")
+                ),
+                "demeaned_rmse": (
+                    float(
+                        np.sqrt(
+                            np.mean(
+                                np.square(
+                                    (prediction - np.mean(prediction))
+                                    - (actual - np.mean(actual))
+                                )
+                            )
+                        )
+                    )
+                    if score_mode == "full"
+                    else float("nan")
+                ),
+                "standard_deviation_ratio": (
+                    float(np.std(prediction) / np.std(actual))
+                    if score_mode == "full" and np.std(actual) > 0
+                    else float("nan")
+                ),
                 "direction_accuracy": (
                     float(np.mean(direction_match))
                     if score_mode in {"full", "direction_only"} and direction_match.size
@@ -431,6 +453,19 @@ def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _origin_visible_context_score_rows(joined: pd.DataFrame) -> pd.DataFrame:
+    eligible = joined.loc[
+        joined["metric"].eq("consumption_growth_pct")
+        & joined["state_provenance"].eq("fixed_survey_scf_anchor")
+    ].drop_duplicates("target_month")
+    if "routine_nominal_spending_drift_pct" not in eligible.columns:
+        return pd.DataFrame()
+    context = eligible.copy()
+    context["scenario"] = "origin_visible_drift"
+    context["prediction"] = context["routine_nominal_spending_drift_pct"]
+    return _score_rows(context)
 
 
 def _git_worktree_dirty() -> bool:
@@ -497,7 +532,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         target_months = list(dict.fromkeys(forecasts["target_month"].astype(str)))
         actuals = _realization_rows(args.targets, target_months)
         joined = _joined_rows(forecasts, actuals)
-        scores = _score_rows(joined)
+        scores = pd.concat(
+            [_score_rows(joined), _origin_visible_context_score_rows(joined)],
+            ignore_index=True,
+        )
 
         forecasts.to_csv(staging / "one_step_forecasts_by_origin.csv", index=False)
         actuals.to_csv(staging / "realized_outcomes_by_target.csv", index=False)
@@ -548,6 +586,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 int(row["failed_provider_attempt_count"]) for row in child_manifests
             ),
             "cache_hit_count": sum(int(row["cache_hit_count"]) for row in child_manifests),
+            "accepted_call_journal_coverage": {
+                "eligible_response_count": sum(
+                    int(row["accepted_call_journal_coverage"]["eligible_response_count"])
+                    for row in child_manifests
+                ),
+                "matched_response_count": sum(
+                    int(row["accepted_call_journal_coverage"]["matched_response_count"])
+                    for row in child_manifests
+                ),
+                "missing_response_count": sum(
+                    int(row["accepted_call_journal_coverage"]["missing_response_count"])
+                    for row in child_manifests
+                ),
+                "malformed_journal_count": sum(
+                    int(row["accepted_call_journal_coverage"]["malformed_journal_count"])
+                    for row in child_manifests
+                ),
+            },
             "replay_verified": (
                 args.mode == "replay"
                 and all(bool(row["replay_verified"]) for row in child_manifests)
@@ -561,6 +617,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "accounting_passed": all(bool(row["accounting_passed"]) for row in child_manifests),
             "mapping_contract": METRIC_MAPPINGS,
+            "context_comparator": {
+                "scenario": "origin_visible_drift",
+                "metric": "consumption_growth_pct",
+                "source": "origin-visible one-month PCE change supplied in every household card",
+                "execution_role": "context_only_not_pre_applied",
+            },
             "inputs_sha256": {
                 "bundle": _artifact_sha256(args.bundle),
                 "targets": _file_sha256(args.targets),
@@ -576,6 +638,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             },
             "artifacts": {},
         }
+        journal_coverage = manifest["accepted_call_journal_coverage"]
+        journal_coverage["match_rate"] = (
+            journal_coverage["matched_response_count"]
+            / journal_coverage["eligible_response_count"]
+            if journal_coverage["eligible_response_count"]
+            else None
+        )
         report = [
             "# Household Ecology Retrospective",
             "",
@@ -603,6 +672,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 else "not scored"
             )
             report.append(f"| `{row.metric}` | {mae} | {rmse} | {direction} |")
+        context_score = scores.loc[
+            scores["scenario"].eq("origin_visible_drift")
+            & scores["metric"].eq("consumption_growth_pct")
+        ].iloc[0]
+        report.extend(
+            [
+                "",
+                "## Origin-Visible Context Comparator",
+                "",
+                "The one-month PCE drift shown to every household is scored separately. "
+                "It is not executed by the economy, but it is a required comparator for deciding whether the household layer adds forecast information.",
+                "",
+                f"Context RMSE: **{context_score.rmse:.3f}**; correlation: **{context_score.correlation:.3f}**; "
+                f"direction: **{context_score.direction_accuracy:.1%}**. The household layer does not beat this comparator on the four retrospective months.",
+            ]
+        )
         report.extend(["", f"Accounting passed across all child runs: **{manifest['accounting_passed']}**."])
         (staging / "retrospective_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
         for path in sorted(staging.iterdir()):

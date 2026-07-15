@@ -25,6 +25,7 @@ from macro_llm_tournament.ecology_feedback_runner import (
 from macro_llm_tournament.ecology_households import HOUSEHOLD_PROMPT_VERSION
 from macro_llm_tournament.ecology import _state_from_row
 from macro_llm_tournament.ecology_transition import transition_household_states
+from macro_llm_tournament.persistent_households import HISTORY_COLUMNS
 
 
 def _period_one(
@@ -46,6 +47,27 @@ def _period_one(
     )
 
 
+def _valid_materialized_history() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for index in range(200):
+        row = {column: None for column in HISTORY_COLUMNS}
+        row.update(
+            {
+                "household_id": f"household_{index:03d}",
+                "event_date": "2025-09-01",
+                "public_availability_date": "2026-06-01",
+                "source_name": "SCE respondent microdata",
+                "observation_status": "observed",
+                "responded": True,
+                "attrition_status": "responding",
+                "death_status": "alive_no_death_observation",
+                "replay_required_from_event_date": "2025-09-01",
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows).loc[:, HISTORY_COLUMNS]
+
+
 class AggregateFirmFeedbackTests(unittest.TestCase):
     def test_period_one_artifacts_and_source_inputs_are_hash_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -60,7 +82,7 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
             households = root / "households.csv"
             history = root / "history.csv"
             households.write_text("type_id\nh1\n", encoding="utf-8")
-            history.write_text("household_id\nh1\n", encoding="utf-8")
+            _valid_materialized_history().to_csv(history, index=False)
             history_digest = _file_sha256(history)
             input_provenance = {
                 name: {"sha256": "a" * 64, "row_count": 1}
@@ -70,12 +92,13 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
                 "schema_version": "ecology_history_materialization_v1",
                 "through_event_month": "2025-09-01",
                 "publication_lag_months": 9,
+                "selected_household_count": 200,
                 "input_provenance": input_provenance,
                 "public_history": {
                     "sha256": history_digest,
-                    "row_count": 1,
+                    "row_count": 200,
                     "event_count": 1,
-                    "columns": ["household_id"],
+                    "columns": list(HISTORY_COLUMNS),
                 },
             }
             (root / "history_manifest.json").write_text(

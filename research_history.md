@@ -189,10 +189,26 @@ PCE growth of +0.48%, +0.90%, +0.51%, and +0.71%. Full RMSE is 0.782 percentage
 points, direction accuracy is 1/4, and mean bias is -0.771 points. The economy does
 not yet predict absolute growth well.
 
-It does preserve relative timing. Correlation is 0.683, demeaned RMSE is 0.126 points,
-and forecast variation is about 56% of the actual variation. This is the active result:
-the bottom-up household policies show a four-point cross-month timing pattern, but
-their spending level is systematically too low and too compressed. The frozen
-July-to-August forecast is -0.13%; the unscored recursive trace then lowers spending
-another 0.31% while the small producer response leaves employment and wages nearly
-flat.
+It appeared to preserve relative timing: correlation is 0.683, demeaned RMSE is 0.126
+points, and forecast variation is about 56% of actual variation. A cold integrity pass
+then scored the PCE drift already visible in every prompt. That context has correlation
+0.974, demeaned RMSE 0.113 points, and 4/4 direction. The household layer therefore
+does not add timing information on these four months; it turns a stronger visible
+signal into a weaker forecast. The frozen July-to-August forecast is -0.13%; the
+unscored recursive trace then lowers spending another 0.31% while the small producer
+response leaves employment and wages nearly flat.
+
+A post-merge integrity pass found one remaining provenance weakness. The runtime
+verified that the materialized household-history CSV matched its manifest hash, but
+did not independently revalidate the CSV's complete public schema, dates, counts, and
+200-household wave coverage. V23 now applies that canonical validator at every
+non-fixture entry point and rejects hash-matched malformed or incomplete histories.
+This repair does not change the forecasts; it closes the evidence boundary around the
+history supplied to every household prompt.
+
+The same pass made provider-attempt evidence explicit. Accepted-call journals match
+200/200 current payloads and 200/200 period-two payloads, but only 309/800 historical
+payloads. Every historical record is still hash-bound and replays exactly; the 491
+without journals simply lack an independently retained record of the original Codex
+CLI attempt. The report now states this distinction instead of treating replayable
+cache records and journal-backed calls as equivalent evidence.
