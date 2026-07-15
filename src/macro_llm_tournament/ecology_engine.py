@@ -165,9 +165,7 @@ def run_monthly_ecology(
     employment_start = {
         row.household_id: starting_employment_share(row) for row in ordered_households
     }
-    if planned_output_units is not None:
-        output_units = min(employer.monthly_capacity_units, planned_output_units)
-    elif institution_mode == "household_demand":
+    if institution_mode == "household_demand":
         # The household-demand diagnostic holds labor state and wages fixed so
         # consumption tests are not confounded by an uncalibrated matching
         # model. Conditional employment policies remain banked for later shock
@@ -331,7 +329,9 @@ def run_monthly_ecology(
             for row in goods_ready
         }
     )
-    if institution_mode == "household_demand":
+    if planned_output_units is not None:
+        output_units = min(employer.monthly_capacity_units, planned_output_units)
+    elif institution_mode == "household_demand":
         desired_units = (
             desired_consumption_total / employer.price_per_unit_usd
             if employer.price_per_unit_usd > 0.0

@@ -442,6 +442,42 @@ class EcologyEngineTests(unittest.TestCase):
         self.assertAlmostEqual(result.aggregate_consumption_usd, 380.0)
         self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
 
+    def test_planned_output_override_preserves_household_demand_labor_state(self) -> None:
+        household = HouseholdState(
+            household_id="h1",
+            employer_id="firm",
+            deposit_balance_usd=1_000.0,
+            revolving_debt_usd=0.0,
+            revolving_credit_limit_usd=0.0,
+            hourly_wage_usd=20.0,
+            baseline_monthly_hours=160.0,
+            baseline_monthly_consumption_usd=500.0,
+            employment_share=1.0,
+        )
+        result = run_monthly_ecology(
+            [household],
+            {"h1": _response(job_loss=(80.0, 90.0, 95.0), consumption=(0.0, 0.0, 0.0))},
+            EmployerState(
+                employer_id="firm",
+                productivity_per_hour=1.0,
+                monthly_capacity_units=1_000.0,
+                inventory_units=100.0,
+                price_per_unit_usd=1.0,
+                target_headcount=1.0,
+                wage_offer_usd=20.0,
+            ),
+            CreditIntermediaryState(
+                intermediary_id="bank",
+                annual_interest_rate_pct=0.0,
+                minimum_payment_rate_pct=0.0,
+            ),
+            institution_mode="household_demand",
+            planned_output_units=600.0,
+        )
+        self.assertEqual(result.households[0].employment_share_end, 1.0)
+        self.assertEqual(result.employer.output_units, 600.0)
+        self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
+
     def test_job_loss_probability_enters_smoothly_without_threshold_cliff(self) -> None:
         household = HouseholdState(
             household_id="h1",
