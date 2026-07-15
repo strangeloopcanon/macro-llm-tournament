@@ -20,20 +20,26 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             "gpt-test rolling origins Sep 2025-Oct 2025; every origin is re-anchored to the fixed SCE-SCF household state and origin-visible public information.",
         )
 
-    def test_direction_scoring_excludes_joint_zero_ties(self) -> None:
+    def test_direction_scoring_uses_only_fixed_survey_scf_anchor_rows(self) -> None:
         joined = pd.DataFrame(
             {
-                "scenario": ["median"] * 4,
-                "metric": ["saving_rate_change_pp"] * 4,
-                "prediction": [-0.2, 0.0, 0.0, 0.0],
-                "actual": [-0.1, 0.1, 0.0, 0.0],
-                "state_provenance": ["prior_simulated_month"] * 4,
-                "mapping_quality": ["directional_proxy"] * 4,
+                "scenario": ["median"] * 5,
+                "metric": ["revolving_credit_growth_pct"] * 5,
+                "prediction": [-0.2, 0.0, 0.0, 0.3, -0.4],
+                "actual": [-0.1, 0.1, 0.0, 0.2, 0.3],
+                "state_provenance": [
+                    "fixed_survey_scf_anchor",
+                    "fixed_survey_scf_anchor",
+                    "fixed_survey_scf_anchor",
+                    "fixed_survey_scf_anchor",
+                    "prior_simulated_month",
+                ],
+                "mapping_quality": ["directional_proxy"] * 5,
             }
         )
-        row = ecology_retrospective._score_rows(joined, state_policy="recursive").iloc[0]
-        self.assertEqual(row["direction_n"], 2)
-        self.assertEqual(row["direction_accuracy"], 0.5)
+        row = ecology_retrospective._score_rows(joined).iloc[0]
+        self.assertEqual(row["direction_n"], 3)
+        self.assertAlmostEqual(row["direction_accuracy"], 2 / 3)
 
     def test_cumulative_index_compounds_sequential_growth(self) -> None:
         values = ecology_retrospective._cumulative_growth_index([10.0, -10.0])
@@ -74,7 +80,6 @@ class EcologyRetrospectiveTests(unittest.TestCase):
         rows = []
         values = {
             "pce_growth_pct": (0.4, 100.4),
-            "personal_saving_rate_change": (-0.2, 3.8),
             "revolving_credit_growth_pct": (0.7, 100.7),
         }
         for target_name, (target_value, first_release) in values.items():
@@ -95,9 +100,13 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             actuals = ecology_retrospective._realization_rows(path, ["2026-02-01"])
         by_metric = actuals.set_index("metric")["actual"].to_dict()
         self.assertEqual(by_metric["consumption_growth_pct"], 0.4)
-        self.assertEqual(by_metric["saving_rate_change_pp"], -0.2)
+        self.assertEqual(by_metric["revolving_credit_growth_pct"], 0.7)
+        self.assertEqual(
+            ecology_retrospective.METRIC_MAPPINGS["consumption_growth_pct"]["note"],
+            "Prediction is executed target-month spending relative to a numerically fixed synthetic SCE-SCF recent-typical anchor, interpreted as month-over-month nominal PCE growth. This is a load-bearing aggregate proxy, not linked household-level growth.",
+        )
 
-    def test_two_origin_runner_carries_median_state_and_joins_outputs(self) -> None:
+    def test_two_origin_runner_uses_median_point_path_and_joins_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bundle = root / "bundle"
@@ -124,10 +133,10 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                     })
             pd.DataFrame(target_rows).to_csv(targets, index=False)
             output = root / "output"
-            seen_states: list[Path | None] = []
+            seen_child_args: list[argparse.Namespace] = []
 
             def fake_run(args: argparse.Namespace) -> dict[str, object]:
-                seen_states.append(args.state_json)
+                seen_child_args.append(args)
                 args.output_dir.mkdir(parents=True)
                 target = (pd.Timestamp(args.origin) + pd.offsets.MonthBegin(1)).date().isoformat()
                 pd.DataFrame([
@@ -137,7 +146,6 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                     }
                     for scenario in ecology_retrospective.SCENARIOS
                 ]).to_csv(args.output_dir / "macro_forecast_paths.csv", index=False)
-                (args.output_dir / "median_next_state.json").write_text(json.dumps({"next_origin_month": target}), encoding="utf-8")
                 manifest = {
                     "origin_month": args.origin,
                     "target_month": target,
@@ -174,15 +182,19 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             with mock.patch.object(ecology_retrospective, "run_ecology", side_effect=fake_run):
                 manifest = ecology_retrospective.run(args)
 
-            self.assertIsNone(seen_states[0])
-            self.assertIsNone(seen_states[1])
-            self.assertEqual(len(pd.read_csv(output / "one_step_forecasts_by_origin.csv")), 6)
-            self.assertEqual(len(pd.read_csv(output / "predicted_vs_actual.csv")), 18)
+            self.assertEqual(ecology_retrospective.SCENARIOS, ("median",))
+            self.assertTrue(all(not hasattr(child, "state_json") for child in seen_child_args))
+            self.assertTrue(all(not hasattr(child, "state_policy") for child in seen_child_args))
+            self.assertEqual(len(pd.read_csv(output / "one_step_forecasts_by_origin.csv")), 2)
+            self.assertEqual(len(pd.read_csv(output / "predicted_vs_actual.csv")), 4)
             self.assertTrue((output / "predicted_vs_actual.png").exists())
-            self.assertEqual(manifest["state_policy"], "rolling_reanchored")
-            self.assertEqual(manifest["score_eligibility"], "all_rolling_one_month_origins")
+            self.assertNotIn("state_policy", manifest)
+            self.assertEqual(manifest["score_eligibility"], "all_fixed_survey_scf_anchor_rows")
             self.assertFalse(manifest["forecast_process_opened_realization_files"])
             self.assertTrue(manifest["source_sha256"])
+            self.assertEqual(manifest["source_binding_authority"], "source_sha256")
+            self.assertIsInstance(manifest["git_worktree_dirty"], bool)
+            self.assertEqual(set(manifest["forecast_semantics"]), set(ecology_retrospective.METRIC_MAPPINGS))
             scored = pd.read_csv(output / "retrospective_scores.csv")
             self.assertTrue(scored["n"].eq(2).all())
 
@@ -222,6 +234,27 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     ecology_retrospective.run(args)
             child.assert_not_called()
+
+    def test_prospective_marker_rejects_scenario_band(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            (run_dir / "manifest.json").write_text(
+                json.dumps({"target_month": "2026-02-01"}), encoding="utf-8"
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "scenario": scenario,
+                        **{
+                            metric: 0.0
+                            for metric in ecology_retrospective.METRIC_MAPPINGS
+                        },
+                    }
+                    for scenario in ("downside", "median", "upside")
+                ]
+            ).to_csv(run_dir / "macro_forecast_paths.csv", index=False)
+            with self.assertRaisesRegex(ValueError, "exactly one median point path"):
+                ecology_retrospective._prospective_rows(run_dir)
 
 
 if __name__ == "__main__":

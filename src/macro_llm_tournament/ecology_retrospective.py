@@ -22,8 +22,8 @@ from .ecology import (
 )
 
 
-SCHEMA_VERSION = "household_ecology_retrospective_v4"
-MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v3"
+SCHEMA_VERSION = "household_ecology_retrospective_v5"
+MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v4"
 METRIC_MAPPINGS: dict[str, dict[str, str]] = {
     "consumption_growth_pct": {
         "target_name": "pce_growth_pct",
@@ -32,16 +32,7 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "actual_transform": "identity",
         "mapping_quality": "closest_aggregate_proxy",
         "score_mode": "full",
-        "note": "Population-weighted feasible spending change from the origin-safe household baseline, mapped to first-release month-over-month nominal PCE growth.",
-    },
-    "saving_rate_change_pp": {
-        "target_name": "personal_saving_rate_change",
-        "series_id": "PSAVERT",
-        "actual_field": "target_value",
-        "actual_transform": "identity",
-        "mapping_quality": "directional_proxy",
-        "score_mode": "direction_only",
-        "note": "Change in the ecology saving rate, using wage, business, non-wage, and transfer income, mapped to the first-release change in PSAVERT.",
+        "note": "Prediction is executed target-month spending relative to a numerically fixed synthetic SCE-SCF recent-typical anchor, interpreted as month-over-month nominal PCE growth. This is a load-bearing aggregate proxy, not linked household-level growth.",
     },
     "revolving_credit_growth_pct": {
         "target_name": "revolving_credit_growth_pct",
@@ -53,7 +44,8 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "note": "Ecology revolving-debt growth mapped to aggregate revolving consumer-credit growth.",
     },
 }
-SCENARIOS = ("downside", "median", "upside")
+SCENARIOS = ("median",)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -71,11 +63,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--state-policy",
-        choices=("rolling_reanchored", "recursive"),
-        default="rolling_reanchored",
-    )
     parser.add_argument(
         "--prospective-run",
         type=Path,
@@ -164,6 +151,8 @@ def _prospective_rows(run_dir: Path | None) -> pd.DataFrame:
         return pd.DataFrame(columns=["target_month", "metric", "scenario", "prediction"])
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     paths = pd.read_csv(run_dir / "macro_forecast_paths.csv")
+    if len(paths) != 1 or set(paths["scenario"].astype(str)) != set(SCENARIOS):
+        raise ValueError("macro_forecast_paths.csv must contain exactly one median point path")
     long = paths.melt(
         id_vars=["scenario"],
         value_vars=list(METRIC_MAPPINGS),
@@ -205,20 +194,16 @@ def _write_chart(
     labels = {
         "cumulative_consumption_index": "Compounded one-step rates (start=100)",
         "consumption_growth_pct": "Consumption growth (%)",
-        "saving_rate_change_pp": "Saving-rate change (pp, sign proxy)",
         "revolving_credit_growth_pct": "Credit growth (%, sign proxy)",
     }
     fig, axes = plt.subplots(len(labels), 1, figsize=(11.5, 11.5), sharex=True)
     actual_color = "#2463A6"
     prediction_color = "#B23A2B"
-    band_color = "#E8B5AD"
     for axis, (metric, label) in zip(axes, labels.items(), strict=True):
         if metric == "cumulative_consumption_index":
             subset = joined.loc[
                 joined["metric"].eq("consumption_growth_pct")
-                & joined["state_provenance"].isin(
-                    ["survey_seeded_initial_state", "fixed_survey_scf_anchor"]
-                )
+                & joined["state_provenance"].eq("fixed_survey_scf_anchor")
             ].copy()
             pivot = subset.pivot(index="target_month", columns="scenario", values="prediction")
             dates = pd.to_datetime(pivot.index)
@@ -273,18 +258,6 @@ def _write_chart(
             .loc[pivot.index, "actual"]
             .to_numpy(dtype=float)
         )
-        lower = pivot["downside"].to_numpy(dtype=float)
-        upper = pivot["upside"].to_numpy(dtype=float)
-        if not np.allclose(lower, upper, atol=1e-12, rtol=0.0):
-            axis.fill_between(
-                dates,
-                lower,
-                upper,
-                color=band_color,
-                alpha=0.38,
-                linewidth=0,
-                label="One-step scenario range" if metric == "consumption_growth_pct" else None,
-            )
         axis.plot(
             dates,
             pivot["median"].to_numpy(dtype=float),
@@ -375,7 +348,7 @@ def _write_chart(
     fig.text(
         0.08,
         0.012,
-        f"Sources: rolling {model} household ecology; ALFRED/FRED first releases. Consumption is magnitude-scored; saving and credit mappings support signs only.",
+        f"Sources: rolling {model} household ecology; ALFRED/FRED first releases. Consumption is magnitude-scored; revolving-credit mapping supports signs only.",
         ha="left",
         fontsize=8.5,
         color="#555555",
@@ -413,17 +386,12 @@ def _joined_rows(forecasts: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame
     return joined.sort_values(["target_month", "metric", "scenario"]).reset_index(drop=True)
 
 
-def _score_rows(joined: pd.DataFrame, *, state_policy: str = "rolling_reanchored") -> pd.DataFrame:
+def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for (scenario, metric), group in joined.groupby(["scenario", "metric"], sort=True):
-        eligible_states = (
-            ["survey_seeded_initial_state", "fixed_survey_scf_anchor"]
-            if state_policy == "rolling_reanchored"
-            else ["prior_simulated_month"]
-        )
-        eligible = group.loc[group["state_provenance"].isin(eligible_states)]
+        eligible = group.loc[group["state_provenance"].eq("fixed_survey_scf_anchor")]
         if eligible.empty:
-            raise ValueError("retrospective score has no eligible rolling observations")
+            raise ValueError("retrospective score has no fixed SCE-SCF anchor observations")
         error = eligible["prediction"].to_numpy(dtype=float) - eligible["actual"].to_numpy(dtype=float)
         actual = eligible["actual"].to_numpy(dtype=float)
         prediction = eligible["prediction"].to_numpy(dtype=float)
@@ -464,8 +432,15 @@ def _score_rows(joined: pd.DataFrame, *, state_policy: str = "rolling_reanchored
     return pd.DataFrame(rows)
 
 
+def _git_worktree_dirty() -> bool:
+    return bool(
+        subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=PROJECT_ROOT, text=True
+        ).strip()
+    )
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    state_policy = getattr(args, "state_policy", "rolling_reanchored")
     origins = _parse_origins(args.origins)
     _validate_origins(args.bundle, origins)
     if args.mode != "live" and args.max_live_calls != 0:
@@ -487,7 +462,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     per_origin_cap = math.ceil(args.max_live_calls / len(origins)) if args.mode == "live" else 0
     forecast_frames: list[pd.DataFrame] = []
     child_manifests: list[dict[str, Any]] = []
-    prior_state: Path | None = None
     try:
         for origin in origins:
             run_dir = staging / "runs" / origin
@@ -502,38 +476,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 households=args.households,
                 history=args.history,
                 bundle=args.bundle,
-                state_json=(prior_state if state_policy == "recursive" else None),
-                state_policy=state_policy,
                 expected_replay_sha256=None,
                 cache_dir=args.cache_dir,
                 output_dir=run_dir,
-            )
-            state_provenance = (
-                "fixed_survey_scf_anchor"
-                if state_policy == "rolling_reanchored"
-                else (
-                    "prior_simulated_month"
-                    if prior_state is not None
-                    else "survey_seeded_initial_state"
-                )
             )
             manifest = run_ecology(child_args)
             remaining_calls -= int(manifest["live_call_count"])
             child_manifests.append(manifest)
             frame = pd.read_csv(run_dir / "macro_forecast_paths.csv")
-            frame.insert(0, "state_provenance", state_provenance)
+            if len(frame) != 1 or set(frame["scenario"].astype(str)) != set(SCENARIOS):
+                raise ValueError("macro_forecast_paths.csv must contain exactly one median point path")
+            frame.insert(0, "state_provenance", "fixed_survey_scf_anchor")
             frame.insert(0, "as_of_date", manifest["as_of_date"])
             frame.insert(0, "target_month", manifest["target_month"])
             frame.insert(0, "origin_month", manifest["origin_month"])
             forecast_frames.append(frame)
-            if state_policy == "recursive":
-                prior_state = run_dir / "median_next_state.json"
 
         forecasts = pd.concat(forecast_frames, ignore_index=True)
         target_months = list(dict.fromkeys(forecasts["target_month"].astype(str)))
         actuals = _realization_rows(args.targets, target_months)
         joined = _joined_rows(forecasts, actuals)
-        scores = _score_rows(joined, state_policy=state_policy)
+        scores = _score_rows(joined)
 
         forecasts.to_csv(staging / "one_step_forecasts_by_origin.csv", index=False)
         actuals.to_csv(staging / "realized_outcomes_by_target.csv", index=False)
@@ -550,19 +513,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "schema_version": SCHEMA_VERSION,
             "mapping_schema_version": MAPPING_SCHEMA_VERSION,
             "evaluation_status": "retrospective_diagnostic_not_confirmatory",
-            "state_policy": state_policy,
             "outcomes_loaded_after_all_forecasts": True,
             "forecast_process_opened_realization_files": False,
-            "score_eligibility": (
-                "all_rolling_one_month_origins"
-                if state_policy == "rolling_reanchored"
-                else "recursive_transitions_after_initialization"
-            ),
+            "score_eligibility": "all_fixed_survey_scf_anchor_rows",
             "initialization_transition": "fixed_survey_scf_anchor_reinitialized_at_each_rolling_origin",
             "forecast_semantics": {
-                "consumption_growth_pct": "population-weighted feasible target-month spending versus the origin-safe synthetic estimate of recent typical household spending",
+                "consumption_growth_pct": "executed target-month spending relative to a numerically fixed synthetic SCE-SCF recent-typical anchor, interpreted as month-over-month nominal PCE growth; a load-bearing aggregate proxy, not linked household-level growth",
                 "revolving_credit_growth_pct": "simulated month opening to closing debt-stock change",
-                "saving_rate_change_pp": "change in household saving as a share of modeled wage, business, non-wage, and transfer income",
             },
             "origin_months": origins,
             "target_months": target_months,
@@ -570,9 +527,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "provider": args.provider,
             "model": args.model,
             "git_commit": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], text=True
+                ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
             ).strip(),
+            "git_worktree_dirty": _git_worktree_dirty(),
             "source_sha256": _source_sha256(),
+            "source_binding_authority": "source_sha256",
             "household_count": args.household_count,
             "accepted_household_response_count": sum(
                 int(row["accepted_household_response_count"]) for row in child_manifests
