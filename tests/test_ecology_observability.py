@@ -223,6 +223,8 @@ class EcologyObservabilityTests(unittest.TestCase):
                     {
                         "schema_version": ecology_observability.FEEDBACK_SCHEMA_VERSION,
                         "origin_month": "2026-07-01",
+                        "period_2_target_month": "2026-09-01",
+                        "period_1_replay_equivalence_sha256": "period-one-equivalence",
                         "household_count": 1,
                         "accounting_passed": True,
                         "replay_verified": True,

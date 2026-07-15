@@ -17,6 +17,7 @@ from macro_llm_tournament.ecology_feedback import (
 from macro_llm_tournament.ecology import _artifact_sha256, _file_sha256
 from macro_llm_tournament.ecology_feedback_runner import (
     _load_period_one,
+    _period_one_replay_binding,
     _period_two_states,
     _validate_source_inputs,
 )
@@ -69,6 +70,7 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
                 "accounting_passed": True,
                 "household_prompt_version": HOUSEHOLD_PROMPT_VERSION,
                 "household_count": 1,
+                "replay_equivalence_sha256": "period-one-equivalence",
                 "household_input_sha256": _file_sha256(households),
                 "history_input_sha256": _file_sha256(history),
                 "artifacts": artifacts,
@@ -78,6 +80,9 @@ class AggregateFirmFeedbackTests(unittest.TestCase):
             )
 
             _load_period_one(root)
+            binding = _period_one_replay_binding(manifest)
+            replay_manifest = dict(manifest, mode="replay", created_at_utc="later")
+            self.assertEqual(binding, _period_one_replay_binding(replay_manifest))
             self.assertEqual(
                 _validate_source_inputs(manifest, households, history),
                 (_file_sha256(households), _file_sha256(history)),

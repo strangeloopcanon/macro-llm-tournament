@@ -402,7 +402,7 @@ def _observed_panel(retrospective_dir: Path, prospective_dir: Path | None) -> pd
 def _feedback_period_two_rows(
     feedback_dir: Path | None,
     *,
-    expected_period_one_manifest_sha256: str | None = None,
+    expected_period_one_replay_equivalence_sha256: str | None = None,
     expected_household_count: int | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Return the bound period-two feedback marker, when the optional artifact exists."""
@@ -428,9 +428,9 @@ def _feedback_period_two_rows(
     ):
         raise ValueError("feedback household count does not match observability panel")
     if (
-        expected_period_one_manifest_sha256 is not None
-        and manifest.get("period_1_manifest_sha256")
-        != expected_period_one_manifest_sha256
+        expected_period_one_replay_equivalence_sha256 is not None
+        and manifest.get("period_1_replay_equivalence_sha256")
+        != expected_period_one_replay_equivalence_sha256
     ):
         raise ValueError("feedback run is not bound to the prospective period-1 run")
     _validate_artifact(feedback_dir, manifest, "dynamic_macro_paths.csv")
@@ -465,25 +465,7 @@ def _feedback_period_two_rows(
             _require_finite(period_row[field], f"feedback {period_name} {field}")
     target_month = row.get("target_month", manifest.get("period_2_target_month"))
     if not isinstance(target_month, str) or not target_month:
-        period_one_run = manifest.get("period_1_run")
-        expected_period_one_hash = manifest.get("period_1_manifest_sha256")
-        if not isinstance(period_one_run, str) or not isinstance(expected_period_one_hash, str):
-            raise ValueError(
-                "feedback period_2 marker requires target_month or a bound period-1 manifest"
-            )
-        period_one_manifest = _read_json(Path(period_one_run) / "manifest.json")
-        actual_period_one_hash = _artifact_sha256(Path(period_one_run) / "manifest.json")
-        if actual_period_one_hash != expected_period_one_hash:
-            raise ValueError("feedback period-1 manifest hash mismatch")
-        period_one_target_month = period_one_manifest.get("target_month")
-        if not isinstance(period_one_target_month, str) or not period_one_target_month:
-            raise ValueError("bound period-1 manifest requires a target_month")
-        try:
-            target_month = (
-                pd.Timestamp(period_one_target_month) + pd.DateOffset(months=1)
-            ).strftime("%Y-%m-%d")
-        except (TypeError, ValueError) as exc:
-            raise ValueError("bound period-1 target_month must be parseable") from exc
+        raise ValueError("feedback run requires a period_2_target_month")
     try:
         pd.Timestamp(target_month)
     except (TypeError, ValueError) as exc:
@@ -767,10 +749,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "panel_evaluation_status": "retrospective_diagnostic_not_confirmatory",
         }
     prospective_manifest_sha256: str | None = None
+    prospective_replay_equivalence_sha256: str | None = None
     if prospective is not None:
         manifest, rows = _run_payload(prospective, weights)
         simulation_rows.extend(rows)
         prospective_manifest_sha256 = _artifact_sha256(prospective / "manifest.json")
+        prospective_replay_equivalence_sha256 = manifest.get(
+            "replay_equivalence_sha256"
+        )
+        if not isinstance(prospective_replay_equivalence_sha256, str):
+            raise ValueError("prospective run lacks replay equivalence provenance")
         source_runs[str(manifest["origin_month"])] = {
             "path": str(prospective),
             "manifest_sha256": prospective_manifest_sha256,
@@ -779,7 +767,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     feedback_rows, feedback_manifest_sha256 = _feedback_period_two_rows(
         feedback,
-        expected_period_one_manifest_sha256=prospective_manifest_sha256,
+        expected_period_one_replay_equivalence_sha256=(
+            prospective_replay_equivalence_sha256
+        ),
         expected_household_count=expected_count,
     )
     simulation_rows.extend(feedback_rows)

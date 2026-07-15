@@ -125,6 +125,27 @@ def _validate_source_inputs(
     return household_input_sha256, history_input_sha256
 
 
+def _period_one_replay_binding(manifest: dict[str, Any]) -> dict[str, Any]:
+    replay_equivalence_sha256 = manifest.get("replay_equivalence_sha256")
+    if not isinstance(replay_equivalence_sha256, str) or not replay_equivalence_sha256:
+        raise ValueError("period-1 manifest requires replay equivalence provenance")
+    artifacts = manifest.get("artifacts", {})
+    consumed_artifacts = {
+        name: artifacts.get(name)
+        for name in (
+            "median_economy.json",
+            "household_decisions.csv",
+            "normalized_origin_information.json",
+        )
+    }
+    if not all(isinstance(value, str) and value for value in consumed_artifacts.values()):
+        raise ValueError("period-1 manifest does not bind every consumed artifact")
+    return {
+        "replay_equivalence_sha256": replay_equivalence_sha256,
+        "consumed_artifacts": consumed_artifacts,
+    }
+
+
 def _period_two_states(
     source: pd.DataFrame,
     decisions: pd.DataFrame,
@@ -209,6 +230,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.households,
         args.history,
     )
+    period_1_replay_binding = _period_one_replay_binding(period_1_manifest)
     source = pd.read_csv(args.households)
     ids = set(decisions["household_id"].astype(str))
     source = source.loc[source["type_id"].astype(str).isin(ids)].copy()
@@ -313,7 +335,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     replay_sha = canonical_sha256(
         {
-            "period_1_manifest_sha256": _file_sha256(args.period_1_run / "manifest.json"),
+            "period_1_replay_binding": period_1_replay_binding,
             "household_input_sha256": household_input_sha256,
             "history_input_sha256": history_input_sha256,
             "cards": cards,
@@ -325,7 +347,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     request_sha = canonical_sha256(
         {
             "schema_version": SCHEMA_VERSION,
-            "period_1_manifest_sha256": _file_sha256(args.period_1_run / "manifest.json"),
+            "period_1_replay_binding": period_1_replay_binding,
             "household_input_sha256": household_input_sha256,
             "history_input_sha256": history_input_sha256,
             "source_sha256": _source_sha256(),
@@ -414,6 +436,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "period_1_run": str(args.period_1_run.resolve()),
         "period_1_manifest_sha256": _file_sha256(args.period_1_run / "manifest.json"),
+        "period_1_replay_equivalence_sha256": period_1_replay_binding[
+            "replay_equivalence_sha256"
+        ],
+        "period_1_consumed_artifact_sha256": period_1_replay_binding[
+            "consumed_artifacts"
+        ],
         "household_input_sha256": household_input_sha256,
         "history_input_sha256": history_input_sha256,
         "origin_month": period_1_manifest["origin_month"],
