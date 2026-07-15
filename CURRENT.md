@@ -1,59 +1,53 @@
 # Current Project Surface
 
-The active system is the household-first rolling microeconomy in
-`macro_llm_tournament.ecology`.
+The active system is a 200-household rolling demand economy. Real SCE histories
+supply household heterogeneity and personal belief priors. Deterministic matches
+to the 2022 SCF supply income, liquidity, spending, and debt states. GPT-5.5 writes
+paired state-contingent next-month dollar policies per household; code applies
+them to the fixed observed employment shares and closes the accounts.
 
-It contains 200 persistent anonymized SCE household types. Each household receives
-its own survey history, an SCE-conditioned SCF 2022 financial state, and a compact
-public-information card containing only data visible at the forecast origin. GPT-5.5
-returns beliefs and conditional dollar policies for committed spending,
-discretionary spending, deposits, debt repayment, and borrowing. Deterministic code
-enforces the budget and accounting identities.
+Each forecast origin starts again from the same fixed SCE-SCF household anchor and
+receives newly available public information. It does not carry simulated balances,
+forecast errors, or later observations into the next origin. This is the sensible
+rolling procedure for period-by-period forecasts; free-running counterfactuals are
+not part of the active evidence path.
 
-The active diagnostic isolates household demand. Respondent employment and wages are
-held fixed, production follows expected sales with gradual inventory adjustment, and
-firms and banks are not LLM agents. Every rolling origin restarts from the same fixed
-SCE-SCF anchor; only the origin-visible information changes. Simulated cash, debt, and
-forecast errors never enter the next rolling forecast.
+## What We Know
 
-## What The Historical Run Shows
+Across January-April 2026 origins, the ecology forecasts nominal consumption
+growth of **+0.01%, +0.02%, +0.06%, and +0.16%**. First-release PCE growth is
+**+0.48%, +0.90%, +0.51%, and +0.71%**.
 
-Across January-April 2026 origins and February-May first-release outcomes, the
-median consumption forecasts are **+0.13%, +0.16%, +0.30%, and +0.31%**. Actual
-nominal PCE growth is **+0.48%, +0.90%, +0.51%, and +0.71%**.
-
-- Consumption direction: **4/4 correct**.
-- Consumption RMSE: **0.47 percentage points**.
-- Retired ecology RMSE: **5.48 points**, with 0/3 signs correct.
+- Direction: **4/4 correct**.
+- RMSE: **0.61 percentage points**.
 - Origin-visible routine-drift RMSE: **0.24 points**.
-- Saving-rate direction: **3/4 correct**.
 - Revolving-credit direction: **1/4 correct**.
-- Accounting: **PASS** in all four runs; maximum residual `1.68e-08`.
+- Accounting: **PASS** in all four runs.
 
-The improvement is real, but the LLM path remains too conservative. It compounds to
-**100.90** from a base of 100, versus **102.63** for first-release PCE and **101.75**
-for the routine drift anchor. The remaining problem is ordinary nominal-spending
-amplitude, not a collapse caused by labor feedback or a broken household budget.
+The result is narrower than “the simulated economy forecasts well.” It says the
+household-policy design produces positive demand at all four diagnostic origins.
+It remains too conservative and is not yet competitive with
+a simple current-information anchor.
 
 ## Frozen Forecast
 
 The July 1 origin, using information through July 10, is frozen for August 2026.
-Its median consumption forecast is **+0.28%**. The run contains 200 accepted Codex
-CLI responses, replays with 200 cache hits and zero calls, matches its immutable live
-reference, and passes accounting with maximum residual `1.12e-08`.
-
-This is not an accuracy claim until the August first release exists. The household
-survey anchor is from March-April 2025, while public macro information is current to
-the forecast cutoff.
+Its point forecast is **+0.08%** nominal consumption growth. The run used 200 fresh
+Codex CLI calls with zero failures; its replay uses 200 cache hits and zero calls,
+matches the immutable live reference, and passes accounting with maximum residual
+`1.30e-08`.
 
 ## Next Work
 
-1. Append the August realization without changing the frozen forecast.
-2. Continue the same rolling procedure at each new origin.
-3. Diagnose why household policies omit part of routine nominal drift; do not add
-   LLM firms or banks until repeated errors show an institutional mechanism is missing.
-4. Keep the historical chart as development evidence, not confirmatory evidence.
+1. Append the August first release without changing the frozen forecast.
+2. Continue the same rolling forecast at each new origin.
+3. Improve the household policy's response amplitude on spent historical origins,
+   while keeping the genuine SCE personal job-loss prior and fixed accounting
+   contract.
+4. Add LLM firms or banks only if repeated errors identify a missing institutional
+   mechanism rather than a household elicitation problem.
 
-The retired adaptive-twin and macro-tournament work remains recoverable at Git tag
-`macro-v1-weighted-demand` and in the local hashed archive under
-`~/Downloads/llm-hank-docs/archive/v1/`.
+The canonical evidence is in
+`outputs/household_ecology_200_july_v20_current/` and
+`outputs/household_ecology_retrospective_2026_01_04_v20/`. Earlier versions are
+superseded and belong in the local archive.

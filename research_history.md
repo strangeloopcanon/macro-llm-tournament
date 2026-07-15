@@ -33,11 +33,12 @@ monthly-hazard confusion, stale new-hire wages, target-file access, and circular
 verification. It also excluded the survey-seeded first transition from scoring and
 made weak proxy mappings direction-only.
 
-After those corrections, the negative survived. On the three valid March-May 2026
-recursive transitions, consumption RMSE was 5.48 percentage points and all three signs
-were wrong; the simulated consumption index fell to 86.40 while first-release PCE rose
-to 102.14. This localizes the remaining problem to contractionary household behavior
-and feedback rather than plotting, aggregation, accounting, or replay mechanics.
+After those corrections, the retired diagnostic recorded consumption RMSE of 5.48
+percentage points and three wrong signs across the valid recursive transitions; its
+simulated consumption index fell to 86.40 while first-release PCE rose to 102.14.
+That figure is retained as contemporaneous research history. The old raw run bundle is
+not part of the current hash-bound evidence surface and should not be used as a formal
+cross-version benchmark.
 
 ## July 2026 Natural-Household Redesign
 
@@ -57,8 +58,24 @@ share, and reconciles every component to annual income.
 Rolling forecasts also stopped carrying simulated deposits and debt; each origin now
 restarts from the same SCE-SCF anchor with newly visible public information.
 
-The final four-origin diagnostic predicts positive consumption growth in all four months
-and lowers RMSE to 0.47 percentage points. It still loses to an origin-visible nominal
-spending drift at 0.24 points. The redesign therefore removed the artificial collapse
-and recovered direction, but not enough ordinary nominal-growth amplitude. Credit
-paydown remains too strong. The prospective July-to-August forecast is frozen at +0.28%.
+The first four-origin natural-household diagnostic predicted positive consumption
+growth in all four months and recorded RMSE of 0.47 percentage points. A later integrity
+pass found that aggregate unemployment expectations had been divided by four and
+mislabeled as personal job-loss risk, that a gross-income budget residual had been
+reported as personal saving, and that a point policy had been written out as three
+identical scenarios.
+
+The next v19 run separated SCE `Q13new` personal job-loss priors from the aggregate
+`Q4new` unemployment outlook, removed the national saving-rate comparison, and emitted
+one point path. A final contrary review then found that `Q13new` had accidentally been
+included in demographic backfilling: missing March-April answers could be filled from
+later 2025 waves. It also found that the prompt described job-loss execution while the
+rolling engine held employment fixed. The v19 arithmetic was reproducible, but the run
+is invalid as evidence and is preserved only in the local archive.
+
+The active v20 campaign preserves wave-specific missingness, describes the fixed-labor
+executor truthfully, and reruns all 1,000 household calls from fresh cache identities.
+It retains 4/4 consumption signs with RMSE 0.61 percentage points, versus 0.24 for the
+origin-visible routine-drift anchor. Correlation is 0.10 and credit direction is 1/4.
+The prospective July-to-August forecast is frozen at +0.08%. This v20 result is the
+active evidence surface.

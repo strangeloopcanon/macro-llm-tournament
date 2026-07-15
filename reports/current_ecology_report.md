@@ -1,72 +1,83 @@
-# Household-First Rolling Microeconomy
+# The Household Economy Moves in the Right Direction, but by Too Little
 
-## Bottom Line
+The current system turns 200 real survey histories into 200 separate LLM
+households, executes their next-month policies inside an accounting-constrained
+economy, and aggregates the result. All four historical consumption forecasts
+have the right sign.
 
-The project now runs 200 separate LLM households as a rolling demand economy. Real
-SCE histories supply beliefs and demographics; deterministic SCE-conditioned SCF
-matches supply coherent income, liquidity, spending, and debt states. GPT-5.5 writes
-each household's conditional monthly policy. Code, not the model, enforces budgets,
-credit limits, production feasibility, and accounting.
+It has not yet produced a competitive macro forecast. Consumption RMSE is **0.61
+percentage points**, versus **0.24** for a simple origin-visible nominal-spending
+drift. The household aggregate rises each month, but consistently by too little.
 
-This redesign fixed the old economy's contractionary failure. On four historical
-one-month origins, the consumption sign is correct **4/4** times and RMSE falls from
-**5.48** to **0.47 percentage points**. The result is not yet strong forecasting
-performance: a simple origin-visible nominal-spending drift scores **0.24 points**.
-The households move in the right direction but understate ordinary nominal growth.
+The July-to-August 2026 forecast is frozen at **+0.08%**. August outcomes were not
+available to the model and have not yet been scored.
 
-The July-to-August 2026 forecast is frozen at **+0.28%** median nominal consumption
-growth. August outcomes were unavailable and excluded.
-
-## The Economy
+## What Runs
 
 ```text
-200 SCE histories + 200 matched SCF financial states + as-of public data
-                                  |
-                     one isolated GPT-5.5 call each
-                                  |
-       beliefs + employed/not-employed household dollar policies
-                                  |
-       deterministic budgets, credit, production, and settlement
-                                  |
-              household consumption, saving, and debt paths
-                                  |
-              population-weighted macro demand forecast
+200 anonymized SCE household histories
+              +
+200 deterministic SCE-conditioned SCF financial states
+              +
+public information available at the forecast date
+              |
+              v
+one tool-isolated GPT-5.5 call per household
+              |
+              v
+beliefs + employed/not-employed dollar policies
+              |
+              v
+deterministic budgets, credit, production, inventories, settlement
+              |
+              v
+population-weighted consumption and balance-sheet paths
 ```
 
-For the active forecasting test, respondent employment and wages are fixed. This
-prevents an uncalibrated labor-matching model from creating the answer. Production
-follows expected sales with gradual inventory adjustment. Firms and banks are not
-LLM agents.
+The LLM does not directly set the macro total. It decides what each household
+expects and intends to do: committed spending, discretionary spending, deposit
+changes, debt repayment, and borrowing. Code then enforces the household budget,
+credit limit, minimum debt payment, goods-market clearing, and counterparty
+accounts.
 
-The rolling chart uses independent one-month forecasts. Each origin restarts from
-the same fixed SCE-SCF household anchor and receives newly available public data.
-No simulated balance, forecast error, or realized target carries into the next
-origin.
+Real data supplies the heterogeneity that earlier experiments showed LLM personas
+could not invent. The personal job-loss prior comes from same-wave SCE `Q13new`,
+the respondent's chance of losing the current job over 12 months; unanswered rows
+stay missing. The separate `Q4new` answer, the chance that U.S. unemployment
+rises, remains an aggregate belief and is never converted into personal risk.
 
-## Historical Results
+## Historical Diagnostic
 
-| Origin | Target | LLM consumption | First-release PCE | Routine drift |
+Each origin is an independent rolling one-month forecast. Every run starts from
+the same fixed SCE-SCF household anchor and receives only public information
+available at that origin. Realizations are loaded after all four forecasts finish.
+No simulated balance, forecast error, or future observation carries forward.
+
+| Origin | Target | LLM household economy | First-release PCE | Routine drift |
 | --- | --- | ---: | ---: | ---: |
-| Jan 2026 | Feb 2026 | +0.13% | +0.48% | +0.37% |
-| Feb 2026 | Mar 2026 | +0.16% | +0.90% | +0.51% |
-| Mar 2026 | Apr 2026 | +0.30% | +0.51% | +0.38% |
-| Apr 2026 | May 2026 | +0.31% | +0.71% | +0.48% |
+| Jan 2026 | Feb 2026 | +0.01% | +0.48% | +0.37% |
+| Feb 2026 | Mar 2026 | +0.02% | +0.90% | +0.51% |
+| Mar 2026 | Apr 2026 | +0.06% | +0.51% | +0.38% |
+| Apr 2026 | May 2026 | +0.16% | +0.71% | +0.48% |
 
 | Diagnostic | Result |
 | --- | ---: |
 | Consumption direction | 4/4 |
-| Consumption RMSE | 0.468 pp |
+| Consumption RMSE | 0.613 pp |
 | Routine-drift RMSE | 0.243 pp |
-| Saving-rate direction | 3/4 |
+| Consumption correlation | 0.103 |
 | Revolving-credit direction | 1/4 |
-| Compounded LLM consumption index | 100.90 |
+| Compounded LLM consumption index | 100.25 |
 | Compounded first-release PCE index | 102.63 |
 | Compounded routine-drift index | 101.75 |
 
-The credit miss is systematic: households pay down revolving balances while the
-aggregate series grew in three of four months. Saving changes are directionally more
-credible. Those two mappings are sign proxies only; consumption is the only
-magnitude-scored aggregate.
+![Rolling one-month forecasts versus first-release outcomes](current_ecology_predicted_vs_actual.png)
+
+The sign result is real; the weak correlation is equally important.
+The model produces positive nominal growth every month, but does not rank stronger
+and weaker months correctly in this four-month sample. Credit is also wrong in
+three of four months: households pay revolving balances down while the aggregate
+series usually rises.
 
 ## Frozen August Forecast
 
@@ -76,47 +87,71 @@ magnitude-scored aggregate.
 | Target | `2026-08-01` |
 | Provider / model | `codex_cli` / `gpt-5.5` |
 | Household responses | 200 accepted |
-| Median consumption growth | +0.28% |
-| Downside / upside | +0.28% / +0.28% |
-| Median saving rate | 16.73% |
-| Median revolving-credit growth | -2.06% |
-| Accounting | PASS; max residual `1.12e-08` |
+| Point consumption growth | +0.08% |
+| Revolving-credit growth | -2.77% |
+| Employment rate | 66.20%, held fixed |
+| Gross-income residual rate | 16.89%, internal accounting only |
+| Accounting | PASS; max residual `1.30e-08` |
 | Replay | PASS; 200 hits, 0 calls, immutable reference matched |
-| Source hash | `e1979a7dd789d5dca322aa5bcb141a8957ab94935750dd99eb2370126369a694` |
-| Replay-equivalence hash | `d233bb4f1708772e95f4a155223d7be7c01aac4ea3ef34b7fd79646d485ca24d` |
+| Source commit | `d42e3b2b7d02f7eda28d9b42bda49311fd1d255d` |
+| Source hash | `4aa98380ba94a269a7699bcdb5ee6745be2ae532d5fc061ef3d1a1cb7ed22897` |
+| Replay-equivalence hash | `55ae0b8904519669a3bfb1eb7ab17958c7f18c7a5baad2fe7904fa9a807b20e2` |
 
-The three scenario paths coincide because employment and wages are fixed and the
-household dollar policy is a point policy. They are not a predictive interval.
+The population-weighted household p50 beliefs are 5.04% inflation, -1.61%
+income growth, and 0.93% next-month job-loss risk. Population-weighted intended
+consumption is $3.113 million before feasibility and $3.112 million after it, so the +0.08%
+result comes from household policies rather than material rationing.
 
-## Integrity
+## How To Read The Mapping
 
-- All 800 historical and 200 prospective responses were created through Codex CLI.
-- Each model call ran without shell, local files, web, browser, apps, memory,
-  plugins, or subagents.
-- Prompt cards contain no `actual_*` target fields and no prior simulated state.
-- Realizations load only after all historical forecasts finish.
-- SCF income components reconcile to annual household income for all 200 states.
-- SCF family earnings are held fixed at the household boundary; no respondent wage
-  share is invented. Dynamic labor is blocked for these states.
-- All five runs pass household, credit, employer, and stock-flow accounting.
-- The historical dates are retrospective and may be in model knowledge; this is
-  development evidence, not a clean holdout.
+The model's `consumption_growth_pct` is the change from a numerically fixed,
+synthetic SCE-SCF estimate of each household's recent typical spending to its
+executed target-month spending. The aggregate is interpreted as month-over-month
+nominal PCE growth. This is the closest available macro proxy, not observed growth
+for the same households.
+
+The internal income remainder uses synthetic gross SCF-family income. It is not
+disposable personal income and is not scored against the national personal saving
+rate. Revolving debt is retained as a sign-only proxy for aggregate revolving
+consumer credit.
+
+## Integrity Record
+
+- The corrected campaign used 1,000 fresh Codex CLI calls: 200 prospective and
+  800 historical. There were zero failed provider attempts.
+- Replays use 1,000 cache hits and zero calls. The prospective immutable reference
+  and all four historical child references match exactly.
+- Calls ran in fresh empty directories without shell, local-file, web, browser,
+  app, memory, plugin, or subagent access.
+- Prompt cards contain no `actual_*` targets and no simulated prior state.
+- Time-varying SCE answers preserve wave-specific missingness; no future `Q13new`
+  value is used to complete an earlier household history.
+- All five economies pass household, employer, credit, and stock-flow accounting.
+- Manifests bind the runs to clean Git commit `d42e3b2` and executable source hash
+  `4aa98380...`.
+- The historical dates are retrospective and may be in model knowledge. They are
+  development evidence. August is the active prospective test.
 
 ## What We Learned
 
-The household economy was not failing because it lacked firms, banks, or a richer
-general-equilibrium loop. It was failing because the behavioral object was wrong:
-households were asked for abstract percentage cuts, were given coarse financial
-templates, and one respondent's employment status stood in for the whole household.
+The current result does not establish which individual redesign choice caused the
+sign correction; there is no component-by-component ablation. It does establish
+that the full corrected architecture can keep demand positive while remaining
+accounting-safe. Earlier versions asked for abstract percentage cuts, used coarse
+financial templates, or mishandled personal-risk information, and are retired.
 
-Once households received coherent continuous states and wrote conditional dollar
-policies, the mechanical collapse disappeared and every consumption sign became
-correct. The remaining gap is narrower: GPT households preserve spending levels and
-react to conditions, but they do not fully carry normal nominal trend into next
-month's dollar plan. That is the next behavior problem to study. It is too early to
-add LLM firms or banks.
+In the corrected architecture, household policies still fail to carry enough
+ordinary nominal growth into the next month. That amplitude miss is large: the
+four LLM predictions compound to 100.25 while first-release PCE compounds to
+102.63. The model also pays revolving balances down in every origin, matching the
+aggregate credit direction only once.
 
-Artifacts:
+That is the next model-building problem. Firms and banks should remain mechanical
+until repeated prospective errors show that a missing institutional response,
+rather than household elicitation, is responsible.
 
-- Prospective run: `outputs/household_ecology_200_july_v18_current/`
-- Historical diagnostic: `outputs/household_ecology_retrospective_2026_01_04_v18/`
+## Current Evidence
+
+- Prospective run: `outputs/household_ecology_200_july_v20_current/`
+- Historical diagnostic: `outputs/household_ecology_retrospective_2026_01_04_v20/`
+- Retired research record: `research_history.md`
