@@ -35,6 +35,7 @@ SCE_REQUIRED_COLUMNS = (
     "Q25v2part2",
 )
 SCE_OPTIONAL_COLUMNS = (
+    "Q13new",
     "Q32",
     "_AGE_CAT",
     "Q33",
@@ -65,6 +66,7 @@ SCE_OUTPUT_COLUMNS = (
     "actual_expected_real_income_growth",
     "sce_nominal_income_growth",
     "sce_question_unemployment_higher_prob",
+    "sce_personal_job_loss_probability_1y",
     "sce_raw_userid",
     "sce_raw_date",
 )
@@ -119,7 +121,7 @@ def convert_sce_microdata(
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     converted.to_csv(output_csv, index=False)
     manifest = {
-        "schema_version": "sce_real_microdata_conversion_v1",
+        "schema_version": "sce_real_microdata_conversion_v2",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "source_file": {
             "path": _safe_relative(input_xlsx),
@@ -140,6 +142,12 @@ def convert_sce_microdata(
             "expected_inflation_1y": "Q9_cent50 density median one-year inflation expectation",
             "expected_unemployment_higher_prob": "Q4new percent chance U.S. unemployment will be higher in 12 months",
             "expected_real_income_growth": "Q25v2part2 nominal household income growth minus respondent Q9_cent50 inflation expectation",
+        },
+        "household_state_mapping": {
+            "sce_personal_job_loss_probability_1y": (
+                "Q13new percent chance the respondent loses the current/main job "
+                "during the next 12 months; missing when not asked"
+            ),
         },
         "demographic_handling": (
             "Demographic fields are forward/back-filled within userid before wave filtering, then mapped from "
@@ -261,6 +269,7 @@ def normalize_sce_raw_frame(
 
     inflation = pd.to_numeric(frame["Q9_cent50"], errors="coerce")
     unemployment_higher = pd.to_numeric(frame["Q4new"], errors="coerce")
+    personal_job_loss = pd.to_numeric(_optional_column(frame, "Q13new"), errors="coerce")
     nominal_income = pd.to_numeric(frame["Q25v2part2"], errors="coerce")
     weight = pd.to_numeric(frame["weight"], errors="coerce").fillna(0.0).clip(lower=0.0)
     out = pd.DataFrame(
@@ -291,6 +300,7 @@ def normalize_sce_raw_frame(
             ),
             "sce_nominal_income_growth": nominal_income,
             "sce_question_unemployment_higher_prob": unemployment_higher,
+            "sce_personal_job_loss_probability_1y": personal_job_loss.clip(0.0, 100.0),
             "sce_raw_userid": frame["userid"].astype(str).str.replace(r"\.0$", "", regex=True),
             "sce_raw_date": frame["date"],
         }

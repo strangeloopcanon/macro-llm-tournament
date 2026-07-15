@@ -38,6 +38,7 @@ def _fixture(*, include_future: bool = False) -> pd.DataFrame:
                     "liquid_wealth_group": "high" if index % 2 else "low",
                     "actual_expected_inflation_1y": float(index + month_index),
                     "actual_expected_unemployment_higher_prob": float(10 + index),
+                    "sce_personal_job_loss_probability_1y": float(5 + index + month_index),
                     "actual_expected_real_income_growth": float(1 + month_index),
                 }
             )
@@ -64,6 +65,13 @@ class PersistentHouseholdTests(unittest.TestCase):
         pd.testing.assert_series_equal(expected, registry["selection_weight_200"], check_names=False)
         self.assertAlmostEqual(float(registry["population_weight_200"].sum()), 1.0)
         self.assertAlmostEqual(float(result["initial_households_200"]["population_weight"].sum()), 1.0)
+        job_loss_by_id = result["initial_households_200"].set_index("type_id")[
+            "personal_job_loss_probability_1y"
+        ]
+        for index in range(12):
+            household_id = stable_household_id(f"raw-{index:03d}")
+            if household_id in job_loss_by_id:
+                self.assertEqual(job_loss_by_id[household_id], float(6 + index))
         metrics = result["manifest"]["weight_metrics"]["master_200"]
         weights = registry["population_weight_200"]
         self.assertAlmostEqual(metrics["effective_sample_size"], float(weights.sum() ** 2 / (weights**2).sum()))
@@ -138,6 +146,7 @@ class PersistentHouseholdTests(unittest.TestCase):
                         "weight": 2.5,
                         "actual_expected_inflation_1y": 3.0,
                         "actual_expected_unemployment_higher_prob": 20.0,
+                        "sce_personal_job_loss_probability_1y": 7.5,
                         "actual_expected_real_income_growth": 1.0,
                     },
                     {

@@ -13,7 +13,7 @@ import pandas as pd
 from .ecology import SCHEMA_VERSION, _artifact_sha256, _file_sha256, _write_json
 
 
-REALIZATION_SCHEMA_VERSION = "household_first_rolling_microeconomy_realization_append_v1"
+REALIZATION_SCHEMA_VERSION = "household_first_rolling_microeconomy_realization_append_v2"
 RETROSPECTIVE_LABEL = "retrospective_realized_outcomes_append"
 REALIZATION_FILE_NAMES = (
     "realized_outcomes.csv",
@@ -22,13 +22,12 @@ REALIZATION_FILE_NAMES = (
 )
 REALIZATION_METRICS = (
     "consumption_growth_pct",
-    "saving_rate_pct",
     "revolving_credit_growth_pct",
     "employment_rate_pct",
     "price_growth_pct",
 )
 REALIZATION_COLUMNS = ("target_month",) + REALIZATION_METRICS
-SCENARIOS = ("downside", "median", "upside")
+SCENARIOS = ("median",)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -130,8 +129,8 @@ def _load_forecast_paths(path: Path) -> pd.DataFrame:
         missing = sorted(required_columns.difference(forecast_paths.columns))
         raise ValueError(f"macro_forecast_paths.csv is missing required columns: {missing}")
     scenarios = tuple(forecast_paths["scenario"].astype(str))
-    if set(scenarios) != set(SCENARIOS) or len(forecast_paths) != len(SCENARIOS):
-        raise ValueError("macro_forecast_paths.csv must contain exactly downside, median, and upside rows")
+    if scenarios != SCENARIOS:
+        raise ValueError("macro_forecast_paths.csv must contain exactly one median row")
     return forecast_paths.loc[:, ["scenario", *REALIZATION_METRICS]].copy()
 
 

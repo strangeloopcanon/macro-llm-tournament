@@ -57,6 +57,8 @@ PRIOR_COLUMNS = (
     "prior_expected_real_income_growth",
 )
 CURRENT_TO_PRIOR = dict(zip(BELIEF_COLUMNS, PRIOR_COLUMNS))
+PERSONAL_JOB_LOSS_COLUMN = "sce_personal_job_loss_probability_1y"
+PRIOR_PERSONAL_JOB_LOSS_COLUMN = "prior_sce_personal_job_loss_probability_1y"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT = PROJECT_ROOT / "work" / "persona_beliefs" / "sce_real_microdata.csv"
@@ -393,7 +395,14 @@ def _build_initial_households(initial: pd.DataFrame) -> pd.DataFrame:
         annual_income = income_value
         baseline_consumption = annual_income * consumption_ratio
         job_risk = "high" if any(token in employment for token in ("unemployed", "retired", "out of", "not working")) else "low"
-        baseline_job_loss = float(np.clip(float(row["actual_expected_unemployment_higher_prob"]) / 4.0, 0.5, 20.0))
+        personal_job_loss = pd.to_numeric(
+            pd.Series([row.get(PERSONAL_JOB_LOSS_COLUMN)]), errors="coerce"
+        ).iloc[0]
+        personal_job_loss = (
+            float(np.clip(personal_job_loss, 0.0, 100.0))
+            if pd.notna(personal_job_loss)
+            else np.nan
+        )
         rows.append(
             {
                 "type_id": row["respondent_id"],
@@ -418,7 +427,7 @@ def _build_initial_households(initial: pd.DataFrame) -> pd.DataFrame:
                 "rate_sensitivity": _group_factor(income, {"low": 0.42, "middle": 0.55, "high": 0.70}, 0.55),
                 "income_sensitivity": _group_factor(income, {"low": 0.82, "middle": 0.58, "high": 0.36}, 0.58),
                 "precautionary_sensitivity": 0.68 if job_risk == "high" else (0.62 if liquidity == "low" else 0.38),
-                "baseline_job_loss_probability": baseline_job_loss,
+                "personal_job_loss_probability_1y": personal_job_loss,
                 "unemployment_higher_probability_1y": float(row["actual_expected_unemployment_higher_prob"]),
                 "target_buffer_months": (6.2 if job_risk == "high" else 4.8) if liquidity == "high" else (2.7 if job_risk == "high" else 1.5),
                 "inflation_expectation_1y": float(row["actual_expected_inflation_1y"]),

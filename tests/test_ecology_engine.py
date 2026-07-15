@@ -157,7 +157,7 @@ class EcologyEngineTests(unittest.TestCase):
         )
         self.assertEqual(
             schema["properties"]["prompt_version"]["const"],
-            "household_ecology_monthly_v14",
+            "household_ecology_monthly_v15",
         )
         self.assertIn("expected_inflation_pct", schema["required"])
         self.assertIn("not_employed_policy", schema["required"])

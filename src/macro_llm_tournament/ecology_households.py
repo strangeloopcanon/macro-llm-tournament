@@ -20,7 +20,7 @@ from .ecology_provider import (
 from .ecology_models import HouseholdPolicyBranch, HouseholdResponse, QuantileTriplet
 
 
-HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v14"
+HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v15"
 
 
 class LiveCallBudget:
@@ -94,6 +94,7 @@ def _own_history_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "actual_expected_inflation_1y": "reported_expected_inflation_1y",
         "actual_expected_real_income_growth": "reported_expected_real_income_growth",
         "actual_expected_unemployment_higher_prob": "reported_expected_unemployment_higher_prob",
+        "sce_personal_job_loss_probability_1y": "reported_personal_job_loss_probability_1y",
     }
     allowed = {
         "event_date",
@@ -133,22 +134,23 @@ def household_card(
             "public_events": origin.get("public_events", []),
         }
     )
-    recursive = "baseline_monthly_consumption_usd" in state
+    has_monthly_state = "baseline_monthly_consumption_usd" in state
     state_provenance = str(
         state.get(
             "state_provenance",
-            "prior_simulated_month" if recursive else "survey_seeded_initial_state",
+            "fixed_survey_scf_anchor"
+            if has_monthly_state
+            else "survey_seeded_initial_state",
         )
     )
     if state_provenance not in {
         "survey_seeded_initial_state",
-        "prior_simulated_month",
-        "rolling_observed_reanchor",
+        "fixed_survey_scf_anchor",
     }:
         raise ValueError(f"unsupported household state provenance: {state_provenance}")
     monthly_consumption = (
         state.get("baseline_monthly_consumption_usd")
-        if recursive
+        if has_monthly_state
         else state.get(
             "monthly_consumption",
             float(state.get("baseline_consumption_annual", 0.0)) / 12.0,
@@ -156,12 +158,12 @@ def household_card(
     )
     hours_worked = (
         state.get("baseline_monthly_hours")
-        if recursive
+        if has_monthly_state
         else state.get("hours_worked", 160.0)
     )
     employed = (
         float(hours_worked or 0.0) > 0.0
-        if recursive
+        if has_monthly_state
         else state.get(
             "employed",
             str(state.get("employment_status", "unknown")).lower()
@@ -170,7 +172,7 @@ def household_card(
     )
     annualized_wage_income = (
         float(state.get("hourly_wage_usd") or 0.0) * float(hours_worked or 0.0) * 12.0
-        if recursive
+        if has_monthly_state
         else state.get("annual_income", 0.0)
     )
     private = {
@@ -222,20 +224,18 @@ def household_card(
         "previous_beliefs": {
             "inflation_expectation_1y": state.get("inflation_expectation_1y"),
             "income_growth_expectation_1y": state.get("income_growth_expectation_1y"),
-            "job_loss_probability": state.get(
-                "job_loss_probability", state.get("baseline_job_loss_probability")
+            "personal_job_loss_probability_1y": state.get(
+                "personal_job_loss_probability_1y"
+            ),
+            "unemployment_higher_probability_1y": state.get(
+                "unemployment_higher_probability_1y"
             ),
         },
-        "previous_intentions": state.get("previous_intentions", {}),
-        "previous_outcomes": state.get("previous_outcomes", {}),
         "survey_history": sorted(
             [_own_history_row(row) for row in own_history],
             key=lambda row: str(row.get("event_date", "")),
         ),
     }
-    if state_provenance == "rolling_observed_reanchor":
-        private.pop("previous_intentions", None)
-        private.pop("previous_outcomes", None)
     return _clean({
         "prompt_version": HOUSEHOLD_PROMPT_VERSION,
         "household": private,
@@ -253,9 +253,11 @@ adjustment. Deterministic code will execute the policy and enforce its budget,
 credit limit, and minimum debt payment.
 
 The inflation and income-growth fields are expected percentage changes over
-the next 12 months. Job-loss probability is the chance of losing the current
-job during the next month; the survey-history probability is a 12-month prior,
-so translate it rather than copying it. If this household is currently not
+the next 12 months. The personal job-loss prior, when present, is the respondent's
+reported chance of losing the current job over 12 months. Translate that personal
+prior into a next-month probability rather than copying it. The separate
+unemployment-higher probability is an aggregate U.S. outlook and must never be
+treated as personal job-loss risk. If this household is currently not
 employed, return zero for job-loss probability; job search is handled separately.
 Work and job-search hours are totals for next
 month. Write two conditional dollar policies: one if employed next month and

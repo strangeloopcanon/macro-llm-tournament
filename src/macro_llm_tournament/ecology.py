@@ -35,7 +35,7 @@ from .ecology_provider import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = PROJECT_ROOT / "work/ecology_cache"
-SCHEMA_VERSION = "household_first_rolling_microeconomy_v1"
+SCHEMA_VERSION = "household_first_rolling_microeconomy_v2"
 LIVE_REFERENCE_SCHEMA_VERSION = "household_ecology_live_reference_v2"
 
 
@@ -51,11 +51,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--households", type=Path, required=True)
     parser.add_argument("--history", type=Path, required=True)
     parser.add_argument("--bundle", type=Path, required=True)
-    parser.add_argument("--state-json", type=Path)
     parser.add_argument(
         "--state-policy",
-        choices=("rolling_reanchored", "recursive"),
+        choices=("rolling_reanchored",),
         default="rolling_reanchored",
+        help="Each origin starts from the fixed survey-SCF household anchor.",
     )
     parser.add_argument("--expected-replay-sha256")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
@@ -366,65 +366,6 @@ def _initial_credit(states: list[HouseholdState], origin: dict[str, Any]) -> Cre
     )
 
 
-def _load_recursive_state(
-    path: Path | None,
-    states: list[HouseholdState],
-    employer: EmployerState,
-    credit: CreditIntermediaryState,
-    origin_month: str,
-) -> tuple[list[HouseholdState], EmployerState, CreditIntermediaryState, dict[str, Any], dict[str, Any], str | None]:
-    if path is None:
-        return states, employer, credit, {}, {}, None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") not in {
-        "household_ecology_recursive_state_v2",
-        "household_ecology_recursive_state_v3",
-    }:
-        raise ValueError("recursive state schema mismatch")
-    if payload.get("next_origin_month") != origin_month:
-        raise ValueError("recursive state month continuity mismatch")
-    parent_scenario = payload.get("scenario")
-    if parent_scenario not in {"downside", "median", "upside"}:
-        raise ValueError("recursive state scenario mismatch")
-    rows = payload.get("households")
-    if not isinstance(rows, list):
-        raise ValueError("recursive state households must be a list")
-    by_id = {row["household_id"]: row for row in rows}
-    if set(by_id) != {row.household_id for row in states}:
-        raise ValueError("recursive state household membership mismatch")
-    restored = [
-        HouseholdState(
-            **{
-                field.name: by_id[state.household_id].get(
-                    field.name, getattr(state, field.name)
-                )
-                for field in dataclasses.fields(HouseholdState)
-            }
-        )
-        for state in states
-    ]
-    restored_employer = employer
-    if isinstance(payload.get("employer"), dict):
-        restored_employer = EmployerState(
-            **{
-                field.name: payload["employer"][field.name]
-                for field in dataclasses.fields(EmployerState)
-            }
-        )
-    restored_credit = credit
-    if isinstance(payload.get("credit"), dict):
-        restored_credit = CreditIntermediaryState(
-            **{
-                field.name: payload["credit"][field.name]
-                for field in dataclasses.fields(CreditIntermediaryState)
-            }
-        )
-    macro_state = payload.get("macro_state", {})
-    if not isinstance(macro_state, dict):
-        raise ValueError("recursive macro state must be an object")
-    return restored, restored_employer, restored_credit, by_id, macro_state, str(parent_scenario)
-
-
 def _latest_visible_value(origin: dict[str, Any], series_id: str) -> float | None:
     row = origin.get("origin_visible_macro_context", {}).get(series_id)
     if not isinstance(row, dict):
@@ -436,192 +377,20 @@ def _latest_visible_value(origin: dict[str, Any], series_id: str) -> float | Non
     return value if math.isfinite(value) else None
 
 
-def _rolling_reanchor(
-    *,
-    restored: list[HouseholdState],
-    anchors: list[HouseholdState],
-    prior_macro_state: dict[str, Any],
-    origin: dict[str, Any],
-) -> tuple[list[HouseholdState], dict[str, Any]]:
-    """Anchor each one-step forecast to the latest visible consumption level.
-
-    Individual deposits, revolving debt, and employment state continue from the
-    preceding simulation. The spending baseline is rebuilt from each household's
-    fixed SCF-conditioned anchor and the aggregate PCE movement visible at the
-    current origin, so forecast errors do not become next month's observed fact.
-    """
-
-    anchor_by_id = {row.household_id: row for row in anchors}
-    current_pce = _latest_visible_value(origin, "PCE")
-    reference_pce = prior_macro_state.get("anchor_reference_pce_value")
-    if reference_pce is None:
-        reference_pce = prior_macro_state.get("latest_visible_pce_value")
-    if current_pce is None or reference_pce is None or float(reference_pce) <= 0.0:
-        ratio = 1.0
-        status = "pce_anchor_unavailable"
-    else:
-        ratio = max(0.75, min(1.25, current_pce / float(reference_pce)))
-        status = "pce_level_reanchored"
-    rows: list[HouseholdState] = []
-    for state in restored:
-        anchor = anchor_by_id[state.household_id]
-        committed = (
-            anchor.baseline_committed_consumption_usd * ratio
-            if anchor.baseline_committed_consumption_usd is not None
-            else None
-        )
-        discretionary = (
-            anchor.baseline_discretionary_consumption_usd * ratio
-            if anchor.baseline_discretionary_consumption_usd is not None
-            else None
-        )
-        rows.append(
-            dataclasses.replace(
-                state,
-                baseline_monthly_consumption_usd=(
-                    anchor.baseline_monthly_consumption_usd * ratio
-                ),
-                baseline_committed_consumption_usd=committed,
-                baseline_discretionary_consumption_usd=discretionary,
-                hourly_wage_usd=anchor.hourly_wage_usd,
-            )
-        )
-    return rows, {
-        "status": status,
-        "series_id": "PCE",
-        "reference_visible_value": reference_pce,
-        "current_visible_value": current_pce,
-        "applied_level_ratio": ratio,
-    }
-
-
-def _next_recursive_state(
-    *,
-    scenario: str,
-    result: Any,
-    states: list[HouseholdState],
-    responses: dict[str, Any],
-    raw_payloads: dict[str, dict[str, Any]],
-    employer: EmployerState,
-    credit: CreditIntermediaryState,
-    origin: dict[str, Any],
-    institution_mode: str = "dynamic",
-) -> dict[str, Any]:
-    prior_by_id = {row.household_id: row for row in states}
-    household_rows: list[dict[str, Any]] = []
-    for outcome in result.households:
-        prior = prior_by_id[outcome.household_id]
-        response = responses[outcome.household_id]
-        wage_ratio = result.employer.next_wage_offer_usd / max(result.employer.current_wage_offer_usd, 1.0)
-        next_household = dataclasses.asdict(
-            HouseholdState(
-                household_id=prior.household_id,
-                employer_id=prior.employer_id,
-                deposit_balance_usd=outcome.deposit_balance_end_usd,
-                revolving_debt_usd=outcome.revolving_debt_end_usd,
-                revolving_credit_limit_usd=prior.revolving_credit_limit_usd,
-                hourly_wage_usd=(
-                    max(0.0, outcome.wage_income_usd / outcome.actual_hours_worked * wage_ratio)
-                    if outcome.actual_hours_worked > 1e-12
-                    else prior.hourly_wage_usd
-                ),
-                baseline_monthly_hours=outcome.actual_hours_worked,
-                baseline_monthly_consumption_usd=max(1.0, outcome.consumption_usd),
-                employment_share=outcome.employment_share_end,
-                layoff_threshold_pct=prior.layoff_threshold_pct,
-                liquid_buffer_floor_months=prior.liquid_buffer_floor_months,
-                subsistence_consumption_share=prior.subsistence_consumption_share,
-                population_weight=prior.population_weight,
-                monthly_household_earned_income_usd=prior.monthly_household_earned_income_usd,
-                monthly_nonwage_income_usd=prior.monthly_nonwage_income_usd,
-                monthly_transfer_income_usd=prior.monthly_transfer_income_usd,
-                baseline_committed_consumption_usd=prior.baseline_committed_consumption_usd,
-                baseline_discretionary_consumption_usd=prior.baseline_discretionary_consumption_usd,
-                minimum_debt_payment_usd=prior.minimum_debt_payment_usd,
-            )
-        )
-        next_household.update(
-            {
-                "inflation_expectation_1y": response.expected_inflation_pct.p50,
-                "income_growth_expectation_1y": response.expected_income_growth_pct.p50,
-                "job_loss_probability": response.job_loss_probability_pct.p50,
-                "previous_intentions": raw_payloads[outcome.household_id],
-                "previous_outcomes": {
-                    "consumption_usd": outcome.consumption_usd,
-                    "hours_worked": outcome.actual_hours_worked,
-                    "job_search_hours": outcome.actual_job_search_hours,
-                    "wage_income_usd": outcome.wage_income_usd,
-                    "debt_payment_usd": outcome.debt_payment_usd,
-                    "borrowing_usd": outcome.borrowing_usd,
-                    "defaulted": outcome.defaulted,
-                },
-            }
-        )
-        household_rows.append(next_household)
-    pressure = max(0.75, min(1.25, result.employer.demand_pressure))
-    next_employer = dataclasses.asdict(
-        EmployerState(
-            employer_id=employer.employer_id,
-            productivity_per_hour=employer.productivity_per_hour,
-            monthly_capacity_units=max(
-                result.employer.output_units,
-                employer.monthly_capacity_units * (1.0 + 0.15 * (pressure - 1.0)),
-            ),
-            inventory_units=max(0.0, result.employer.inventory_end_units),
-            price_per_unit_usd=result.employer.next_price_per_unit_usd,
-            target_headcount=(
-                employer.target_headcount
-                if institution_mode == "household_demand"
-                else max(1.0, result.employer.employment_count * pressure)
-            ),
-            wage_offer_usd=result.employer.next_wage_offer_usd,
-            target_inventory_units=employer.target_inventory_units,
-            fixed_cost_usd=employer.fixed_cost_usd,
-            variable_nonlabor_cost_per_unit_usd=employer.variable_nonlabor_cost_per_unit_usd,
-            vacancy_cost_per_opening_usd=employer.vacancy_cost_per_opening_usd,
-            inventory_carry_cost_per_unit_usd=employer.inventory_carry_cost_per_unit_usd,
-        )
+def _git_state() -> dict[str, Any]:
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True
+    ).strip()
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=PROJECT_ROOT,
+        text=True,
     )
-    weight_total = sum(row.population_weight for row in states) or 1.0
-    headroom = len(states) * sum(
-        prior_by_id[row["household_id"]].population_weight
-        * max(0.0, row["revolving_credit_limit_usd"] - row["revolving_debt_usd"])
-        for row in household_rows
-    ) / weight_total
-    next_credit = dataclasses.asdict(
-        CreditIntermediaryState(
-            intermediary_id=credit.intermediary_id,
-            annual_interest_rate_pct=credit.annual_interest_rate_pct,
-            minimum_payment_rate_pct=credit.minimum_payment_rate_pct,
-            minimum_payment_floor_usd=credit.minimum_payment_floor_usd,
-            loss_given_default_pct=credit.loss_given_default_pct,
-            new_lending_budget_usd=headroom * 0.2,
-        )
-    )
-    payload = {
-        "schema_version": "household_ecology_recursive_state_v3",
-        "source_origin_month": origin["origin_month"],
-        "next_origin_month": (
-            pd.Timestamp(origin["origin_month"]) + pd.offsets.MonthBegin(1)
-        ).date().isoformat(),
-        "scenario": scenario,
-        "households": household_rows,
-        "macro_state": _weighted_macro(result, states, origin),
+    return {
+        "git_commit": commit,
+        "git_worktree_dirty": bool(status.strip()),
+        "source_binding_authority": "source_sha256",
     }
-    if institution_mode == "household_demand":
-        macro = payload["macro_state"]
-        payload["macro_state"] = {
-            key: macro[key]
-            for key in (
-                "latest_visible_pce_value",
-                "anchor_reference_pce_value",
-                "state_policy",
-            )
-        }
-    else:
-        payload["employer"] = next_employer
-        payload["credit"] = next_credit
-    return payload
 
 
 def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str, Any]) -> dict[str, Any]:
@@ -655,30 +424,32 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         row.monthly_transfer_income_usd * weights[row.household_id]
         for row in states
     ) / total_weight
-    disposable_income = (
+    gross_household_income = (
         wage_income + household_earned_income + nonwage_income + transfer_income
     )
     consumption = weighted("consumption_usd")
-    # Borrowing and debt repayment change financing composition; they are not
-    # personal saving or dissaving. Household earned, nonwage, and transfer
-    # income are resources in the engine, so reported saving includes them.
-    saving = disposable_income - consumption
-    saving_rate = 100.0 * saving / max(disposable_income, 1.0)
+    # This is a budget residual against synthetic gross SCF-family income. It is
+    # useful for internal accounting, but it is not disposable personal income
+    # and must not be scored as the national-accounts personal saving rate.
+    gross_income_residual = gross_household_income - consumption
+    gross_income_residual_rate = (
+        100.0 * gross_income_residual / max(gross_household_income, 1.0)
+    )
     baseline_wage_income = sum(
         row.hourly_wage_usd
         * row.baseline_monthly_hours
         * weights[row.household_id]
         for row in states
     ) / total_weight
-    baseline_disposable_income = (
+    baseline_gross_household_income = (
         baseline_wage_income
         + household_earned_income
         + nonwage_income
         + transfer_income
     )
-    baseline_saving_rate = 100.0 * (
-        baseline_disposable_income - baseline_consumption
-    ) / max(baseline_disposable_income, 1.0)
+    baseline_gross_income_residual_rate = 100.0 * (
+        baseline_gross_household_income - baseline_consumption
+    ) / max(baseline_gross_household_income, 1.0)
     price_growth = 100.0 * (result.employer.next_price_per_unit_usd / result.employer.current_price_per_unit_usd - 1.0)
     latest_visible_pce = _latest_visible_value(origin, "PCE")
     consumption_growth = 100.0 * (
@@ -689,15 +460,17 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         "consumption_growth_pct": consumption_growth,
         "routine_nominal_spending_drift_pct": routine_drift,
         "household_residual_contribution_pct": consumption_growth - routine_drift,
-        "saving_rate_pct": saving_rate,
-        "baseline_saving_rate_pct": baseline_saving_rate,
-        "saving_rate_change_pp": saving_rate - baseline_saving_rate,
+        "gross_income_residual_rate_pct": gross_income_residual_rate,
+        "baseline_gross_income_residual_rate_pct": baseline_gross_income_residual_rate,
+        "gross_income_residual_rate_change_pp": (
+            gross_income_residual_rate - baseline_gross_income_residual_rate
+        ),
         "wage_income_usd": wage_income,
         "household_earned_income_usd": household_earned_income,
         "nonwage_income_usd": nonwage_income,
         "transfer_income_usd": transfer_income,
-        "disposable_income_usd": disposable_income,
-        "personal_saving_usd": saving,
+        "gross_household_income_usd": gross_household_income,
+        "gross_income_residual_usd": gross_income_residual,
         "revolving_credit_growth_pct": 100.0 * (debt_end / max(debt_start, 1.0) - 1.0),
         "employment_rate_pct": 100.0 * employed_weight,
         "employment_rate_change_pp": 100.0 * (employed_weight - prior_employed_weight),
@@ -711,7 +484,7 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         "anchor_reference_pce_value": origin.get(
             "anchor_reference_pce_value", latest_visible_pce
         ),
-        "state_policy": origin.get("state_policy", "recursive"),
+        "state_policy": "rolling_reanchored",
     }
 
 
@@ -722,7 +495,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"output directory is not empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     states = [_state_from_row(row) for _, row in households.iterrows()]
-    anchor_states = list(states)
     histories = {
         household_id: group.to_dict("records")
         for household_id, group in history.groupby("household_id", sort=True)
@@ -739,34 +511,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     call_budget = LiveCallBudget(args.max_live_calls, attempt_journal_dir)
     employer = _initial_employer(states)
     credit = _initial_credit(states, origin)
-    states, employer, credit, recursive_rows, prior_macro_state, parent_scenario = _load_recursive_state(
-        getattr(args, "state_json", None), states, employer, credit, args.origin
-    )
     state_policy = getattr(args, "state_policy", "rolling_reanchored")
+    if state_policy != "rolling_reanchored":
+        raise ValueError("only rolling_reanchored state policy is supported")
     reanchor = {
-        "status": "survey_seeded_initial_state",
+        "status": "fixed_survey_scf_anchor",
         "applied_level_ratio": 1.0,
     }
-    if prior_macro_state and state_policy == "rolling_reanchored":
-        states, reanchor = _rolling_reanchor(
-            restored=states,
-            anchors=anchor_states,
-            prior_macro_state=prior_macro_state,
-            origin=origin,
-        )
-        employer = _initial_employer(states)
-        credit = _initial_credit(states, origin)
-    elif prior_macro_state:
-        reanchor = {
-            "status": "recursive_unanchored",
-            "applied_level_ratio": None,
-        }
     origin = dict(origin)
     origin["state_policy"] = state_policy
-    origin["anchor_reference_pce_value"] = prior_macro_state.get(
-        "anchor_reference_pce_value",
-        _latest_visible_value(origin, "PCE"),
-    )
+    origin["anchor_reference_pce_value"] = _latest_visible_value(origin, "PCE")
     origin["compact_macro_information"] = build_macro_information_card(
         origin,
         policy_declarations={
@@ -798,24 +552,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if str(row.get("public_availability_date", "")) <= origin["as_of_date"]
         ]
         card_state = households.loc[households["type_id"].eq(state.household_id)].iloc[0].to_dict()
-        # Recursive rows contribute belief and outcome memory only. The exact
-        # re-anchored engine state must win every overlapping field.
-        card_state.update(recursive_rows.get(state.household_id, {}))
         card_state.update(dataclasses.asdict(state))
         card_state["employed"] = state.employment_share is not None and state.employment_share > 0.0
         card_state["annual_income"] = (
             state.hourly_wage_usd * state.baseline_monthly_hours * 12.0
         )
-        card_state["state_provenance"] = (
-            "rolling_observed_reanchor"
-            if state.household_id in recursive_rows
-            and state_policy == "rolling_reanchored"
-            else (
-                "prior_simulated_month"
-                if state.household_id in recursive_rows
-                else "survey_seeded_initial_state"
-            )
-        )
+        card_state["state_provenance"] = "fixed_survey_scf_anchor"
         card = household_card(
             card_state,
             origin=origin,
@@ -851,17 +593,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "cache_hit": bool(record.get("cache_hit", False)),
         })
 
-    institution_mode = "household_demand" if state_policy == "rolling_reanchored" else "dynamic"
+    institution_mode = "household_demand"
     scenarios = {
-        scenario: run_monthly_ecology(
+        "median": run_monthly_ecology(
             states,
             responses,
             employer,
             credit,
-            scenario=scenario,
+            scenario="median",
             institution_mode=institution_mode,
         )
-        for scenario in ("downside", "median", "upside")
     }
     replay_equivalence_sha256 = canonical_sha256(
         {
@@ -917,21 +658,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("replay equivalence hash mismatch")
     for scenario, result in scenarios.items():
         _write_json(output / f"{scenario}_economy.json", result)
-        _write_json(
-            output / f"{scenario}_next_state.json",
-            _next_recursive_state(
-                scenario=scenario,
-                result=result,
-                states=states,
-                responses=responses,
-                raw_payloads=raw_payloads,
-                employer=employer,
-                credit=credit,
-                origin=origin,
-                institution_mode=institution_mode,
-            ),
-        )
-    (output / "next_state.json").write_bytes((output / "median_next_state.json").read_bytes())
     _write_json(output / "normalized_origin_information.json", origin)
     _write_json(output / "household_cards.json", cards)
     _write_json(output / "household_responses.json", records)
@@ -1012,10 +738,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "bundle_sha256": bundle_sha,
         "household_input_sha256": _file_sha256(args.households),
         "history_input_sha256": _file_sha256(args.history),
-        "recursive_state_input_sha256": (
-            _file_sha256(args.state_json) if getattr(args, "state_json", None) else None
-        ),
-        "parent_scenario": parent_scenario,
         "accounting_passed": all(
             residual.passed for result in scenarios.values() for residual in result.accounting_residuals
         ),
@@ -1023,7 +745,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "target_values_loaded_into_prompts": False,
         "forecast_frozen_before_realization": forecast_frozen,
         "evaluation_status": "prospective_frozen" if forecast_frozen else "retrospective",
-        "git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True).strip(),
+        **_git_state(),
         "source_sha256": _source_sha256(),
         "replay_equivalence_sha256": replay_equivalence_sha256,
         "expected_replay_sha256": expected_replay_sha256,
@@ -1080,7 +802,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "Each household was elicited separately; deterministic code then enforced budgets, "
         "credit limits, production feasibility, and settlement.",
         "",
-        f"The median path predicts consumption growth of **{executed_growth:.2f}%**. "
+        f"The point path predicts consumption growth of **{executed_growth:.2f}%**. "
         f"Households themselves intended **{intended_growth:.2f}%**. {execution_sentence}",
         "",
         (
@@ -1123,16 +845,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "",
         "## Forecast Paths",
         "",
-        "| Scenario | Consumption growth | Saving rate | Revolving-credit growth | Employment rate | Price growth |",
+        "| Path | Consumption growth | Gross-income residual rate | Revolving-credit growth | Employment rate | Price growth |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in macro_rows:
         report.append(
-            f"| {row['scenario']} | {row['consumption_growth_pct']:.2f}% | {row['saving_rate_pct']:.2f}% | "
+            f"| {row['scenario']} | {row['consumption_growth_pct']:.2f}% | {row['gross_income_residual_rate_pct']:.2f}% | "
             f"{row['revolving_credit_growth_pct']:.2f}% | {row['employment_rate_pct']:.2f}% | {row['price_growth_pct']:.2f}% |"
         )
     report.extend(
         [
+            "",
+            "The gross-income residual is an internal budget remainder against synthetic gross SCF-family income. It is not disposable personal income and is not a forecast of the national personal saving rate.",
             "",
             "## Household Signal",
             "",

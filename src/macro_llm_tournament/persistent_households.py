@@ -24,7 +24,9 @@ from .prepare_dynamic_macro_panel import (
     DEFAULT_PUBLICATION_LAG_MONTHS,
     DEFAULT_SAMPLE_SEED,
     OPTIONAL_DEMOGRAPHIC_COLUMNS,
+    PERSONAL_JOB_LOSS_COLUMN,
     PRIOR_COLUMNS,
+    PRIOR_PERSONAL_JOB_LOSS_COLUMN,
     PROJECT_ROOT,
     REQUIRED_COLUMNS,
     STRATIFICATION_COLUMNS,
@@ -36,7 +38,7 @@ from .prepare_dynamic_macro_panel import (
 )
 
 
-PERSISTENT_HOUSEHOLD_SCHEMA_VERSION = "persistent_household_cohort_v1"
+PERSISTENT_HOUSEHOLD_SCHEMA_VERSION = "persistent_household_cohort_v2"
 DEFAULT_COHORT_EVENT_DATE = "2025-04-01"
 DEFAULT_MASTER_COHORT_SIZE = 200
 DEFAULT_CORE_COHORT_SIZE = 81
@@ -61,6 +63,7 @@ HISTORY_COLUMNS = (
     *OPTIONAL_DEMOGRAPHIC_COLUMNS,
     *BELIEF_COLUMNS,
     *PRIOR_COLUMNS,
+    PERSONAL_JOB_LOSS_COLUMN,
 )
 
 
@@ -160,7 +163,10 @@ def _cohort_source_at_event_and_prior(
         raise PersistentHouseholdError("respondent_id contains blank event or immediate-prior values")
     if selected.duplicated(["respondent_id", "_survey_month"]).any():
         raise PersistentHouseholdError("duplicate respondent_id+survey_date grain in event or immediate-prior wave")
-    for column in ("weight", *BELIEF_COLUMNS):
+    numeric_columns = ["weight", *BELIEF_COLUMNS]
+    if PERSONAL_JOB_LOSS_COLUMN in selected:
+        numeric_columns.append(PERSONAL_JOB_LOSS_COLUMN)
+    for column in numeric_columns:
         selected[column] = pd.to_numeric(selected[column], errors="coerce")
     april = selected[selected["_survey_month"].eq(event_month)].copy()
     march = selected[selected["_survey_month"].eq(prior_month)].copy()
@@ -199,14 +205,26 @@ def eligible_april_2025_with_march_prior(
             if column in march.columns and column not in STRATIFICATION_COLUMNS
         ],
         *BELIEF_COLUMNS,
+        *([PERSONAL_JOB_LOSS_COLUMN] if PERSONAL_JOB_LOSS_COLUMN in march else []),
     ]
     prior_rename = {
         "weight": "prior_survey_weight",
         **CURRENT_TO_PRIOR,
+        **(
+            {PERSONAL_JOB_LOSS_COLUMN: PRIOR_PERSONAL_JOB_LOSS_COLUMN}
+            if PERSONAL_JOB_LOSS_COLUMN in prior_source_columns
+            else {}
+        ),
         **{
             column: f"prior_{column}"
             for column in prior_source_columns
-            if column not in {"respondent_id", "weight", *BELIEF_COLUMNS}
+            if column
+            not in {
+                "respondent_id",
+                "weight",
+                *BELIEF_COLUMNS,
+                PERSONAL_JOB_LOSS_COLUMN,
+            }
         },
     }
     prior = march[prior_source_columns].rename(columns=prior_rename)
@@ -309,6 +327,8 @@ def _initial_observed_history(
             march[column] = master[column]
     for current, prior_column in CURRENT_TO_PRIOR.items():
         march[current] = master[prior_column]
+    if PRIOR_PERSONAL_JOB_LOSS_COLUMN in master:
+        march[PERSONAL_JOB_LOSS_COLUMN] = master[PRIOR_PERSONAL_JOB_LOSS_COLUMN]
     march["event_date"] = _month_text(prior_month)
     march["public_availability_date"] = _month_text(
         _availability_date(prior_month, publication_lag_months)

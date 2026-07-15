@@ -32,7 +32,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                     {
                         "target_month": "2026-06-01",
                         "consumption_growth_pct": 1.25,
-                        "saving_rate_pct": 9.5,
                         "revolving_credit_growth_pct": -1.0,
                         "employment_rate_pct": 91.25,
                         "price_growth_pct": 2.75,
@@ -56,8 +55,8 @@ class EcologyRealizationsTests(unittest.TestCase):
             self.assertAlmostEqual(2.75, float(realized_outcomes.iloc[0]["price_growth_pct"]))
 
             forecast_errors = pd.read_csv(run_dir / "forecast_errors.csv")
-            self.assertEqual(["downside", "median", "upside"], forecast_errors["scenario"].tolist())
-            self.assertEqual(["2026-06-01"] * 3, forecast_errors["target_month"].tolist())
+            self.assertEqual(["median"], forecast_errors["scenario"].tolist())
+            self.assertEqual(["2026-06-01"], forecast_errors["target_month"].tolist())
             for metric in REALIZATION_METRICS:
                 self.assertIn(f"forecast_{metric}", forecast_errors.columns)
                 self.assertIn(f"realized_{metric}", forecast_errors.columns)
@@ -98,7 +97,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                     {
                         "target_month": "2026-06-01",
                         "consumption_growth_pct": 1.0,
-                        "saving_rate_pct": 2.0,
                         "revolving_credit_growth_pct": 3.0,
                         "employment_rate_pct": 4.0,
                         "price_growth_pct": 5.0,
@@ -114,7 +112,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                     {
                         "target_month": "2026-06-01",
                         "consumption_growth_pct": "nope",
-                        "saving_rate_pct": 2.0,
                         "revolving_credit_growth_pct": 3.0,
                         "employment_rate_pct": 4.0,
                         "price_growth_pct": 5.0,
@@ -129,7 +126,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                     {
                         "target_month": "2026-06-01",
                         "consumption_growth_pct": float("inf"),
-                        "saving_rate_pct": 2.0,
                         "revolving_credit_growth_pct": 3.0,
                         "employment_rate_pct": 4.0,
                         "price_growth_pct": 5.0,
@@ -144,7 +140,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                     {
                         "target_month": "2026-05-01",
                         "consumption_growth_pct": 1.0,
-                        "saving_rate_pct": 2.0,
                         "revolving_credit_growth_pct": 3.0,
                         "employment_rate_pct": 4.0,
                         "price_growth_pct": 5.0,
@@ -159,7 +154,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                     {
                         "target_month": "2026-06-01",
                         "consumption_growth_pct": 1.0,
-                        "saving_rate_pct": 2.0,
                         "revolving_credit_growth_pct": 3.0,
                         "employment_rate_pct": 4.0,
                         "price_growth_pct": 5.0,
@@ -167,7 +161,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                     {
                         "target_month": "2026-06-01",
                         "consumption_growth_pct": 1.1,
-                        "saving_rate_pct": 2.1,
                         "revolving_credit_growth_pct": 3.1,
                         "employment_rate_pct": 4.1,
                         "price_growth_pct": 5.1,
@@ -260,7 +253,6 @@ class EcologyRealizationsTests(unittest.TestCase):
                 {
                     "target_month": "2026-06-01",
                     "consumption_growth_pct": 1.0,
-                    "saving_rate_pct": 2.0,
                     "revolving_credit_growth_pct": 3.0,
                     "employment_rate_pct": 4.0,
                     "price_growth_pct": 5.0,

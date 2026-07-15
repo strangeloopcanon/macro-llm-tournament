@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import dataclasses
 import tempfile
 import unittest
 from unittest import mock
@@ -19,7 +18,6 @@ from macro_llm_tournament.ecology import (
     _state_from_row,
     _live_reference_path,
     _read_live_reference,
-    _rolling_reanchor,
     _weighted_macro,
     build_arg_parser,
     run,
@@ -41,7 +39,6 @@ from macro_llm_tournament.ecology_models import (
     QuantileTriplet,
     household_response_schema,
 )
-from macro_llm_tournament.ecology_inputs import ORIGIN_SNAPSHOT_SCHEMA_VERSION, _canonical_sha256
 
 FIXTURE_ROOT = PROJECT_ROOT / "examples/ecology_fixture"
 FIXTURE_HOUSEHOLDS = FIXTURE_ROOT / "households.csv"
@@ -50,36 +47,6 @@ FIXTURE_BUNDLE = FIXTURE_ROOT / "origin_snapshot.json"
 
 
 class HouseholdEcologyTests(unittest.TestCase):
-    def test_rolling_reanchor_uses_observed_pce_without_overwriting_personal_balances(self) -> None:
-        anchor = _state_from_row(
-            pd.Series(
-                {
-                    "type_id": "h1",
-                    "annual_income": 60_000.0,
-                    "baseline_consumption_annual": 36_000.0,
-                    "employment_status": "employed",
-                    "liquid_assets": 2_000.0,
-                    "debt": 500.0,
-                }
-            )
-        )
-        evolved = dataclasses.replace(
-            anchor,
-            deposit_balance_usd=1_600.0,
-            revolving_debt_usd=700.0,
-            baseline_monthly_consumption_usd=2_400.0,
-        )
-        rows, metadata = _rolling_reanchor(
-            restored=[evolved],
-            anchors=[anchor],
-            prior_macro_state={"anchor_reference_pce_value": 100.0},
-            origin={"origin_visible_macro_context": {"PCE": {"value": 110.0}}},
-        )
-        self.assertAlmostEqual(rows[0].baseline_monthly_consumption_usd, 3_300.0)
-        self.assertEqual(rows[0].deposit_balance_usd, 1_600.0)
-        self.assertEqual(rows[0].revolving_debt_usd, 700.0)
-        self.assertAlmostEqual(metadata["applied_level_ratio"], 1.1)
-
     def test_unknown_employment_uses_scf_donor_state_and_earned_income(self) -> None:
         not_working = _state_from_row(
             pd.Series(
@@ -171,7 +138,7 @@ class HouseholdEcologyTests(unittest.TestCase):
             "survey_seeded_initial_state",
         )
 
-    def test_recursive_card_uses_immediately_previous_simulated_state(self) -> None:
+    def test_card_uses_supplied_fixed_household_state(self) -> None:
         card = household_card(
             {
                 "type_id": "h1",
@@ -184,6 +151,7 @@ class HouseholdEcologyTests(unittest.TestCase):
                 "deposit_balance_usd": 4_200.0,
                 "revolving_debt_usd": 1_800.0,
                 "revolving_credit_limit_usd": 9_000.0,
+                "state_provenance": "fixed_survey_scf_anchor",
             },
             origin={
                 "origin_month": "2026-06-01",
@@ -200,7 +168,7 @@ class HouseholdEcologyTests(unittest.TestCase):
         self.assertEqual(current["credit_limit"], 9_000.0)
         self.assertEqual(current["hourly_wage"], 28.0)
         self.assertEqual(current["annualized_wage_income"], 0.0)
-        self.assertEqual(current["provenance"], "prior_simulated_month")
+        self.assertEqual(current["provenance"], "fixed_survey_scf_anchor")
 
     def test_annual_income_matches_twelve_simulated_work_months(self) -> None:
         state = _state_from_row(pd.Series({
@@ -249,7 +217,7 @@ class HouseholdEcologyTests(unittest.TestCase):
         self.assertAlmostEqual(state.hourly_wage_usd, 0.0)
         self.assertAlmostEqual(state.monthly_household_earned_income_usd, 4_500.0)
 
-    def test_saving_rate_uses_wages_nonwage_income_and_transfers(self) -> None:
+    def test_gross_income_residual_uses_all_modeled_income_components(self) -> None:
         state = _state_from_row(pd.Series({
             "type_id": "income_components",
             "employment_status": "employed",
@@ -304,16 +272,19 @@ class HouseholdEcologyTests(unittest.TestCase):
         self.assertAlmostEqual(macro["household_earned_income_usd"], 1_000.0)
         self.assertAlmostEqual(macro["nonwage_income_usd"], 200.0)
         self.assertAlmostEqual(macro["transfer_income_usd"], 300.0)
-        self.assertAlmostEqual(macro["disposable_income_usd"], 1_500.0)
-        self.assertAlmostEqual(macro["personal_saving_usd"], 1_500.0 - consumption)
+        self.assertAlmostEqual(macro["gross_household_income_usd"], 1_500.0)
+        self.assertAlmostEqual(macro["gross_income_residual_usd"], 1_500.0 - consumption)
         self.assertAlmostEqual(
-            macro["saving_rate_pct"],
+            macro["gross_income_residual_rate_pct"],
             100.0 * (1_500.0 - consumption) / 1_500.0,
         )
         baseline_rate = 100.0 * (1_500.0 - 800.0) / 1_500.0
-        self.assertAlmostEqual(macro["baseline_saving_rate_pct"], baseline_rate)
         self.assertAlmostEqual(
-            macro["saving_rate_change_pp"], macro["saving_rate_pct"] - baseline_rate
+            macro["baseline_gross_income_residual_rate_pct"], baseline_rate
+        )
+        self.assertAlmostEqual(
+            macro["gross_income_residual_rate_change_pp"],
+            macro["gross_income_residual_rate_pct"] - baseline_rate,
         )
 
     def test_initial_institutions_use_population_mass(self) -> None:
@@ -439,13 +410,7 @@ class HouseholdEcologyTests(unittest.TestCase):
                 "household_cards.json",
                 "household_responses.json",
                 "household_decisions.csv",
-                "downside_economy.json",
                 "median_economy.json",
-                "upside_economy.json",
-                "downside_next_state.json",
-                "median_next_state.json",
-                "upside_next_state.json",
-                "next_state.json",
                 "macro_forecast_paths.csv",
                 "accounting_audit.csv",
                 "event_log.json",
@@ -454,94 +419,34 @@ class HouseholdEcologyTests(unittest.TestCase):
             }
             self.assertEqual(expected, {path.name for path in output.iterdir()})
             paths = pd.read_csv(output / "macro_forecast_paths.csv")
-            self.assertEqual(set(paths["scenario"]), {"downside", "median", "upside"})
+            self.assertEqual(paths["scenario"].tolist(), ["median"])
             self.assertTrue((paths["output_units"] >= paths["units_sold"]).all())
-            decisions = pd.read_csv(output / "household_decisions.csv").query("scenario == 'median'")
-            next_state = json.loads((output / "median_next_state.json").read_text())
-            next_by_id = {row["household_id"]: row for row in next_state["households"]}
-            for row in decisions.itertuples(index=False):
-                self.assertAlmostEqual(
-                    next_by_id[row.household_id]["baseline_monthly_consumption_usd"],
-                    row.consumption_usd,
-                )
-                self.assertAlmostEqual(
-                    next_by_id[row.household_id]["baseline_monthly_hours"],
-                    row.actual_hours_worked,
-                )
-            recursive = Path(directory) / "recursive"
-            with self.assertRaisesRegex(ValueError, "month continuity mismatch"):
-                run(
-                    Namespace(
-                        origin="2026-05-01",
-                        mode="fixture",
-                        provider="codex_cli",
-                        model="gpt-5.5",
-                        max_live_calls=0,
-                        household_count=12,
-                        households=FIXTURE_HOUSEHOLDS,
-                        history=FIXTURE_HISTORY,
-                        bundle=FIXTURE_BUNDLE,
-                        state_json=output / "next_state.json",
-                        cache_dir=Path(directory) / "cache",
-                        output_dir=recursive,
-                    )
-                )
-            origin_information = json.loads(
-                (output / "normalized_origin_information.json").read_text(encoding="utf-8")
-            )
-            origin_information["origin_month"] = "2026-06-01"
-            origin_information["as_of_date"] = "2026-06-15"
-            snapshot = {
-                "schema_version": ORIGIN_SNAPSHOT_SCHEMA_VERSION,
-                "origin_information": origin_information,
-                "source": "recursive test",
-                "source_requests": [],
-            }
-            snapshot["snapshot_sha256"] = _canonical_sha256(snapshot)
-            snapshot_path = Path(directory) / "june_origin.json"
-            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
-            run(
-                Namespace(
-                    origin="2026-06-01",
-                    mode="fixture",
-                    provider="codex_cli",
-                    model="gpt-5.5",
-                    max_live_calls=0,
-                    household_count=12,
-                    households=FIXTURE_HOUSEHOLDS,
-                    history=FIXTURE_HISTORY,
-                    bundle=snapshot_path,
-                    state_json=output / "next_state.json",
-                    cache_dir=Path(directory) / "cache",
-                    output_dir=recursive,
-                )
-            )
-            recursive_cards = json.loads((recursive / "household_cards.json").read_text())
-            self.assertTrue(
-                all(
-                    "prior_simulated_state" not in card["public_information"]
-                    and card["household"]["current_state"]["provenance"]
-                    == "rolling_observed_reanchor"
-                    for card in recursive_cards
-                )
-            )
-            self.assertTrue(json.loads((recursive / "manifest.json").read_text())["accounting_passed"])
-
-            initial_cards = json.loads((output / "household_cards.json").read_text())
-            for card in initial_cards:
+            self.assertEqual(len(pd.read_csv(output / "household_decisions.csv")), 12)
+            cards = json.loads((output / "household_cards.json").read_text())
+            for card in cards:
                 current = card["household"]["current_state"]
-                self.assertEqual(current["provenance"], "survey_seeded_initial_state")
+                self.assertEqual(current["provenance"], "fixed_survey_scf_anchor")
                 self.assertEqual(current["employed"], current["hours_worked"] > 0.0)
                 self.assertAlmostEqual(
                     current["annualized_wage_income"],
                     (current["hourly_wage"] or 0.0) * current["hours_worked"] * 12.0,
                 )
-            self.assertTrue(
-                all(
-                    card["household"]["current_state"]["provenance"]
-                    == "rolling_observed_reanchor"
-                    for card in recursive_cards
-                )
+            self.assertEqual(manifest["state_policy"], "rolling_reanchored")
+            self.assertEqual(manifest["source_binding_authority"], "source_sha256")
+
+    def test_recursive_state_policy_is_rejected(self) -> None:
+        parser = build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "--origin", "2026-05-01",
+                    "--mode", "fixture",
+                    "--households", str(FIXTURE_HOUSEHOLDS),
+                    "--history", str(FIXTURE_HISTORY),
+                    "--bundle", str(FIXTURE_BUNDLE),
+                    "--state-policy", "recursive",
+                    "--output-dir", "out",
+                ]
             )
 
     def test_expected_replay_hash_is_checked_before_artifacts_are_written(self) -> None:
