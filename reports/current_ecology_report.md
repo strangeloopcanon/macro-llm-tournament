@@ -1,18 +1,17 @@
-# The Household Economy Now Gets the Direction Right
+# The Household Economy Finds A Timing Pattern, Not Yet The Level
 
-Two hundred GPT-5.5 households now get all four historical consumption directions
-right. Their RMSE falls from `0.701` to `0.508` percentage points after replacing
-the prudent-depositor interface with state-conditioned household budgets. That is
-the best result from the current household architecture, but it is not yet a good
-macro forecast: every increase is too small, and a simple origin-visible spending
-drift still scores much better at `0.243` points.
+The 200-household economy now produces its forecast from household decisions alone.
+That correction overturns the previous 4/4 directional result: across four historical
+months, the anchor-free forecasts have RMSE `0.782` percentage points and get one
+direction right. Yet they rank the months well. Correlation with first-release PCE is
+`0.683`, and RMSE after removing the common level bias is `0.126` points.
 
-The second result is structural. Household demand now changes a producer's output,
-inventory, aggregate employment, wages, and family income; the same households
-then decide again from the simulated state. We have a short-run LLM household
-economy rather than a set of disconnected household forecasts.
+So we have a real simulated household economy and an intriguing relative pattern over
+four retrospective proxy observations. We do not yet have a good absolute macro
+forecast. The households are systematically too pessimistic by `0.771` points and
+generate a little over half the observed month-to-month variation.
 
-## The Economy
+## What The Economy Does
 
 ```text
 200 anonymized SCE histories + matched SCF household states
@@ -26,7 +25,7 @@ economy rather than a set of disconnected household forecasts.
         beliefs + conditional household policies in nominal dollars
                               |
                               v
-              enforced budgets, credit, and settlement
+              household budgets, credit, and settlement
                               |
                               v
                     population-weighted demand
@@ -38,105 +37,108 @@ economy rather than a set of disconnected household forecasts.
                fresh period-two household decisions
 ```
 
-The producer is not another role-playing model. Prior demand sets expected sales;
-the producer closes 35% of its inventory gap, 25% of its aggregate labor gap, and
-10% of the employment-rate change into wages, capped at 2% per month. Respondent
-job labels remain fixed because the data identify family earnings, not which family
-member gains or loses hours.
+Each historical origin gets the latest SCE observations that would have been public
+under a nine-month release lag. The household card includes observed aggregate
+spending growth as dated context, but the engine does not add it to the household's
+spending before the model acts. GPT-5.5 returns signed dollar changes in committed
+spending, discretionary spending, one-off purchases, debt repayment, and borrowing.
+Code then applies cash, credit, goods, and counterparty constraints.
 
-## Historical Diagnostic
+## Historical Result
 
 | Origin | Target | LLM household economy | First-release PCE | Origin-visible drift |
 | --- | --- | ---: | ---: | ---: |
-| Jan 2026 | Feb 2026 | +0.15% | +0.48% | +0.37% |
-| Feb 2026 | Mar 2026 | +0.26% | +0.90% | +0.51% |
-| Mar 2026 | Apr 2026 | +0.11% | +0.51% | +0.38% |
-| Apr 2026 | May 2026 | +0.12% | +0.71% | +0.48% |
+| Jan 2026 | Feb 2026 | -0.24% | +0.48% | +0.37% |
+| Feb 2026 | Mar 2026 | +0.01% | +0.90% | +0.51% |
+| Mar 2026 | Apr 2026 | -0.08% | +0.51% | +0.38% |
+| Apr 2026 | May 2026 | -0.17% | +0.71% | +0.48% |
 
 | Diagnostic | Result |
 | --- | ---: |
-| Consumption direction | 4/4 |
-| Consumption RMSE | 0.508 pp |
+| Consumption RMSE | 0.782 pp |
+| Mean forecast bias | -0.771 pp |
+| Demeaned RMSE | 0.126 pp |
+| Consumption correlation | 0.683 |
+| Forecast/actual standard-deviation ratio | 0.563 |
+| Consumption direction | 1/4 |
 | Origin-visible drift RMSE | 0.243 pp |
-| Consumption correlation | 0.759 |
 | Revolving-credit direction | 1/4 |
 | Settlement audit | PASS |
 
-![Diagnostic economic observability surface](current_ecology_observability_surface.png)
+![Economic observability surface](current_ecology_observability_surface.png)
 
-The new household object solves the old sign failure. It also reveals the next
-one cleanly: the model predicts roughly the right ordering and direction but only
-a fraction of the observed nominal movement. The credit side has not improved.
+The level and timing results are different facts. The households reduce spending in
+three months when nominal PCE rose in all four, so their point forecasts are poor. But
+February is their weakest month and March their strongest, matching the ranking of the
+real outcomes. The model seems to recognize changes in relative demand pressure while
+turning that information into excessively cautious household budgets.
 
-## What Changed About Saving
+The simple origin-visible drift remains much better in levels. It is shown as context,
+not as part of the LLM economy.
 
-The previous prompt asked the LLM for consumption, debt, borrowing, and a deposit
-contribution. That overdetermined the household budget. Deposits are now whatever
-cash remains after income, spending, debt service, borrowing, and fixed outflows.
+## Why The Previous Result Changed
 
-The next correction was subtler. A household's total-saving rate cannot be treated
-as a checking-account contribution. The current state keeps the total-saving
-target but sends only enough toward liquid deposits to close the household's buffer
-gap gradually over twelve months. Taxes, recurring obligations, and the rest of
-saving sit outside liquid deposits. If matched expenditure exceeds income, the
-household keeps an explicit cash deficit instead of being turned into a saver.
+V22 began each household at a spending level that already incorporated the latest
+aggregate PCE growth. The LLM then adjusted that pre-grown level. Because household
+adjustments were negative in every historical month, the reported positive forecasts
+came from the aggregate anchor, not from bottom-up household behavior.
 
-Across the cohort, 49.5% of population weight has no baseline liquid-saving target.
-The weighted total-saving target is 16.35% of gross household income; the liquid
-target is 11.34%, and the actual frozen-run deposit increase is 10.66%. The figure
-is still high, but it is now an explicit household-state outcome rather than an
-unexplained accounting remainder.
+V23 removes the anchor from execution. Households start from recurring committed and
+discretionary dollar levels; aggregate consumption growth is information they may use,
+not a number the engine silently carries forward. This is the first period-by-period
+chart that cleanly answers whether the households themselves generate the forecast.
 
-## The Two-Period Result
+## Household State And Monthly Transition
 
-The frozen July origin predicts **+0.19%** nominal consumption growth for August.
-Starting from that period-one economy:
+SCE histories now update by origin rather than freezing every run at the same two
+waves. The materializer includes an observation only once its event date and public
+availability date are both safe for that origin. Missing later answers do not erase a
+household's latest valid field-level prior.
 
-| Dynamic quantity | Period one | Period two |
-| --- | ---: | ---: |
-| Consumption | $3.116m | $3.123m |
-| Output | 3.116m units | 3.116m units |
-| Inventory | 248,774 units | 241,909 units |
-| Producer employment index | 1.000000 | 1.000013 |
-| Producer average-wage index | 1.000000 | 1.000001 |
+The monthly transition carries settled deposits, debt, committed spending, and
+discretionary spending. One-off purchases remain one-off. Producer wage and income
+feedback updates the next household state, and the same policy schema is used in
+rolling and recursive runs.
 
-Fresh period-two household spending rises **0.23%**. Aggregate producer headcount,
-the wage bill, and the average wage now move inside settlement rather than appearing
-only as planning targets. Period-two opening deposits, debt, and inventory equal
-period-one closing stocks.
+## Current Forecast And Recursive Trace
 
-This is an unscored mechanism trace. It shows that the loop executes and propagates
-state. It does not isolate the causal effect of firm feedback because there is no
-matched no-feedback household-call arm, and it is not a September forecast.
+The frozen July origin predicts **-0.13%** nominal consumption growth for August.
+Its weighted household actions add about `$10.80` to committed spending, subtract
+`$30.34` from discretionary spending, add no one-off purchase, repay `$19.49` of
+extra debt, and borrow `$45.08` per represented household. August is unscored.
+
+Starting from that economy, a fresh period-two call for every household produces a
+further **0.31% fall** in consumption. Producer output, employment, and wages barely
+move because the aggregate demand change is small. This is a verified state transition,
+not a September forecast or an estimate of the causal value of feedback.
 
 ## Integrity Record
 
-- The v22 campaign banked 1,000 fresh first-period Codex CLI responses: 800
-  historical and 200 prospective, with zero provider failures.
-- The feedback leg banked 200 fresh period-two responses, also with zero provider
-  failures.
-- Final published runs are exact replays: 200 current, 800 historical, and 200
-  period-two cache hits with zero new calls.
-- Prompt cards contain no realized targets. Period two reuses origin-safe public
-  information and adds only separately labelled simulated producer state.
-- The feedback replay verifies every consumed parent artifact plus the household
-  and history input hashes.
-- Household budgets, goods inventory, deposit and debt stocks, and named
-  counterparty flows reconcile at numerical tolerance. A firm balance sheet and
-  full external-sector stocks are not modeled.
+- Final published runs replay 200 current, 800 historical, and 200 period-two banked
+  Codex CLI responses with no fresh calls.
+- Prompt cards contain no realized targets. Historical cards expose only household
+  observations and public information available at each origin.
+- The household-history manifest and public history file are hash-bound into every
+  run; raw SCE respondent identifiers never enter public artifacts.
+- Recurring spending, deposits, debt, inventory, employment, wages, and income cross
+  the monthly boundary through one canonical transition.
+- Household budgets, goods inventory, bank stocks, and named counterparty flows
+  reconcile at numerical tolerance. A firm balance sheet and full external sector are
+  outside this version.
 
-## So What
+## Where This Leaves The Project
 
-The natural-household redesign worked in the specific way we needed first: the
-aggregate now moves in the right direction period by period. The economy can also
-run forward one step with demand, production, labor income, and household decisions
-connected.
+The architecture is now honest enough to diagnose. Survey data supplies household
+heterogeneity, the LLM writes state-dependent policies, settlement creates aggregate
+demand, and demand feeds back into income before the next decision. The four-point
+timing pattern is enough to justify improving this object, not enough to call it a
+durable signal.
 
-The remaining problem is no longer architecture or sign. It is amplitude. These
-households recognize expansion but spend too cautiously, and their revolving-credit
-choices remain unrealistic. The next work belongs in the state-to-policy interface,
-especially the mapping from recent nominal spending, liquidity, income, and beliefs
-to committed and discretionary dollars. It does not require LLM firms or banks.
+The next work is narrower than adding more agents. We need a better household spending
+state and a better elicitation of ordinary nominal inertia. The current SCF-conditioned
+"typical month" is not the same thing as each household's actual previous-month
+expenditure, and the model responds to uncertainty with broad discretionary cuts. Those
+two effects can explain the level shift without changing the economy's structure.
 
-January-April remains retrospective development evidence and may be in model
-knowledge. August is the untouched prospective score.
+January-April remains retrospective development evidence. The July forecast stays
+frozen until the August realization arrives.

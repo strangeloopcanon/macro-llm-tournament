@@ -16,6 +16,7 @@ from typing import Any, Sequence
 import pandas as pd
 
 from .ecology_engine import run_monthly_ecology
+from .ecology_history import ECOLOGY_HISTORY_SCHEMA_VERSION
 from .ecology_inputs import load_origin_information
 from .ecology_information import build_macro_information_card
 from .ecology_households import (
@@ -35,7 +36,7 @@ from .ecology_provider import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = PROJECT_ROOT / "work/ecology_cache"
-SCHEMA_VERSION = "household_first_rolling_microeconomy_v4"
+SCHEMA_VERSION = "household_first_rolling_microeconomy_v5"
 LIVE_REFERENCE_SCHEMA_VERSION = "household_ecology_live_reference_v2"
 LIQUID_BUFFER_CLOSURE_MONTHS = 12.0
 
@@ -82,6 +83,63 @@ def _write_json(path: Path, value: Any) -> None:
 
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _history_materialization_binding(
+    history_path: Path, *, required: bool
+) -> dict[str, Any] | None:
+    manifest_path = history_path.parent / "history_manifest.json"
+    if not manifest_path.is_file():
+        if required:
+            raise ValueError("non-fixture runs require a history materialization manifest")
+        return None
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != ECOLOGY_HISTORY_SCHEMA_VERSION:
+        raise ValueError("history materialization manifest has an unsupported schema")
+    provenance = payload.get("input_provenance")
+    required_sources = ("base_history", "normalized_sce_microdata", "private_registry")
+    if not isinstance(provenance, dict) or set(provenance) != set(required_sources):
+        raise ValueError("history materialization manifest has incomplete input provenance")
+    for source in required_sources:
+        record = provenance[source]
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("sha256"), str)
+            or len(record["sha256"]) != 64
+            or not isinstance(record.get("row_count"), int)
+            or record["row_count"] <= 0
+        ):
+            raise ValueError("history materialization manifest has malformed input provenance")
+    public_history = payload.get("public_history")
+    if (
+        not isinstance(public_history, dict)
+        or not isinstance(public_history.get("row_count"), int)
+        or public_history["row_count"] <= 0
+        or not isinstance(public_history.get("event_count"), int)
+        or public_history["event_count"] <= 0
+        or not isinstance(public_history.get("columns"), list)
+        or not public_history["columns"]
+    ):
+        raise ValueError("history materialization manifest has malformed public-history provenance")
+    if (
+        not isinstance(payload.get("through_event_month"), str)
+        or not payload["through_event_month"].strip()
+        or not isinstance(payload.get("publication_lag_months"), int)
+        or payload["publication_lag_months"] < 0
+    ):
+        raise ValueError("history materialization manifest has malformed publication metadata")
+    expected = public_history.get("sha256")
+    actual = _file_sha256(history_path)
+    if expected != actual:
+        raise ValueError("history materialization manifest does not bind the history CSV")
+    return {
+        "schema_version": payload.get("schema_version"),
+        "manifest_sha256": _file_sha256(manifest_path),
+        "history_sha256": actual,
+        "through_event_month": payload.get("through_event_month"),
+        "publication_lag_months": payload.get("publication_lag_months"),
+        "input_provenance": provenance,
+    }
 
 
 def _artifact_sha256(path: Path) -> str:
@@ -516,7 +574,7 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
     return {
         "consumption_growth_pct": consumption_growth,
         "routine_nominal_spending_drift_pct": routine_drift,
-        "household_residual_contribution_pct": consumption_growth - routine_drift,
+        "gap_to_visible_spending_drift_pct": consumption_growth - routine_drift,
         "gross_income_residual_rate_pct": gross_income_residual_rate,
         "baseline_gross_income_residual_rate_pct": baseline_gross_income_residual_rate,
         "gross_income_residual_rate_change_pp": (
@@ -539,15 +597,15 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         "inventory_end_units": result.employer.inventory_end_units,
         "policy_rate_pct": float(origin["origin_visible_macro_context"].get("FEDFUNDS", {}).get("value", 0.0)),
         "latest_visible_pce_value": latest_visible_pce,
-        "anchor_reference_pce_value": origin.get(
-            "anchor_reference_pce_value", latest_visible_pce
-        ),
         "state_policy": "rolling_reanchored",
     }
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     households, history, origin, bundle_sha = _load_inputs(args)
+    history_materialization = _history_materialization_binding(
+        args.history, required=args.mode != "fixture"
+    )
     output = args.output_dir.resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"output directory is not empty: {output}")
@@ -578,7 +636,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     origin = dict(origin)
     origin["state_policy"] = state_policy
-    origin["anchor_reference_pce_value"] = _latest_visible_value(origin, "PCE")
     origin["compact_macro_information"] = build_macro_information_card(
         origin,
         policy_declarations={
@@ -608,6 +665,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         own_history = [
             row for row in histories.get(state.household_id, [])
             if str(row.get("public_availability_date", "")) <= origin["as_of_date"]
+            and str(row.get("event_date", "")) <= origin["as_of_date"]
         ]
         card_state = households.loc[households["type_id"].eq(state.household_id)].iloc[0].to_dict()
         card_state.update(dataclasses.asdict(state))
@@ -758,7 +816,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ],
         "routine_nominal_spending_drift_pct": routine_nominal_drift_pct,
         "routine_nominal_spending_drift_source": (
-            "latest origin-visible one-month PCE change; zero only when unavailable"
+            "latest origin-visible one-month PCE change; context only and not "
+            "pre-applied to household spending"
         ),
         "omitted_fixed_outflow_calibration": {
             "purpose": (
@@ -808,6 +867,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "bundle_sha256": bundle_sha,
         "household_input_sha256": _file_sha256(args.households),
         "history_input_sha256": _file_sha256(args.history),
+        "history_materialization": history_materialization,
         "accounting_passed": all(
             residual.passed for result in scenarios.values() for residual in result.accounting_residuals
         ),

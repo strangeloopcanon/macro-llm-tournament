@@ -19,6 +19,7 @@ from .ecology import (
     _artifact_sha256,
     _file_sha256,
     _git_state,
+    _history_materialization_binding,
     _initial_credit,
     _jsonable,
     _source_sha256,
@@ -28,11 +29,10 @@ from .ecology import (
 from .ecology_engine import run_monthly_ecology
 from .ecology_feedback import (
     AggregateFirmPeriodOne,
-    HouseholdFamilyIncome,
-    apply_producer_income_feedback,
     build_simulated_environment_payload,
     compute_aggregate_firm_feedback,
 )
+from .ecology_history import ECOLOGY_HISTORY_SCHEMA_VERSION
 from .ecology_households import (
     HOUSEHOLD_PROMPT_VERSION,
     HouseholdElicitor,
@@ -41,10 +41,11 @@ from .ecology_households import (
     household_card,
     normalize_household_payload,
 )
-from .ecology_models import EmployerState
+from .ecology_models import EmployerState, HouseholdState
+from .ecology_transition import transition_household_states
 
 
-SCHEMA_VERSION = "household_ecology_two_period_feedback_v2"
+SCHEMA_VERSION = "household_ecology_two_period_feedback_v3"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -71,6 +72,37 @@ def _population_masses(states: list[Any]) -> dict[str, float]:
     }
 
 
+def _settled_period_one(
+    states: list[HouseholdState],
+    decisions: pd.DataFrame,
+    employer: dict[str, Any],
+) -> AggregateFirmPeriodOne:
+    masses = _population_masses(states)
+    settled_dollars = sum(
+        masses[str(row.household_id)] * float(row.consumption_usd)
+        for row in decisions.itertuples(index=False)
+    )
+    price = float(employer["current_price_per_unit_usd"])
+    settled_units = settled_dollars / max(price, 1e-12)
+    if not math.isclose(
+        settled_units,
+        float(employer["units_sold"]),
+        rel_tol=1e-9,
+        abs_tol=1e-6,
+    ):
+        raise ValueError("period-1 settled household demand disagrees with producer sales")
+    return AggregateFirmPeriodOne(
+        demand_units=settled_units,
+        sales_units=float(employer["units_sold"]),
+        opening_inventory_units=float(employer["inventory_start_units"]),
+        closing_inventory_units=float(employer["inventory_end_units"]),
+        base_output_units=float(employer["output_units"]),
+        productivity_index=1.0,
+        producer_employment_index=1.0,
+        producer_wage_index=1.0,
+    )
+
+
 def _validated_parent_artifact(
     run_dir: Path,
     manifest: dict[str, Any],
@@ -85,6 +117,34 @@ def _validated_parent_artifact(
     return path
 
 
+def _period_one_history_binding(manifest: dict[str, Any]) -> dict[str, Any]:
+    binding = manifest.get("history_materialization")
+    required = {
+        "schema_version",
+        "manifest_sha256",
+        "history_sha256",
+        "through_event_month",
+        "publication_lag_months",
+        "input_provenance",
+    }
+    if not isinstance(binding, dict) or set(binding) != required:
+        raise ValueError("period-1 manifest requires complete history materialization provenance")
+    if binding.get("schema_version") != ECOLOGY_HISTORY_SCHEMA_VERSION:
+        raise ValueError("period-1 history materialization schema is unsupported")
+    for field in ("manifest_sha256", "history_sha256"):
+        if not isinstance(binding.get(field), str) or len(binding[field]) != 64:
+            raise ValueError("period-1 history materialization hashes are malformed")
+    if (
+        not isinstance(binding.get("through_event_month"), str)
+        or not binding["through_event_month"].strip()
+        or not isinstance(binding.get("publication_lag_months"), int)
+        or binding["publication_lag_months"] < 0
+        or not isinstance(binding.get("input_provenance"), dict)
+    ):
+        raise ValueError("period-1 history materialization provenance is malformed")
+    return binding
+
+
 def _load_period_one(
     run_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame, dict[str, Any]]:
@@ -93,6 +153,7 @@ def _load_period_one(
         raise ValueError("period-1 run must pass accounting")
     if manifest.get("household_prompt_version") != HOUSEHOLD_PROMPT_VERSION:
         raise ValueError("period-1 run prompt version does not match current feedback runner")
+    _period_one_history_binding(manifest)
     economy_path = _validated_parent_artifact(run_dir, manifest, "median_economy.json")
     decisions_path = _validated_parent_artifact(
         run_dir, manifest, "household_decisions.csv"
@@ -122,6 +183,10 @@ def _validate_source_inputs(
         raise ValueError("household input does not match the period-1 run")
     if history_input_sha256 != manifest.get("history_input_sha256"):
         raise ValueError("history input does not match the period-1 run")
+    if _history_materialization_binding(history, required=True) != _period_one_history_binding(
+        manifest
+    ):
+        raise ValueError("history materialization does not match the period-1 run")
     return household_input_sha256, history_input_sha256
 
 
@@ -144,71 +209,6 @@ def _period_one_replay_binding(manifest: dict[str, Any]) -> dict[str, Any]:
         "replay_equivalence_sha256": replay_equivalence_sha256,
         "consumed_artifacts": consumed_artifacts,
     }
-
-
-def _period_two_states(
-    source: pd.DataFrame,
-    decisions: pd.DataFrame,
-    feedback: Any,
-) -> tuple[list[Any], list[dict[str, Any]]]:
-    decision_by_id = decisions.set_index(decisions["household_id"].astype(str)).to_dict("index")
-    states: list[Any] = []
-    transitions: list[dict[str, Any]] = []
-    for _, row in source.sort_values("type_id").iterrows():
-        state = _state_from_row(row)
-        decision = decision_by_id.get(state.household_id)
-        if decision is None:
-            raise ValueError(f"missing period-1 decision for {state.household_id}")
-        updated_income = apply_producer_income_feedback(
-            HouseholdFamilyIncome(
-                respondent_employment_share=float(state.employment_share or 0.0),
-                family_wage_income_usd=state.monthly_family_wage_income_usd,
-                business_income_usd=state.monthly_family_business_income_usd,
-                nonwage_income_usd=state.monthly_nonwage_income_usd,
-                transfer_income_usd=state.monthly_transfer_income_usd,
-            ),
-            feedback,
-        )
-        prior_baseline = max(state.baseline_monthly_consumption_usd, 1e-9)
-        committed_share = (
-            state.baseline_committed_consumption_usd / prior_baseline
-            if state.baseline_committed_consumption_usd is not None
-            else 0.65
-        )
-        executed_consumption = float(decision["consumption_usd"])
-        next_state = dataclasses.replace(
-            state,
-            deposit_balance_usd=float(decision["deposit_balance_end_usd"]),
-            revolving_debt_usd=float(decision["revolving_debt_end_usd"]),
-            baseline_monthly_consumption_usd=executed_consumption,
-            baseline_committed_consumption_usd=executed_consumption * committed_share,
-            baseline_discretionary_consumption_usd=executed_consumption * (1.0 - committed_share),
-            monthly_family_wage_income_usd=updated_income.family_wage_income_usd,
-            monthly_family_business_income_usd=updated_income.business_income_usd,
-            monthly_household_earned_income_usd=(
-                updated_income.family_wage_income_usd + updated_income.business_income_usd
-            ),
-        )
-        next_state.validate()
-        states.append(next_state)
-        transitions.append(
-            {
-                "household_id": state.household_id,
-                "respondent_employment_share_period_1": state.employment_share,
-                "respondent_employment_share_period_2": next_state.employment_share,
-                "deposit_balance_period_1_open_usd": state.deposit_balance_usd,
-                "deposit_balance_period_1_close_period_2_open_usd": next_state.deposit_balance_usd,
-                "revolving_debt_period_1_open_usd": state.revolving_debt_usd,
-                "revolving_debt_period_1_close_period_2_open_usd": next_state.revolving_debt_usd,
-                "family_wage_income_period_1_usd": state.monthly_family_wage_income_usd,
-                "family_wage_income_period_2_usd": next_state.monthly_family_wage_income_usd,
-                "family_business_income_period_1_usd": state.monthly_family_business_income_usd,
-                "family_business_income_period_2_usd": next_state.monthly_family_business_income_usd,
-                "family_earned_income_period_2_usd": next_state.monthly_household_earned_income_usd,
-                "period_1_executed_consumption_usd": executed_consumption,
-            }
-        )
-    return states, transitions
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -239,23 +239,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     period_1_states = [_state_from_row(row) for _, row in source.sort_values("type_id").iterrows()]
     masses = _population_masses(period_1_states)
     employer_1 = period_1_economy["employer"]
-    desired_dollars = sum(
-        masses[str(row.household_id)] * float(row.desired_consumption_usd)
-        for row in decisions.itertuples(index=False)
-    )
-    price_1 = float(employer_1["current_price_per_unit_usd"])
-    period_one = AggregateFirmPeriodOne(
-        demand_units=desired_dollars / max(price_1, 1e-12),
-        sales_units=float(employer_1["units_sold"]),
-        opening_inventory_units=float(employer_1["inventory_start_units"]),
-        closing_inventory_units=float(employer_1["inventory_end_units"]),
-        base_output_units=float(employer_1["output_units"]),
-        productivity_index=1.0,
-        producer_employment_index=1.0,
-        producer_wage_index=1.0,
-    )
+    period_one = _settled_period_one(period_1_states, decisions, employer_1)
     feedback = compute_aggregate_firm_feedback(period_one)
-    period_2_states, transitions = _period_two_states(source, decisions, feedback)
+    period_2_states, transitions = transition_household_states(
+        period_1_states, decisions, feedback
+    )
     history = pd.read_csv(args.history)
     histories = {
         str(key): group.to_dict("records") for key, group in history.groupby("household_id")
@@ -270,6 +258,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         own_history = [
             row for row in histories.get(state.household_id, [])
             if str(row.get("public_availability_date", "")) <= str(origin["as_of_date"])
+            and str(row.get("event_date", "")) <= str(origin["as_of_date"])
         ]
         card = household_card(
             card_state,
@@ -470,9 +459,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "reuse origin-safe public information; add simulated producer state only; "
             "no future observations"
         ),
-        "period_2_status_quo_policy": (
-            "period-1 settled household consumption with the origin-visible routine "
-            "drift continuation"
+        "period_2_recurring_spending_policy": (
+            "carry period-1 settled committed and discretionary spending; exclude "
+            "one-off purchases; origin-visible aggregate growth remains context only"
         ),
         "request_sha256": request_sha,
         "replay_equivalence_sha256": replay_sha,

@@ -17,7 +17,7 @@ class EcologyRetrospectiveTests(unittest.TestCase):
         joined = pd.DataFrame({"origin_month": ["2025-09-01", "2025-10-01"]})
         self.assertEqual(
             ecology_retrospective._chart_subtitle(joined, "gpt-test"),
-            "gpt-test rolling origins Sep 2025-Oct 2025; every origin is re-anchored to the fixed SCE-SCF household state and origin-visible public information.",
+            "gpt-test rolling origins Sep 2025-Oct 2025; every origin is re-anchored to its SCF financial state, latest origin-safe SCE history, and origin-visible public information.",
         )
 
     def test_direction_scoring_uses_only_fixed_survey_scf_anchor_rows(self) -> None:
@@ -103,7 +103,7 @@ class EcologyRetrospectiveTests(unittest.TestCase):
         self.assertEqual(by_metric["revolving_credit_growth_pct"], 0.7)
         self.assertEqual(
             ecology_retrospective.METRIC_MAPPINGS["consumption_growth_pct"]["note"],
-            "Prediction is executed target-month spending relative to a numerically fixed synthetic SCE-SCF recent-typical anchor, interpreted as month-over-month nominal PCE growth. This is a load-bearing aggregate proxy, not linked household-level growth.",
+            "Prediction is executed target-month spending relative to an SCF-conditioned recent-typical recurring baseline; origin-visible PCE growth is context only and is not pre-applied. The result is interpreted as month-over-month nominal PCE growth, a load-bearing aggregate proxy rather than linked household-level growth.",
         )
 
     def test_two_origin_runner_uses_median_point_path_and_joins_outputs(self) -> None:

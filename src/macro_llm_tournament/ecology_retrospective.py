@@ -22,7 +22,7 @@ from .ecology import (
 )
 
 
-SCHEMA_VERSION = "household_ecology_retrospective_v5"
+SCHEMA_VERSION = "household_ecology_retrospective_v6"
 MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v4"
 METRIC_MAPPINGS: dict[str, dict[str, str]] = {
     "consumption_growth_pct": {
@@ -32,7 +32,7 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "actual_transform": "identity",
         "mapping_quality": "closest_aggregate_proxy",
         "score_mode": "full",
-        "note": "Prediction is executed target-month spending relative to a numerically fixed synthetic SCE-SCF recent-typical anchor, interpreted as month-over-month nominal PCE growth. This is a load-bearing aggregate proxy, not linked household-level growth.",
+        "note": "Prediction is executed target-month spending relative to an SCF-conditioned recent-typical recurring baseline; origin-visible PCE growth is context only and is not pre-applied. The result is interpreted as month-over-month nominal PCE growth, a load-bearing aggregate proxy rather than linked household-level growth.",
     },
     "revolving_credit_growth_pct": {
         "target_name": "revolving_credit_growth_pct",
@@ -167,7 +167,8 @@ def _chart_subtitle(joined: pd.DataFrame, model: str) -> str:
     origins = pd.to_datetime(joined["origin_month"])
     return (
         f"{model} rolling origins {origins.min():%b %Y}-{origins.max():%b %Y}; every origin is "
-        "re-anchored to the fixed SCE-SCF household state and origin-visible public information."
+        "re-anchored to its SCF financial state, latest origin-safe SCE history, "
+        "and origin-visible public information."
     )
 
 
@@ -518,7 +519,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "score_eligibility": "all_fixed_survey_scf_anchor_rows",
             "initialization_transition": "fixed_survey_scf_anchor_reinitialized_at_each_rolling_origin",
             "forecast_semantics": {
-                "consumption_growth_pct": "executed target-month spending relative to a numerically fixed synthetic SCE-SCF recent-typical anchor, interpreted as month-over-month nominal PCE growth; a load-bearing aggregate proxy, not linked household-level growth",
+                "consumption_growth_pct": "executed target-month spending relative to an SCF-conditioned recent-typical recurring baseline; origin-visible PCE growth is context only and is not pre-applied; interpreted as month-over-month nominal PCE growth, a load-bearing aggregate proxy rather than linked household-level growth",
                 "revolving_credit_growth_pct": "simulated month opening to closing debt-stock change",
             },
             "origin_months": origins,

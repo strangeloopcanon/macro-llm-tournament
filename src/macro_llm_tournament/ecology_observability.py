@@ -14,9 +14,9 @@ import pandas as pd
 from .ecology import _artifact_sha256, _file_sha256, _write_json
 
 
-SCHEMA_VERSION = "household_ecology_observability_v1"
+SCHEMA_VERSION = "household_ecology_observability_v2"
 FIRM_SHADOW_VERSION = "demand_inventory_firm_shadow_v1"
-FEEDBACK_SCHEMA_VERSION = "household_ecology_two_period_feedback_v2"
+FEEDBACK_SCHEMA_VERSION = "household_ecology_two_period_feedback_v3"
 TARGET_INVENTORY_SHARE = 0.08
 INVENTORY_ADJUSTMENT_SPEED = 0.35
 EMPLOYMENT_ADJUSTMENT_SPEED = 0.25
@@ -216,8 +216,9 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
         add("beliefs", field, _weighted_mean(values, weights), "percent", "llm_household_intention", label)
 
     policy_fields = (
-        "next_month_committed_consumption_nominal_usd",
-        "next_month_discretionary_consumption_nominal_usd",
+        "committed_consumption_change_usd",
+        "discretionary_consumption_change_usd",
+        "one_off_purchase_usd",
         "extra_debt_payment_usd",
         "borrowing_intent_usd",
     )
@@ -236,19 +237,74 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             "llm_household_intention",
             "Population-weighted household intention on the origin employment branch.",
         )
-    baseline_consumption_mean = _weighted_mean(
-        {
-            household_id: _require_finite(
-                card_by_id[household_id]["household"]["current_state"]["monthly_consumption"],
-                "monthly_consumption",
-            )
-            for household_id in weights
-        },
-        weights,
+    baseline_consumption: dict[str, float] = {}
+    intended_consumption: dict[str, float] = {}
+    intended_committed: dict[str, float] = {}
+    intended_discretionary: dict[str, float] = {}
+    for household_id in weights:
+        state = card_by_id[household_id]["household"]["current_state"]
+        baseline_total = _require_finite(state["monthly_consumption"], "monthly_consumption")
+        baseline_committed = _require_finite(
+            state.get("current_month_committed_consumption", baseline_total * 0.65),
+            "current_month_committed_consumption",
+        )
+        baseline_discretionary = _require_finite(
+            state.get(
+                "current_month_discretionary_consumption",
+                max(0.0, baseline_total - baseline_committed),
+            ),
+            "current_month_discretionary_consumption",
+        )
+        branch = payload_by_id[household_id][
+            _employment_policy_name(card_by_id[household_id])
+        ]
+        committed = max(
+            0.0,
+            baseline_committed
+            + _require_finite(
+                branch["committed_consumption_change_usd"],
+                "committed_consumption_change_usd",
+            ),
+        )
+        discretionary = max(
+            0.0,
+            baseline_discretionary
+            + _require_finite(
+                branch["discretionary_consumption_change_usd"],
+                "discretionary_consumption_change_usd",
+            ),
+        )
+        one_off = _require_finite(branch["one_off_purchase_usd"], "one_off_purchase_usd")
+        baseline_consumption[household_id] = baseline_total
+        intended_committed[household_id] = committed
+        intended_discretionary[household_id] = discretionary
+        intended_consumption[household_id] = committed + discretionary + one_off
+
+    baseline_consumption_mean = _weighted_mean(baseline_consumption, weights)
+    intended_consumption_mean = _weighted_mean(intended_consumption, weights)
+    add(
+        "intended_policy",
+        "intended_committed_consumption_usd",
+        _weighted_mean(intended_committed, weights),
+        "usd_per_represented_household",
+        "llm_household_intention",
+        "Population-weighted intended committed spending after applying the signed household change.",
     )
-    intended_consumption_mean = (
-        policy_means["next_month_committed_consumption_nominal_usd"]
-        + policy_means["next_month_discretionary_consumption_nominal_usd"]
+    add(
+        "intended_policy",
+        "intended_discretionary_consumption_usd",
+        _weighted_mean(intended_discretionary, weights),
+        "usd_per_represented_household",
+        "llm_household_intention",
+        "Population-weighted intended discretionary spending after applying the signed household change.",
+    )
+    add(
+        "intended_policy",
+        "intended_total_consumption_usd",
+        intended_consumption_mean,
+        "usd_per_represented_household",
+        "llm_household_intention",
+        "Population-weighted total intended spending, including one-off purchases.",
     )
     normalized_policy = {
         "intended_consumption_growth_pct": 100.0
@@ -704,7 +760,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
         axis.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
     fig.suptitle("Household Ecology: Diagnostic Economic Observability Surface", fontsize=17, fontweight="bold")
-    fig.text(0.5, 0.945, "Observed outcomes, LLM household intentions, code-enforced settlement, and mechanical firm feedback are kept separate; hollow diamonds are frozen and unscored.", ha="center", fontsize=10)
+    fig.text(0.5, 0.945, "Four-point retrospective proxy diagnostic (Jan-Apr origins); observed outcomes, LLM household intentions, settlement, and firm feedback are separate; hollow diamonds are frozen and unscored.", ha="center", fontsize=10)
     fig.tight_layout(rect=(0.02, 0.03, 0.98, 0.93))
     fig.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(fig)
