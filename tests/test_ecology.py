@@ -268,7 +268,7 @@ class HouseholdEcologyTests(unittest.TestCase):
             {"origin_visible_macro_context": {"FEDFUNDS": {"value": 4.0}}},
         )
         consumption = result.households[0].consumption_usd
-        self.assertAlmostEqual(macro["wage_income_usd"], 0.0)
+        self.assertAlmostEqual(macro["wage_income_usd"], 1_000.0)
         self.assertAlmostEqual(macro["household_earned_income_usd"], 1_000.0)
         self.assertAlmostEqual(macro["nonwage_income_usd"], 200.0)
         self.assertAlmostEqual(macro["transfer_income_usd"], 300.0)
@@ -285,6 +285,28 @@ class HouseholdEcologyTests(unittest.TestCase):
         self.assertAlmostEqual(
             macro["gross_income_residual_rate_change_pp"],
             macro["gross_income_residual_rate_pct"] - baseline_rate,
+        )
+
+    def test_declared_saving_rate_calibrates_omitted_fixed_outflow(self) -> None:
+        state = _state_from_row(pd.Series({
+            "type_id": "saving_anchor",
+            "employment_status": "employed",
+            "monthly_wage_income_usd": 8_000.0,
+            "monthly_business_income_usd": 0.0,
+            "monthly_earned_income_usd": 8_000.0,
+            "monthly_nonwage_income_usd": 1_000.0,
+            "monthly_transfers_benefits_usd": 0.0,
+            "baseline_committed_consumption_monthly_usd": 4_000.0,
+            "baseline_discretionary_consumption_monthly_usd": 2_000.0,
+            "recurring_minimum_debt_payment_usd": 0.0,
+            "base_saving_rate": 0.10,
+        }))
+        self.assertAlmostEqual(state.monthly_omitted_fixed_outflow_usd, 2_100.0)
+        self.assertAlmostEqual(
+            8_000.0 + 1_000.0
+            - state.monthly_omitted_fixed_outflow_usd
+            - state.baseline_monthly_consumption_usd,
+            900.0,
         )
 
     def test_initial_institutions_use_population_mass(self) -> None:

@@ -8,8 +8,8 @@ from typing import Any
 # Sub-micro-dollar tolerance absorbs floating-point summation at 200-household
 # scale while remaining far below any economically meaningful transaction.
 ACCOUNTING_TOLERANCE = 1e-6
-ECOLOGY_SCHEMA_VERSION = "household_first_monthly_ecology_v4"
-HOUSEHOLD_RESPONSE_SCHEMA_VERSION = "household_conditional_nominal_policy_v5"
+ECOLOGY_SCHEMA_VERSION = "household_first_monthly_ecology_v5"
+HOUSEHOLD_RESPONSE_SCHEMA_VERSION = "household_conditional_nominal_policy_v6"
 
 
 def _require_finite(value: float, field_name: str) -> float:
@@ -86,7 +86,6 @@ class HouseholdPolicyBranch:
 
     next_month_committed_consumption_nominal_usd: float
     next_month_discretionary_consumption_nominal_usd: float
-    deposit_change_intent_usd: float
     extra_debt_payment_usd: float
     borrowing_intent_usd: float
 
@@ -98,10 +97,6 @@ class HouseholdPolicyBranch:
         _require_nonnegative(
             self.next_month_discretionary_consumption_nominal_usd,
             f"{field_name}.next_month_discretionary_consumption_nominal_usd",
-        )
-        _require_finite(
-            self.deposit_change_intent_usd,
-            f"{field_name}.deposit_change_intent_usd",
         )
         _require_nonnegative(
             self.extra_debt_payment_usd,
@@ -199,8 +194,11 @@ class HouseholdState:
     subsistence_consumption_share: float = 0.45
     population_weight: float = 1.0
     monthly_household_earned_income_usd: float = 0.0
+    monthly_family_wage_income_usd: float = 0.0
+    monthly_family_business_income_usd: float = 0.0
     monthly_nonwage_income_usd: float = 0.0
     monthly_transfer_income_usd: float = 0.0
+    monthly_omitted_fixed_outflow_usd: float = 0.0
     baseline_committed_consumption_usd: float | None = None
     baseline_discretionary_consumption_usd: float | None = None
     minimum_debt_payment_usd: float = 0.0
@@ -245,12 +243,33 @@ class HouseholdState:
             "monthly_household_earned_income_usd",
         )
         _require_nonnegative(
+            self.monthly_family_wage_income_usd,
+            "monthly_family_wage_income_usd",
+        )
+        _require_nonnegative(
+            self.monthly_family_business_income_usd,
+            "monthly_family_business_income_usd",
+        )
+        if abs(
+            self.monthly_household_earned_income_usd
+            - self.monthly_family_wage_income_usd
+            - self.monthly_family_business_income_usd
+        ) > ACCOUNTING_TOLERANCE and (
+            self.monthly_family_wage_income_usd > 0.0
+            or self.monthly_family_business_income_usd > 0.0
+        ):
+            raise ValueError("family wage plus business income must equal household earned income")
+        _require_nonnegative(
             self.monthly_nonwage_income_usd,
             "monthly_nonwage_income_usd",
         )
         _require_nonnegative(
             self.monthly_transfer_income_usd,
             "monthly_transfer_income_usd",
+        )
+        _require_nonnegative(
+            self.monthly_omitted_fixed_outflow_usd,
+            "monthly_omitted_fixed_outflow_usd",
         )
         for field_name, value in (
             ("baseline_committed_consumption_usd", self.baseline_committed_consumption_usd),
@@ -375,6 +394,7 @@ class HouseholdMonthResult:
     actual_hours_worked: float
     actual_job_search_hours: float
     wage_income_usd: float
+    omitted_fixed_outflow_usd: float
     baseline_consumption_usd: float
     desired_consumption_usd: float
     consumption_usd: float
@@ -481,14 +501,12 @@ def household_response_schema() -> dict[str, Any]:
         "required": [
             "next_month_committed_consumption_nominal_usd",
             "next_month_discretionary_consumption_nominal_usd",
-            "deposit_change_intent_usd",
             "extra_debt_payment_usd",
             "borrowing_intent_usd",
         ],
         "properties": {
             "next_month_committed_consumption_nominal_usd": {"type": "number", "minimum": 0.0},
             "next_month_discretionary_consumption_nominal_usd": {"type": "number", "minimum": 0.0},
-            "deposit_change_intent_usd": {"type": "number"},
             "extra_debt_payment_usd": {"type": "number", "minimum": 0.0},
             "borrowing_intent_usd": {"type": "number", "minimum": 0.0},
         },
@@ -509,7 +527,7 @@ def household_response_schema() -> dict[str, Any]:
             "reason_codes",
         ],
         "properties": {
-            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v16"},
+            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v17"},
             "household_id": {"type": "string", "minLength": 1},
             "expected_inflation_pct": quantile_block,
             "expected_income_growth_pct": quantile_block,

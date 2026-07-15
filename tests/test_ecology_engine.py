@@ -113,8 +113,8 @@ class EcologyEngineTests(unittest.TestCase):
                 buffer_contribution_intent_usd=0.0,
                 debt_payment_intent_usd=0.0,
                 borrowing_intent_usd=0.0,
-                employed_policy=HouseholdPolicyBranch(450.0, 550.0, 0.0, 0.0, 0.0),
-                not_employed_policy=HouseholdPolicyBranch(250.0, 250.0, -300.0, 0.0, 0.0),
+                employed_policy=HouseholdPolicyBranch(450.0, 550.0, 0.0, 0.0),
+                not_employed_policy=HouseholdPolicyBranch(250.0, 250.0, 0.0, 0.0),
             )
 
         employer = EmployerState(
@@ -161,11 +161,11 @@ class EcologyEngineTests(unittest.TestCase):
         schema = household_response_schema()
         self.assertEqual(
             schema["schema_version"],
-            "household_conditional_nominal_policy_v5",
+            "household_conditional_nominal_policy_v6",
         )
         self.assertEqual(
             schema["properties"]["prompt_version"]["const"],
-            "household_ecology_monthly_v16",
+            "household_ecology_monthly_v17",
         )
         self.assertIn("expected_inflation_pct", schema["required"])
         self.assertIn("not_employed_policy", schema["required"])
@@ -260,7 +260,7 @@ class EcologyEngineTests(unittest.TestCase):
 
         result = run_monthly_ecology(households, responses, employer, credit)
 
-        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v4")
+        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v5")
         self.assertEqual(len(result.households), 2)
         self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
         self.assertLess(result.credit.rationing_ratio, 1.0)

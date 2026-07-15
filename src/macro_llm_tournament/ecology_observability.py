@@ -21,12 +21,16 @@ INVENTORY_ADJUSTMENT_SPEED = 0.35
 EMPLOYMENT_ADJUSTMENT_SPEED = 0.25
 PRICE_PRESSURE_DEMAND_WEIGHT = 0.15
 PRICE_PRESSURE_INVENTORY_WEIGHT = 0.10
+LLM_HOUSEHOLD_ECONOMY_SETTLEMENT_LABEL = (
+    "LLM household economy - code-enforced budgets and settlement"
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--retrospective-run", type=Path, required=True)
     parser.add_argument("--prospective-run", type=Path)
+    parser.add_argument("--feedback-run", type=Path)
     parser.add_argument("--households", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser
@@ -207,12 +211,11 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             household_id: _require_finite(payload[field]["p50"], field)
             for household_id, payload in payload_by_id.items()
         }
-        add("beliefs", field, _weighted_mean(values, weights), "percent", "llm_household", label)
+        add("beliefs", field, _weighted_mean(values, weights), "percent", "llm_household_intention", label)
 
     policy_fields = (
         "next_month_committed_consumption_nominal_usd",
         "next_month_discretionary_consumption_nominal_usd",
-        "deposit_change_intent_usd",
         "extra_debt_payment_usd",
         "borrowing_intent_usd",
     )
@@ -228,7 +231,7 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             field,
             policy_means[field],
             "usd_per_represented_household",
-            "llm_household",
+            "llm_household_intention",
             "Population-weighted household intention on the origin employment branch.",
         )
     baseline_consumption_mean = _weighted_mean(
@@ -248,9 +251,6 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
     normalized_policy = {
         "intended_consumption_growth_pct": 100.0
         * (intended_consumption_mean / max(baseline_consumption_mean, 1.0) - 1.0),
-        "deposit_change_intent_pct_of_baseline_consumption": 100.0
-        * policy_means["deposit_change_intent_usd"]
-        / max(baseline_consumption_mean, 1.0),
         "extra_debt_payment_pct_of_baseline_consumption": 100.0
         * policy_means["extra_debt_payment_usd"]
         / max(baseline_consumption_mean, 1.0),
@@ -264,7 +264,7 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             field,
             value,
             "percent",
-            "llm_household",
+            "llm_household_intention",
             "Population-weighted intention normalized by population-weighted baseline consumption.",
         )
 
@@ -284,8 +284,8 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             field,
             _weighted_mean(values, weights),
             "usd_per_represented_household",
-            "deterministic_execution",
-            "Population-weighted feasible outcome after budgets and credit limits.",
+            "code_enforced_budgets_and_settlement",
+            "Population-weighted feasible outcome after code-enforced budgets, credit limits, and settlement.",
         )
     deposit_change = {
         household_id: _require_finite(decision_by_id.loc[household_id, "deposit_balance_end_usd"], "deposit_end")
@@ -297,8 +297,15 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
         - _require_finite(decision_by_id.loc[household_id, "revolving_debt_start_usd"], "debt_start")
         for household_id in weights
     }
-    add("household_execution", "deposit_balance_change_usd", _weighted_mean(deposit_change, weights), "usd_per_represented_household", "deterministic_execution", "Closing minus opening deposits.")
-    add("household_execution", "revolving_debt_change_usd", _weighted_mean(debt_change, weights), "usd_per_represented_household", "deterministic_execution", "Closing minus opening revolving debt.")
+    add(
+        "household_execution",
+        "executed_liquid_deposit_residual_usd",
+        _weighted_mean(deposit_change, weights),
+        "usd_per_represented_household",
+        "code_enforced_budgets_and_settlement",
+        "Population-weighted change in the liquid cash residual after code-enforced budgets and settlement.",
+    )
+    add("household_execution", "revolving_debt_change_usd", _weighted_mean(debt_change, weights), "usd_per_represented_household", "code_enforced_budgets_and_settlement", "Closing minus opening revolving debt after code-enforced settlement.")
 
     macro_row = macro.iloc[0]
     for field in (
@@ -319,14 +326,14 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             unit = "percent"
         else:
             unit = "population_weighted_units"
-        add("macro_execution", field, macro_row[field], unit, "deterministic_execution", "Settled aggregate from the household-demand economy.")
+        add("macro_execution", field, macro_row[field], unit, "code_enforced_budgets_and_settlement", "Settled aggregate from the LLM household economy after code-enforced budgets and settlement.")
 
     employer = economy["employer"]
     credit = economy["credit"]
-    add("institution_execution", "employer_demand_pressure_index", 100.0 * employer["demand_pressure"], "index", "deterministic_execution", "Current demand relative to the employer's baseline demand.")
-    add("institution_execution", "employer_profit_usd", employer["profit_usd"], "population_weighted_usd", "deterministic_execution", "No-capital firm accounting residual after explicit costs.")
-    add("institution_execution", "credit_rationing_ratio", credit["rationing_ratio"], "ratio", "deterministic_execution", "Share of requested new borrowing funded.")
-    add("institution_execution", "credit_profit_usd", credit["profit_usd"], "population_weighted_usd", "deterministic_execution", "Interest income less chargeoffs.")
+    add("institution_execution", "employer_demand_pressure_index", 100.0 * employer["demand_pressure"], "index", "code_enforced_budgets_and_settlement", "Current demand relative to the employer's baseline demand after settlement.")
+    add("institution_execution", "employer_profit_usd", employer["profit_usd"], "population_weighted_usd", "code_enforced_budgets_and_settlement", "No-capital firm accounting residual after explicit costs.")
+    add("institution_execution", "credit_rationing_ratio", credit["rationing_ratio"], "ratio", "code_enforced_budgets_and_settlement", "Share of requested new borrowing funded by code-enforced settlement.")
+    add("institution_execution", "credit_profit_usd", credit["profit_usd"], "population_weighted_usd", "code_enforced_budgets_and_settlement", "Interest income less chargeoffs after settlement.")
 
     shadow = firm_response_shadow(
         consumption_growth_pct=macro_row["consumption_growth_pct"],
@@ -340,8 +347,8 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             field,
             value,
             unit,
-            "mechanical_shadow",
-            "One-step deterministic response to household demand; not fed back into households and not an empirical forecast.",
+            "mechanical_firm_feedback",
+            "One-step mechanical firm feedback from household demand; not fed back into households and not an empirical forecast.",
         )
     return manifest, rows
 
@@ -360,7 +367,7 @@ def _observed_panel(retrospective_dir: Path, prospective_dir: Path | None) -> pd
             "mapping_quality": str(row["mapping_quality"]),
             "mapping_note": str(row["mapping_note"]),
         }
-        rows.append({**common, "series_role": "llm_household_economy", "value": float(row["prediction"]), "source_class": "llm_plus_deterministic_execution"})
+        rows.append({**common, "series_role": "llm_household_economy", "value": float(row["prediction"]), "source_class": "llm_household_economy_code_enforced_budgets_and_settlement"})
         rows.append({**common, "series_role": "first_release_actual", "value": float(row["actual"]), "source_class": "observed_first_release"})
         if row["metric"] == "consumption_growth_pct":
             rows.append({**common, "series_role": "routine_visible_drift", "value": float(row["routine_nominal_spending_drift_pct"]), "source_class": "origin_visible_statistical_anchor"})
@@ -383,11 +390,123 @@ def _observed_panel(retrospective_dir: Path, prospective_dir: Path | None) -> pd
                 "mapping_quality": quality,
                 "mapping_note": note,
             }
-            rows.append({**common, "series_role": "llm_household_economy", "value": float(row[metric]), "source_class": "llm_plus_deterministic_execution"})
+            rows.append({**common, "series_role": "llm_household_economy", "value": float(row[metric]), "source_class": "llm_household_economy_code_enforced_budgets_and_settlement"})
             if metric == "consumption_growth_pct":
                 rows.append({**common, "series_role": "routine_visible_drift", "value": float(row["routine_nominal_spending_drift_pct"]), "source_class": "origin_visible_statistical_anchor"})
     result = pd.DataFrame(rows)
     return result.sort_values(["target_month", "metric", "series_role"]).reset_index(drop=True)
+
+
+def _feedback_period_two_rows(feedback_dir: Path | None) -> tuple[list[dict[str, Any]], str | None]:
+    """Return the bound period-two feedback marker, when the optional artifact exists."""
+
+    if feedback_dir is None:
+        return [], None
+    path = feedback_dir / "dynamic_macro_paths.csv"
+    if not path.is_file():
+        return [], None
+
+    manifest = _read_json(feedback_dir / "manifest.json")
+    _validate_artifact(feedback_dir, manifest, "dynamic_macro_paths.csv")
+    frame = pd.read_csv(path)
+    required = {
+        "period",
+        "consumption_usd",
+        "output_units",
+        "producer_employment_index",
+        "consumption_growth_from_period_1_pct",
+    }
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(
+            "feedback dynamic macro artifact missing fields: "
+            f"{', '.join(sorted(missing))}"
+        )
+    numeric_period = pd.to_numeric(frame["period"], errors="coerce")
+    period_one = frame.loc[
+        numeric_period.eq(1) | frame["period"].astype(str).eq("period_1")
+    ]
+    period_two = frame.loc[
+        numeric_period.eq(2) | frame["period"].astype(str).eq("period_2")
+    ]
+    if len(period_one) != 1 or len(period_two) != 1:
+        raise ValueError("feedback dynamic macro artifact must contain exactly one period_2 row")
+    period_one_row = period_one.iloc[0]
+    row = period_two.iloc[0]
+    for period_name, period_row in (("period_1", period_one_row), ("period_2", row)):
+        for field in required.difference({"period"}):
+            _require_finite(period_row[field], f"feedback {period_name} {field}")
+    target_month = row.get("target_month", manifest.get("period_2_target_month"))
+    if not isinstance(target_month, str) or not target_month:
+        period_one_run = manifest.get("period_1_run")
+        expected_period_one_hash = manifest.get("period_1_manifest_sha256")
+        if not isinstance(period_one_run, str) or not isinstance(expected_period_one_hash, str):
+            raise ValueError(
+                "feedback period_2 marker requires target_month or a bound period-1 manifest"
+            )
+        period_one_manifest = _read_json(Path(period_one_run) / "manifest.json")
+        actual_period_one_hash = _artifact_sha256(Path(period_one_run) / "manifest.json")
+        if actual_period_one_hash != expected_period_one_hash:
+            raise ValueError("feedback period-1 manifest hash mismatch")
+        period_one_target_month = period_one_manifest.get("target_month")
+        if not isinstance(period_one_target_month, str) or not period_one_target_month:
+            raise ValueError("bound period-1 manifest requires a target_month")
+        try:
+            target_month = (
+                pd.Timestamp(period_one_target_month) + pd.DateOffset(months=1)
+            ).strftime("%Y-%m-%d")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("bound period-1 target_month must be parseable") from exc
+    try:
+        pd.Timestamp(target_month)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("feedback period_2 target_month must be parseable") from exc
+
+    common = {
+        "origin_month": str(manifest.get("origin_month", "")),
+        "target_month": target_month,
+        "evaluation_status": "prospective_feedback_period_2_unscored",
+    }
+    rows: list[dict[str, Any]] = []
+    rows.append(
+        {
+            **common,
+            "layer": "macro_execution",
+            "metric": "consumption_growth_pct",
+            "value": _require_finite(
+                row["consumption_growth_from_period_1_pct"],
+                "consumption_growth_from_period_1_pct",
+            ),
+            "unit": "percent",
+            "source_class": "llm_household_economy",
+            "interpretation": "Unscored period_2 LLM household economy outcome after mechanical firm feedback.",
+        }
+    )
+    for metric, period_two_field, period_one_field in (
+        ("firm_target_output_index", "output_units", "output_units"),
+        (
+            "firm_planned_employment_index",
+            "producer_employment_index",
+            "producer_employment_index",
+        ),
+    ):
+        baseline = _require_finite(period_one_row[period_one_field], period_one_field)
+        if baseline <= 0.0:
+            raise ValueError(f"feedback period_1 {period_one_field} must be positive")
+        rows.append(
+            {
+                **common,
+                "layer": "firm_response_shadow",
+                "metric": metric,
+                "value": 100.0
+                * _require_finite(row[period_two_field], period_two_field)
+                / baseline,
+                "unit": "index",
+                "source_class": "mechanical_firm_feedback",
+                "interpretation": "Unscored period_2 mechanical firm feedback marker; it is not an LLM output.",
+            }
+        )
+    return rows, _artifact_sha256(feedback_dir / "manifest.json")
 
 
 def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path) -> None:
@@ -404,7 +523,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
         subset = observed.loc[observed["metric"].eq(metric)]
         styles = {
             "first_release_actual": ("actual", "o", "-", "First-release actual"),
-            "llm_household_economy": ("llm", "s", "-", "Households + deterministic execution"),
+            "llm_household_economy": ("llm", "s", "-", LLM_HOUSEHOLD_ECONOMY_SETTLEMENT_LABEL),
             "routine_visible_drift": ("routine", "^", "--", "Origin-visible drift"),
         }
         for role, (color, marker, line, label) in styles.items():
@@ -452,16 +571,26 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
             color=color,
             linestyle=linestyle,
         )
-        prospective = rows["evaluation_status"].eq("prospective_frozen")
-        if prospective.any():
+        future = rows["evaluation_status"].isin(
+            {"prospective_frozen", "prospective_feedback_period_2_unscored"}
+        )
+        if future.any():
+            feedback = rows["evaluation_status"].eq(
+                "prospective_feedback_period_2_unscored"
+            )
             axis.scatter(
-                pd.to_datetime(rows.loc[prospective, "target_month"]),
-                rows.loc[prospective, "value"],
+                pd.to_datetime(rows.loc[future, "target_month"]),
+                rows.loc[future, "value"],
                 facecolors="none",
                 edgecolors=color or line.get_color(),
                 marker="D",
                 s=62,
                 linewidths=1.6,
+                label=(
+                    f"{label} (period_2, unscored)"
+                    if feedback.any()
+                    else None
+                ),
             )
 
     belief_labels = {
@@ -478,44 +607,32 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
 
     policy_labels = {
         "intended_consumption_growth_pct": "Consumption growth",
-        "deposit_change_intent_pct_of_baseline_consumption": "Deposit change",
         "extra_debt_payment_pct_of_baseline_consumption": "Extra debt payment",
         "borrowing_intent_pct_of_baseline_consumption": "Borrowing",
     }
     policy_colors = {
         "intended_consumption_growth_pct": "#2463A6",
-        "deposit_change_intent_pct_of_baseline_consumption": "#E07A1F",
         "extra_debt_payment_pct_of_baseline_consumption": "#4E8B57",
         "borrowing_intent_pct_of_baseline_consumption": "#7A5AA6",
     }
-    deposit_axis = axes[1, 1].twinx()
     for metric, label in policy_labels.items():
         rows = simulation.loc[(simulation["layer"] == "intended_policy_normalized") & (simulation["metric"] == metric)].sort_values("target_month")
-        target_axis = (
-            deposit_axis
-            if metric == "deposit_change_intent_pct_of_baseline_consumption"
-            else axes[1, 1]
-        )
         plot_simulation(
-            target_axis,
+            axes[1, 1],
             rows,
             label=label,
             color=policy_colors[metric],
-            linestyle="--" if target_axis is deposit_axis else "-",
         )
     axes[1, 1].axhline(0.0, color="#B8B8B8", linewidth=0.8)
     axes[1, 1].set_title("LLM intended household policy")
     axes[1, 1].set_ylabel("Consumption / debt actions (%)")
-    deposit_axis.set_ylabel("Deposit change (%)", color="#E07A1F")
-    handles, labels = axes[1, 1].get_legend_handles_labels()
-    handles2, labels2 = deposit_axis.get_legend_handles_labels()
-    axes[1, 1].legend(handles + handles2, labels + labels2, fontsize=8, frameon=False, ncol=2)
+    axes[1, 1].legend(fontsize=8, frameon=False, ncol=2)
 
     execution_labels = {
         "consumption_growth_pct": "Consumption growth",
         "revolving_credit_growth_pct": "Revolving debt growth",
         "gross_income_residual_rate_change_pp": "Gross-income residual change",
-        "price_growth_pct": "Current mechanical price growth",
+        "price_growth_pct": "Current code-enforced price growth",
     }
     execution_colors = {
         "consumption_growth_pct": "#2463A6",
@@ -535,7 +652,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
             linestyle="--" if target_axis is credit_axis else "-",
         )
     axes[2, 0].axhline(0.0, color="#B8B8B8", linewidth=0.8)
-    axes[2, 0].set_title("Deterministic execution")
+    axes[2, 0].set_title(LLM_HOUSEHOLD_ECONOMY_SETTLEMENT_LABEL)
     axes[2, 0].set_ylabel("Growth (%) / residual change (pp)")
     credit_axis.set_ylabel("Revolving debt growth (%)", color="#E07A1F")
     handles, labels = axes[2, 0].get_legend_handles_labels()
@@ -562,7 +679,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
         axis.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
         axis.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
     fig.suptitle("Household Ecology: Diagnostic Economic Observability Surface", fontsize=17, fontweight="bold")
-    fig.text(0.5, 0.945, "Observed outcomes, LLM household intentions, deterministic execution, and the mechanical firm shadow are kept separate; hollow diamonds are frozen and unscored.", ha="center", fontsize=10)
+    fig.text(0.5, 0.945, "Observed outcomes, LLM household intentions, code-enforced settlement, and mechanical firm feedback are kept separate; hollow diamonds are frozen and unscored.", ha="center", fontsize=10)
     fig.tight_layout(rect=(0.02, 0.03, 0.98, 0.93))
     fig.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -571,6 +688,7 @@ def _write_chart(observed: pd.DataFrame, simulation: pd.DataFrame, output: Path)
 def run(args: argparse.Namespace) -> dict[str, Any]:
     retrospective = args.retrospective_run.resolve()
     prospective = args.prospective_run.resolve() if args.prospective_run else None
+    feedback = args.feedback_run.resolve() if args.feedback_run else None
     output = args.output_dir.resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"output directory is not empty: {output}")
@@ -614,6 +732,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "source_child_status": manifest["evaluation_status"],
             "panel_evaluation_status": "prospective_frozen",
         }
+    feedback_rows, feedback_manifest_sha256 = _feedback_period_two_rows(feedback)
+    simulation_rows.extend(feedback_rows)
 
     observed = _observed_panel(retrospective, prospective)
     simulation = pd.DataFrame(simulation_rows).sort_values(["target_month", "layer", "metric"]).reset_index(drop=True)
@@ -625,11 +745,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     report = [
         "# Full Economic Observability Surface",
         "",
-        "This artifact exposes the whole active household economy without upgrading diagnostics into evidence. It separates observed first-release outcomes, LLM household beliefs and intentions, deterministic budget and institutional execution, and an unscored one-step firm-response shadow.",
+        "This artifact exposes the whole active household economy without upgrading diagnostics into evidence. It separates observed first-release outcomes, LLM household beliefs and intentions, code-enforced budget and institutional settlement, and unscored mechanical firm feedback. When a bound feedback run supplies period_2, it is shown only as a hollow, unscored future marker.",
         "",
         "## Structural Addition",
         "",
-        "The firm shadow inherits household-demand growth as expected sales, closes 35% of the inventory gap in target output, maps output one-for-one to required labor at fixed productivity, and closes 25% of that labor requirement through planned employment. The price-pressure index combines 15% of demand growth with 10% of the inventory gap. These declared coefficients are diagnostic mechanics, not fitted estimates.",
+        "The mechanical firm-feedback shadow inherits household-demand growth as expected sales, closes 35% of the inventory gap in target output, maps output one-for-one to required labor at fixed productivity, and closes 25% of that labor requirement through planned employment. The price-pressure index combines 15% of demand growth with 10% of the inventory gap. These declared coefficients are diagnostic mechanics, not fitted estimates.",
         "",
         "It does not feed wages, employment, prices, or income back into the household calls. Calling it a closed macro feedback loop would be wrong; it is the smallest honest firm-side response that the current family-income data supports.",
         "",
@@ -639,12 +759,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "- The prospective point remains frozen and unscored.",
         "- The gross-income residual is internal household accounting, not national saving.",
         "- Revolving credit remains a direction-only proxy.",
-        "- The firm response is mechanical and unscored; it cannot improve the historical forecast score.",
+        "- Mechanical firm feedback is unscored; it cannot improve the historical forecast score and is not an LLM output.",
         "",
         "## Output Contract",
         "",
-        "- `observed_comparison_panel.csv`: tidy actual, LLM-economy, and routine-anchor rows.",
-        "- `simulation_observability_panel.csv`: beliefs, policies, settled households, institutions, and firm-shadow rows.",
+        "- `observed_comparison_panel.csv`: tidy observed, LLM-household-economy, and routine-anchor rows.",
+        "- `simulation_observability_panel.csv`: LLM intentions, code-enforced settlement, and mechanical firm-feedback rows.",
         "- `economic_observability_surface.png`: the six-panel diagnostic figure.",
         "- `manifest.json`: source bindings, declared mechanics, and artifact hashes.",
         "",
@@ -664,6 +784,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "retrospective_manifest_sha256": _artifact_sha256(retrospective / "manifest.json"),
         "prospective_manifest_sha256": _artifact_sha256(prospective / "manifest.json") if prospective else None,
+        "feedback_manifest_sha256": feedback_manifest_sha256,
         "household_input_sha256": _file_sha256(args.households),
         "source_runs": source_runs,
         "retrospective_is_confirmatory": False,

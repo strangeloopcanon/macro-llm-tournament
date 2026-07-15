@@ -35,8 +35,9 @@ from .ecology_provider import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = PROJECT_ROOT / "work/ecology_cache"
-SCHEMA_VERSION = "household_first_rolling_microeconomy_v2"
+SCHEMA_VERSION = "household_first_rolling_microeconomy_v3"
 LIVE_REFERENCE_SCHEMA_VERSION = "household_ecology_live_reference_v2"
+MINIMUM_OMITTED_FIXED_OUTFLOW_SHARE = 0.10
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -211,13 +212,29 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
         else float(row["baseline_consumption_annual"]) / 12.0
     )
     income = float(row.get("annual_income_usd", row.get("annual_income", 0.0)))
+    reported_monthly_wage = row.get("monthly_wage_income_usd")
+    reported_monthly_business = row.get("monthly_business_income_usd", 0.0)
     reported_monthly_earned = row.get(
-        "monthly_earned_income_usd", row.get("monthly_wage_income_usd")
+        "monthly_earned_income_usd", reported_monthly_wage
     )
     has_reported_earned = pd.notna(reported_monthly_earned)
     monthly_earned = (
         float(reported_monthly_earned) if has_reported_earned else income / 12.0
     )
+    monthly_family_wage = (
+        max(0.0, float(reported_monthly_wage))
+        if pd.notna(reported_monthly_wage)
+        else (monthly_earned if has_reported_earned else 0.0)
+    )
+    monthly_family_business = (
+        max(0.0, float(reported_monthly_business))
+        if pd.notna(reported_monthly_business)
+        else 0.0
+    )
+    if has_reported_earned and abs(
+        monthly_family_wage + monthly_family_business - monthly_earned
+    ) > 1e-6:
+        monthly_family_wage = max(0.0, monthly_earned - monthly_family_business)
     status = (
         str(row.get("employment_status", "unknown"))
         .strip()
@@ -272,6 +289,28 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
             max(debt, debt * 1.5, monthly_consumption * 2.0),
         )
     )
+    nonwage_income = max(0.0, float(row.get("monthly_nonwage_income_usd", 0.0)))
+    transfer_income = max(
+        0.0, float(row.get("monthly_transfers_benefits_usd", 0.0))
+    )
+    minimum_payment = max(
+        0.0, float(row.get("recurring_minimum_debt_payment_usd", 0.0))
+    )
+    base_saving_rate = row.get("base_saving_rate")
+    omitted_fixed_outflow = 0.0
+    if has_reported_earned and pd.notna(base_saving_rate):
+        gross_income = monthly_earned + nonwage_income + transfer_income
+        target_liquid_residual = min(1.0, max(0.0, float(base_saving_rate))) * gross_income
+        omitted_fixed_outflow = min(
+            gross_income,
+            max(
+                MINIMUM_OMITTED_FIXED_OUTFLOW_SHARE * gross_income,
+                gross_income
+                - monthly_consumption
+                - minimum_payment
+                - target_liquid_residual,
+            ),
+        )
     return HouseholdState(
         household_id=str(row["type_id"]),
         employer_id="aggregate_employer",
@@ -290,19 +329,16 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
         subsistence_consumption_share=float(row.get("subsistence_floor_share", 0.45)),
         population_weight=float(row.get("population_weight", 1.0 / 200.0)),
         monthly_household_earned_income_usd=household_earned,
-        monthly_nonwage_income_usd=max(
-            0.0, float(row.get("monthly_nonwage_income_usd", 0.0))
-        ),
-        monthly_transfer_income_usd=max(
-            0.0, float(row.get("monthly_transfers_benefits_usd", 0.0))
-        ),
+        monthly_family_wage_income_usd=monthly_family_wage,
+        monthly_family_business_income_usd=monthly_family_business,
+        monthly_nonwage_income_usd=nonwage_income,
+        monthly_transfer_income_usd=transfer_income,
+        monthly_omitted_fixed_outflow_usd=omitted_fixed_outflow,
         baseline_committed_consumption_usd=(float(committed) if has_components else None),
         baseline_discretionary_consumption_usd=(
             float(discretionary) if has_components else None
         ),
-        minimum_debt_payment_usd=max(
-            0.0, float(row.get("recurring_minimum_debt_payment_usd", 0.0))
-        ),
+        minimum_debt_payment_usd=minimum_payment,
     )
 
 
@@ -424,31 +460,26 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         row.monthly_transfer_income_usd * weights[row.household_id]
         for row in states
     ) / total_weight
-    gross_household_income = (
-        wage_income + household_earned_income + nonwage_income + transfer_income
-    )
+    fixed_outflows = sum(
+        row.monthly_omitted_fixed_outflow_usd * weights[row.household_id]
+        for row in states
+    ) / total_weight
+    gross_household_income = household_earned_income + nonwage_income + transfer_income
     consumption = weighted("consumption_usd")
     # This is a budget residual against synthetic gross SCF-family income. It is
     # useful for internal accounting, but it is not disposable personal income
     # and must not be scored as the national-accounts personal saving rate.
-    gross_income_residual = gross_household_income - consumption
+    gross_income_residual = gross_household_income - fixed_outflows - consumption
     gross_income_residual_rate = (
         100.0 * gross_income_residual / max(gross_household_income, 1.0)
     )
-    baseline_wage_income = sum(
-        row.hourly_wage_usd
-        * row.baseline_monthly_hours
-        * weights[row.household_id]
-        for row in states
-    ) / total_weight
     baseline_gross_household_income = (
-        baseline_wage_income
-        + household_earned_income
+        household_earned_income
         + nonwage_income
         + transfer_income
     )
     baseline_gross_income_residual_rate = 100.0 * (
-        baseline_gross_household_income - baseline_consumption
+        baseline_gross_household_income - fixed_outflows - baseline_consumption
     ) / max(baseline_gross_household_income, 1.0)
     price_growth = 100.0 * (result.employer.next_price_per_unit_usd / result.employer.current_price_per_unit_usd - 1.0)
     latest_visible_pce = _latest_visible_value(origin, "PCE")
@@ -467,6 +498,7 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         ),
         "wage_income_usd": wage_income,
         "household_earned_income_usd": household_earned_income,
+        "omitted_fixed_outflows_usd": fixed_outflows,
         "nonwage_income_usd": nonwage_income,
         "transfer_income_usd": transfer_income,
         "gross_household_income_usd": gross_household_income,
@@ -702,6 +734,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "routine_nominal_spending_drift_source": (
             "latest origin-visible one-month PCE change; zero only when unavailable"
         ),
+        "omitted_fixed_outflow_calibration": {
+            "minimum_share_of_scf_gross_income": MINIMUM_OMITTED_FIXED_OUTFLOW_SHARE,
+            "purpose": "taxes_and_recurring_obligations_absent_from_the_scf_spending_proxy",
+            "saving_rate_input": "household base_saving_rate when it implies a larger outflow",
+        },
         "employment_transition": (
             "origin_employment_state_frozen_for_household_demand_diagnostic"
             if institution_mode == "household_demand"

@@ -35,6 +35,7 @@ class _Plan:
     actual_hours_worked: float
     actual_job_search_hours: float
     wage_income_usd: float
+    omitted_fixed_outflow_usd: float
     interest_accrued_usd: float
     minimum_payment_due_usd: float
     nonwage_income_usd: float
@@ -99,11 +100,16 @@ def run_monthly_ecology(
     *,
     scenario: str = "median",
     institution_mode: str = "dynamic",
+    planned_output_units: float | None = None,
 ) -> MonthlyEcologyResult:
     if scenario not in {"downside", "median", "upside"}:
         raise ValueError("scenario must be downside, median, or upside")
     if institution_mode not in {"dynamic", "household_demand"}:
         raise ValueError("institution_mode must be dynamic or household_demand")
+    if planned_output_units is not None and (
+        not math.isfinite(planned_output_units) or planned_output_units < 0.0
+    ):
+        raise ValueError("planned_output_units must be finite and nonnegative")
     if not households:
         raise ValueError("households must be non-empty")
     employer.validate()
@@ -159,7 +165,9 @@ def run_monthly_ecology(
     employment_start = {
         row.household_id: starting_employment_share(row) for row in ordered_households
     }
-    if institution_mode == "household_demand":
+    if planned_output_units is not None:
+        output_units = min(employer.monthly_capacity_units, planned_output_units)
+    elif institution_mode == "household_demand":
         # The household-demand diagnostic holds labor state and wages fixed so
         # consumption tests are not confounded by an uncalibrated matching
         # model. Conditional employment policies remain banked for later shock
@@ -240,6 +248,7 @@ def run_monthly_ecology(
             + plan.wage_income_usd
             + plan.nonwage_income_usd
             + borrowing_usd
+            - plan.omitted_fixed_outflow_usd
         )
         debt_available = (
             plan.household.revolving_debt_usd
@@ -295,6 +304,7 @@ def run_monthly_ecology(
             + plan.nonwage_income_usd
             + borrowing_usd
             - debt_payment_usd
+            - plan.omitted_fixed_outflow_usd
         )
         goods_ready.append(
             {
@@ -362,6 +372,7 @@ def run_monthly_ecology(
             + borrowing_usd
             - debt_payment_usd
             - consumption_usd
+            - plan.omitted_fixed_outflow_usd
             - deposit_end_usd
         )
         debt_residual = (
@@ -378,6 +389,7 @@ def run_monthly_ecology(
             credit=credit,
             wage_income_usd=plan.wage_income_usd,
             nonwage_income_usd=plan.nonwage_income_usd,
+            omitted_fixed_outflow_usd=plan.omitted_fixed_outflow_usd,
             borrowing_usd=borrowing_usd,
             debt_payment_usd=debt_payment_usd,
             consumption_usd=consumption_usd,
@@ -398,6 +410,7 @@ def run_monthly_ecology(
                 actual_hours_worked=plan.actual_hours_worked,
                 actual_job_search_hours=plan.actual_job_search_hours,
                 wage_income_usd=plan.wage_income_usd,
+                omitted_fixed_outflow_usd=plan.omitted_fixed_outflow_usd,
                 baseline_consumption_usd=plan.household.baseline_monthly_consumption_usd,
                 desired_consumption_usd=plan.desired_consumption_usd,
                 consumption_usd=consumption_usd,
@@ -544,21 +557,28 @@ def run_monthly_ecology(
     chargeoffs = aggregate(
         {household_id: row.default_chargeoff_usd for household_id, row in results_by_id.items()}
     )
-    nonwage_income_total = aggregate(
+    external_income_total = aggregate(
         {
-            row.household_id: row.monthly_household_earned_income_usd
+            row.household_id: row.monthly_family_business_income_usd
             + row.monthly_nonwage_income_usd
             + row.monthly_transfer_income_usd
+            for row in ordered_households
+        }
+    )
+    omitted_fixed_outflows_total = aggregate(
+        {
+            row.household_id: row.monthly_omitted_fixed_outflow_usd
             for row in ordered_households
         }
     )
     deposit_stock_residual = deposits_end - (
         deposits_start
         + wage_bill_usd
-        + nonwage_income_total
+        + external_income_total
         + borrowing_total
         - debt_payments_received
         - aggregate_consumption_usd
+        - omitted_fixed_outflows_total
     )
     debt_stock_residual = debt_end - (
         debt_start
@@ -628,10 +648,20 @@ def _build_plan(
     actual_job_search_hours = 0.0 if fixed_labor else max(
         point.planned_job_search_hours, 12.0 * job_loss_share
     )
-    wage_income_usd = conditional_hours * (
+    respondent_wage_income_usd = conditional_hours * (
         retained_share * household.hourly_wage_usd
         + hired_share * employer.wage_offer_usd
     )
+    has_family_income_split = (
+        household.monthly_family_wage_income_usd > ACCOUNTING_TOLERANCE
+        or household.monthly_family_business_income_usd > ACCOUNTING_TOLERANCE
+    )
+    family_wage_income_usd = (
+        household.monthly_family_wage_income_usd
+        if has_family_income_split
+        else household.monthly_household_earned_income_usd
+    )
+    wage_income_usd = respondent_wage_income_usd + family_wage_income_usd
     interest_accrued_usd = (
         household.revolving_debt_usd * credit.annual_interest_rate_pct / 1200.0
     )
@@ -661,15 +691,14 @@ def _build_plan(
         desired_consumption_usd = mixed(
             "next_month_committed_consumption_nominal_usd"
         ) + mixed("next_month_discretionary_consumption_nominal_usd")
-        deposit_change_intent_usd = mixed("deposit_change_intent_usd")
         debt_payment_intent_usd = minimum_payment_due_usd + mixed(
             "extra_debt_payment_usd"
         )
         borrowing_intent_usd = mixed("borrowing_intent_usd")
-        desired_buffer_end_usd = max(
-            0.0,
-            household.deposit_balance_usd + deposit_change_intent_usd,
-        )
+        # Consumption, debt payment, and borrowing are the household choices.
+        # Closing deposits are the cash residual, so a separate deposit target
+        # would overdetermine the budget.
+        desired_buffer_end_usd = 0.0
     else:
         desired_consumption_usd = household.baseline_monthly_consumption_usd * (
             1.0 + point.consumption_change_pct / 100.0
@@ -691,13 +720,20 @@ def _build_plan(
         debt_payment_intent_usd = response.debt_payment_intent_usd
         borrowing_intent_usd = response.borrowing_intent_usd
     desired_consumption_usd = max(0.0, desired_consumption_usd)
+    family_business_income_usd = (
+        household.monthly_family_business_income_usd if has_family_income_split else 0.0
+    )
     nonwage_income_usd = (
-        household.monthly_household_earned_income_usd
+        family_business_income_usd
         + household.monthly_nonwage_income_usd
         + household.monthly_transfer_income_usd
     )
+    omitted_fixed_outflow_usd = household.monthly_omitted_fixed_outflow_usd
     resources_before_borrow = (
-        household.deposit_balance_usd + wage_income_usd + nonwage_income_usd
+        household.deposit_balance_usd
+        + wage_income_usd
+        + nonwage_income_usd
+        - omitted_fixed_outflow_usd
     )
     subsistence_usd = (
         household.subsistence_consumption_share
@@ -768,6 +804,7 @@ def _build_plan(
         actual_hours_worked=actual_hours_worked,
         actual_job_search_hours=actual_job_search_hours,
         wage_income_usd=wage_income_usd,
+        omitted_fixed_outflow_usd=omitted_fixed_outflow_usd,
         interest_accrued_usd=interest_accrued_usd,
         minimum_payment_due_usd=minimum_payment_due_usd,
         nonwage_income_usd=nonwage_income_usd,
@@ -791,6 +828,7 @@ def _counterparty_flows(
     credit: CreditIntermediaryState,
     wage_income_usd: float,
     nonwage_income_usd: float,
+    omitted_fixed_outflow_usd: float,
     borrowing_usd: float,
     debt_payment_usd: float,
     consumption_usd: float,
@@ -818,6 +856,17 @@ def _counterparty_flows(
                 to_party_type="household",
                 category="wages",
                 amount_usd=wage_income_usd * population_mass,
+            )
+        )
+    if omitted_fixed_outflow_usd > 0.0:
+        flows.append(
+            CounterpartyFlow(
+                from_party_id=household.household_id,
+                from_party_type="household",
+                to_party_id="external_fixed_outflow_sector",
+                to_party_type="external_sector",
+                category="taxes_and_omitted_recurring_outflows",
+                amount_usd=omitted_fixed_outflow_usd * population_mass,
             )
         )
     if borrowing_usd > 0.0:

@@ -65,6 +65,221 @@ class EcologyObservabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "do not match households"):
             ecology_observability._weighted_mean({"a": 10.0}, {"a": 1.0, "b": 3.0})
 
+    def test_run_payload_reports_executed_liquid_cash_residual_without_deposit_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            cards = [
+                {
+                    "household": {
+                        "household_id": "h1",
+                        "current_state": {
+                            "employed": True,
+                            "monthly_consumption": 1_000.0,
+                        },
+                    }
+                }
+            ]
+            responses = [
+                {
+                    "payload": {
+                        "household_id": "h1",
+                        "expected_inflation_pct": {"p50": 2.0},
+                        "expected_income_growth_pct": {"p50": 1.0},
+                        "job_loss_probability_pct": {"p50": 3.0},
+                        "employed_policy": {
+                            "next_month_committed_consumption_nominal_usd": 700.0,
+                            "next_month_discretionary_consumption_nominal_usd": 200.0,
+                            "extra_debt_payment_usd": 50.0,
+                            "borrowing_intent_usd": 25.0,
+                        },
+                    }
+                }
+            ]
+            (run_dir / "household_cards.json").write_text(json.dumps(cards), encoding="utf-8")
+            (run_dir / "household_responses.json").write_text(
+                json.dumps(responses), encoding="utf-8"
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "household_id": "h1",
+                        "baseline_consumption_usd": 1_000.0,
+                        "desired_consumption_usd": 900.0,
+                        "consumption_usd": 875.0,
+                        "debt_payment_usd": 75.0,
+                        "borrowing_usd": 25.0,
+                        "deposit_balance_start_usd": 500.0,
+                        "deposit_balance_end_usd": 375.0,
+                        "revolving_debt_start_usd": 400.0,
+                        "revolving_debt_end_usd": 450.0,
+                    }
+                ]
+            ).to_csv(run_dir / "household_decisions.csv", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "scenario": "median",
+                        "consumption_growth_pct": -12.5,
+                        "routine_nominal_spending_drift_pct": 1.0,
+                        "gross_income_residual_rate_pct": 2.0,
+                        "gross_income_residual_rate_change_pp": -0.5,
+                        "revolving_credit_growth_pct": 12.5,
+                        "employment_rate_pct": 95.0,
+                        "price_growth_pct": 0.3,
+                        "output_units": 90.0,
+                        "units_sold": 90.0,
+                        "inventory_end_units": 9.0,
+                    }
+                ]
+            ).to_csv(run_dir / "macro_forecast_paths.csv", index=False)
+            (run_dir / "median_economy.json").write_text(
+                json.dumps(
+                    {
+                        "employer": {"demand_pressure": 0.9, "profit_usd": 10.0},
+                        "credit": {"rationing_ratio": 0.8, "profit_usd": 5.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifacts = {
+                name: _artifact_sha256(run_dir / name)
+                for name in (
+                    "household_cards.json",
+                    "household_responses.json",
+                    "household_decisions.csv",
+                    "macro_forecast_paths.csv",
+                    "median_economy.json",
+                )
+            }
+            (run_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "accounting_passed": True,
+                        "household_count": 1,
+                        "origin_month": "2026-01-01",
+                        "target_month": "2026-02-01",
+                        "evaluation_status": "prospective_frozen",
+                        "artifacts": artifacts,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _, rows = ecology_observability._run_payload(run_dir, {"h1": 1.0})
+
+        metrics = {row["metric"] for row in rows}
+        self.assertNotIn("deposit_change_intent_usd", metrics)
+        self.assertNotIn("deposit_change_intent_pct_of_baseline_consumption", metrics)
+        executed_residual = next(
+            row
+            for row in rows
+            if row["metric"] == "executed_liquid_deposit_residual_usd"
+        )
+        self.assertEqual(executed_residual["value"], -125.0)
+        self.assertEqual(
+            executed_residual["source_class"],
+            "code_enforced_budgets_and_settlement",
+        )
+        self.assertIn("liquid cash residual", executed_residual["interpretation"])
+        self.assertEqual(
+            next(row for row in rows if row["layer"] == "intended_policy")["source_class"],
+            "llm_household_intention",
+        )
+        self.assertEqual(
+            next(row for row in rows if row["layer"] == "firm_response_shadow")["source_class"],
+            "mechanical_firm_feedback",
+        )
+
+    def test_feedback_period_two_adds_unscored_household_and_firm_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            feedback_dir = Path(temporary)
+            period_one_dir = feedback_dir / "period-one"
+            period_one_dir.mkdir()
+            (period_one_dir / "manifest.json").write_text(
+                json.dumps({"target_month": "2026-08-01"}), encoding="utf-8"
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "period": 1,
+                        "consumption_usd": 100.0,
+                        "output_units": 100.0,
+                        "producer_employment_index": 1.0,
+                        "consumption_growth_from_period_1_pct": 0.0,
+                    },
+                    {
+                        "period": 2,
+                        "consumption_usd": 101.0,
+                        "output_units": 102.0,
+                        "producer_employment_index": 1.005,
+                        "consumption_growth_from_period_1_pct": 1.0,
+                    }
+                ]
+            ).to_csv(feedback_dir / "dynamic_macro_paths.csv", index=False)
+            (feedback_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "origin_month": "2026-07-01",
+                        "period_1_run": str(period_one_dir),
+                        "period_1_manifest_sha256": _artifact_sha256(
+                            period_one_dir / "manifest.json"
+                        ),
+                        "artifacts": {
+                            "dynamic_macro_paths.csv": _artifact_sha256(
+                                feedback_dir / "dynamic_macro_paths.csv"
+                            )
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rows, manifest_sha256 = ecology_observability._feedback_period_two_rows(
+                feedback_dir
+            )
+
+        self.assertEqual(len(rows), 3)
+        self.assertIsNotNone(manifest_sha256)
+        self.assertTrue(all(row["target_month"] == "2026-09-01" for row in rows))
+        self.assertTrue(
+            all(
+                row["evaluation_status"]
+                == "prospective_feedback_period_2_unscored"
+                for row in rows
+            )
+        )
+        self.assertEqual({row["source_class"] for row in rows if row["layer"] == "macro_execution"}, {"llm_household_economy"})
+        self.assertEqual(
+            {
+                row["source_class"]
+                for row in rows
+                if row["layer"] == "firm_response_shadow"
+            },
+            {"mechanical_firm_feedback"},
+        )
+
+    def test_feedback_period_two_fails_closed_when_its_schema_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            feedback_dir = Path(temporary)
+            pd.DataFrame([{"period": "period_2"}]).to_csv(
+                feedback_dir / "dynamic_macro_paths.csv", index=False
+            )
+            (feedback_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "artifacts": {
+                            "dynamic_macro_paths.csv": _artifact_sha256(
+                                feedback_dir / "dynamic_macro_paths.csv"
+                            )
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing fields"):
+                ecology_observability._feedback_period_two_rows(feedback_dir)
+
     def test_observed_panel_keeps_prospective_rows_unscored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -131,6 +346,35 @@ class EcologyObservabilityTests(unittest.TestCase):
                 frozen["evaluation_status"].eq("prospective_frozen_unscored").all()
             )
             self.assertFalse(frozen["series_role"].eq("first_release_actual").any())
+            economy_rows = frozen.loc[frozen["series_role"].eq("llm_household_economy")]
+            self.assertTrue(
+                economy_rows["source_class"].eq(
+                    "llm_household_economy_code_enforced_budgets_and_settlement"
+                ).all()
+            )
+
+    def test_public_economy_label_names_code_enforced_settlement(self) -> None:
+        self.assertEqual(
+            ecology_observability.LLM_HOUSEHOLD_ECONOMY_SETTLEMENT_LABEL,
+            "LLM household economy - code-enforced budgets and settlement",
+        )
+
+    def test_parser_accepts_optional_feedback_run(self) -> None:
+        args = ecology_observability.build_arg_parser().parse_args(
+            [
+                "--retrospective-run",
+                "retrospective",
+                "--prospective-run",
+                "prospective",
+                "--feedback-run",
+                "feedback",
+                "--households",
+                "households.csv",
+                "--output-dir",
+                "output",
+            ]
+        )
+        self.assertEqual(args.feedback_run, Path("feedback"))
 
     def test_source_artifact_hash_mismatch_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

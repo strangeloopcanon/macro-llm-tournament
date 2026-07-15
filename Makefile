@@ -1,4 +1,4 @@
-.PHONY: all check test ecology-fixture ecology-financial-states ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay ecology-observability household-cohort vintage-bundle origin-snapshot
+.PHONY: all check test ecology-fixture ecology-financial-states ecology-live-canary ecology-live-200 ecology-current-replay ecology-feedback-live ecology-feedback-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay ecology-observability household-cohort vintage-bundle origin-snapshot
 
 ORIGIN ?= 2026-07-01
 AS_OF ?= 2026-07-10
@@ -6,15 +6,17 @@ MODEL ?= gpt-5.5
 ECOLOGY_WORKERS ?= 8
 RETROSPECTIVE_WORKERS ?= 16
 ORIGIN_SNAPSHOT ?= work/ecology_origins/$(AS_OF).json
-ECOLOGY_CACHE ?= work/ecology_cache_200_july_v20
+ECOLOGY_CACHE ?= work/ecology_cache_200_july_v21
 ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v3/initial_households_200.csv
 ECOLOGY_HISTORY ?= work/persona_beliefs/persistent_household_scale_v2/selected_observed_history.csv
 ECOLOGY_BUNDLE ?= work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
 ECOLOGY_FIXTURE_DIR := examples/ecology_fixture
-CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v20_current
-RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v20
-RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v20
-OBSERVABILITY_DIR ?= outputs/household_ecology_observability_v1
+CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v21_current
+FEEDBACK_CACHE ?= work/ecology_feedback_cache_200_july_v1
+FEEDBACK_RUN_DIR ?= outputs/household_ecology_feedback_200_july_v1
+RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v21
+RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v21
+OBSERVABILITY_DIR ?= outputs/household_ecology_observability_v2
 
 all: check test
 
@@ -100,6 +102,35 @@ ecology-current-replay:
 		--cache-dir $(ECOLOGY_CACHE) \
 		--output-dir $(CURRENT_RUN_DIR)
 
+ecology-feedback-live:
+	rm -rf $(FEEDBACK_RUN_DIR)
+	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 \
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_feedback_runner \
+		--period-1-run $(CURRENT_RUN_DIR) \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--history $(ECOLOGY_HISTORY) \
+		--mode live \
+		--provider codex_cli \
+		--model $(MODEL) \
+		--workers $(ECOLOGY_WORKERS) \
+		--max-live-calls 230 \
+		--cache-dir $(FEEDBACK_CACHE) \
+		--output-dir $(FEEDBACK_RUN_DIR)
+
+ecology-feedback-replay:
+	rm -rf $(FEEDBACK_RUN_DIR)
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_feedback_runner \
+		--period-1-run $(CURRENT_RUN_DIR) \
+		--households $(ECOLOGY_HOUSEHOLDS) \
+		--history $(ECOLOGY_HISTORY) \
+		--mode replay \
+		--provider codex_cli \
+		--model $(MODEL) \
+		--workers 4 \
+		--max-live-calls 0 \
+		--cache-dir $(FEEDBACK_CACHE) \
+		--output-dir $(FEEDBACK_RUN_DIR)
+
 ecology-realize:
 	@test -n "$(REALIZATIONS_CSV)" || (echo "REALIZATIONS_CSV is required" >&2; exit 2)
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_realizations \
@@ -146,6 +177,7 @@ ecology-observability:
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_observability \
 		--retrospective-run $(RETROSPECTIVE_DIR) \
 		--prospective-run $(CURRENT_RUN_DIR) \
+		--feedback-run $(FEEDBACK_RUN_DIR) \
 		--households $(ECOLOGY_HOUSEHOLDS) \
 		--output-dir $(OBSERVABILITY_DIR)
 

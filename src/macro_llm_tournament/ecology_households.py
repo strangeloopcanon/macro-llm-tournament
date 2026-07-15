@@ -20,7 +20,7 @@ from .ecology_provider import (
 from .ecology_models import HouseholdPolicyBranch, HouseholdResponse, QuantileTriplet
 
 
-HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v16"
+HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v17"
 
 
 class LiveCallBudget:
@@ -116,6 +116,7 @@ def household_card(
     *,
     origin: Mapping[str, Any],
     own_history: Iterable[Mapping[str, Any]],
+    simulated_environment: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one leakage-safe card; no other household state is admitted."""
 
@@ -146,6 +147,7 @@ def household_card(
     if state_provenance not in {
         "survey_seeded_initial_state",
         "fixed_survey_scf_anchor",
+        "simulated_feedback_state",
     }:
         raise ValueError(f"unsupported household state provenance: {state_provenance}")
     monthly_consumption = (
@@ -175,6 +177,16 @@ def household_card(
         if has_monthly_state
         else state.get("annual_income", 0.0)
     )
+    recent_nominal_drift = float(origin.get("routine_nominal_spending_drift_pct", 0.0))
+    committed_baseline = state.get("baseline_committed_consumption_usd")
+    discretionary_baseline = state.get("baseline_discretionary_consumption_usd")
+    if committed_baseline is None or discretionary_baseline is None:
+        committed_baseline = 0.65 * float(monthly_consumption or 0.0)
+        discretionary_baseline = max(
+            0.0,
+            float(monthly_consumption or 0.0) - float(committed_baseline),
+        )
+    status_quo_multiplier = max(0.0, 1.0 + recent_nominal_drift / 100.0)
     private = {
         "household_id": household_id,
         "profile": {
@@ -208,12 +220,28 @@ def household_card(
             "monthly_household_earned_income": state.get(
                 "monthly_household_earned_income_usd", 0.0
             ),
+            "monthly_family_wage_income": state.get(
+                "monthly_family_wage_income_usd", 0.0
+            ),
+            "monthly_family_business_income": state.get(
+                "monthly_family_business_income_usd", 0.0
+            ),
             "monthly_transfer_income": state.get("monthly_transfer_income_usd", 0.0),
+            "monthly_taxes_and_omitted_recurring_outflows": state.get(
+                "monthly_omitted_fixed_outflow_usd", 0.0
+            ),
             "baseline_committed_consumption": state.get(
                 "baseline_committed_consumption_usd"
             ),
             "baseline_discretionary_consumption": state.get(
                 "baseline_discretionary_consumption_usd"
+            ),
+            "recent_observed_nominal_spending_drift_pct": recent_nominal_drift,
+            "status_quo_next_month_committed_consumption": (
+                float(committed_baseline) * status_quo_multiplier
+            ),
+            "status_quo_next_month_discretionary_consumption": (
+                float(discretionary_baseline) * status_quo_multiplier
             ),
             "minimum_debt_payment": state.get("minimum_debt_payment_usd", 0.0),
             "spending_baseline_semantics": (
@@ -236,11 +264,14 @@ def household_card(
             key=lambda row: str(row.get("event_date", "")),
         ),
     }
-    return _clean({
+    card = {
         "prompt_version": HOUSEHOLD_PROMPT_VERSION,
         "household": private,
         "public_information": public,
-    })
+    }
+    if simulated_environment is not None:
+        card["simulated_environment"] = dict(simulated_environment)
+    return _clean(card)
 
 
 def household_prompt(card: Mapping[str, Any]) -> str:
@@ -252,8 +283,15 @@ household will actually do, including ordinary inertia, habits, and imperfect
 adjustment. Deterministic code will execute the policy and enforce its budget,
 credit limit, and minimum debt payment.
 
+If a separately labelled simulated_environment is present, it describes the
+economy's own prior-period outcome and current simulated firm conditions. It is
+not new public news and it is not a realized historical target.
+
 The inflation and income-growth fields are expected percentage changes over
-the next 12 months. The personal job-loss prior, when present, is the respondent's
+the next 12 months. They are beliefs, not an instruction to cut next month's
+cash income. Unless the card contains a specific next-month income event, treat
+the supplied monthly income components as continuing next month. The personal
+job-loss prior, when present, is the respondent's
 reported chance of losing the current job over 12 months. Translate that personal
 prior into a next-month probability rather than copying it. The separate
 unemployment-higher probability is an aggregate U.S. outlook and must never be
@@ -273,24 +311,31 @@ baseline committed and discretionary amounts are an origin-safe estimate of
 this household's recent typical monthly expenditures, expressed in the same
 dollar scale as its income and balance sheet. Treat that estimate as the
 household's current normal spending level; it is not a newly observed bank
-statement. For each employment branch, return the total
+statement. The status_quo_next_month amounts apply the latest origin-visible
+nominal spending drift to that normal level. They are a neutral, dated starting
+point, not a future realization or target. Begin there and make household-specific
+changes only when this household's state, prior behavior, or dated information
+supports them. For each employment branch, return the total
 nominal dollars this household will actually spend next month, not an adjustment,
 residual, prudent budget, or recommendation. Include ordinary recurring purchases,
 expected price changes, known bill changes, and actual quantity or habit changes.
 If the household buys the same basket while prices rise, next month's nominal
 expenditure should normally be higher. Do not copy aggregate PCE growth or
 manufacture an aggregate forecast. Report unconstrained intended spending; do
-not reduce it merely to make all policy fields balance to income. Deterministic
-execution applies balances and constraints. deposit_change_intent_usd is signed: positive means adding to deposits,
-negative means drawing them down. extra_debt_payment_usd excludes the stated
-minimum payment. Do not force the five policy numbers to add to income; the
-executor reconciles them against the balance sheet.
+not reduce it merely to create a prudent savings plan. Code applies balances and
+constraints. Deposits are the residual after spending, debt payments, borrowing,
+and income, so do not choose a separate deposit contribution.
+extra_debt_payment_usd excludes the stated minimum payment.
 current_state.annualized_wage_income is current hourly wage times current
 monthly hours times 12; it is not a separate survey-income measure.
 current_state.monthly_household_earned_income is SCF family earned income. It is
 held fixed in this household-demand forecast because the data do not identify
 this respondent's wage share. Respondent employment must not be interpreted as
 the employment status of every earner in the household.
+current_state.monthly_taxes_and_omitted_recurring_outflows is a fixed budget
+outflow calibrated from the declared baseline saving rate because the SCF
+spending proxy omits taxes and some recurring obligations. Do not count it as
+money available for spending or debt repayment.
 
 For every p10/p50/p90 block, return finite numbers satisfying p10 <= p50 <=
 p90. Inflation must be within [-25, 40], income growth within [-50, 50], job
@@ -298,8 +343,7 @@ loss probability within [0, 100], work hours within [0, 320], and job-search hou
 are hours conditional on being employed next month; if currently unemployed,
 report hours conditional on finding work. The rolling household-demand executor
 does not use these labor fields to alter the observed employment state.
-Consumption levels, debt-payment,
-and borrowing fields must be nonnegative; deposit change may be signed.
+Consumption, debt-payment, and borrowing fields must be nonnegative.
 
 INPUT
 {json.dumps(card, indent=2, sort_keys=True)}
@@ -316,14 +360,12 @@ Return exactly one JSON object with this shape:
   "employed_policy": {{
     "next_month_committed_consumption_nominal_usd": 0.0,
     "next_month_discretionary_consumption_nominal_usd": 0.0,
-    "deposit_change_intent_usd": 0.0,
     "extra_debt_payment_usd": 0.0,
     "borrowing_intent_usd": 0.0
   }},
   "not_employed_policy": {{
     "next_month_committed_consumption_nominal_usd": 0.0,
     "next_month_discretionary_consumption_nominal_usd": 0.0,
-    "deposit_change_intent_usd": 0.0,
     "extra_debt_payment_usd": 0.0,
     "borrowing_intent_usd": 0.0
   }},
@@ -338,13 +380,19 @@ def fixture_response(card: Mapping[str, Any]) -> dict[str, Any]:
     liquid = float(state.get("liquid_assets") or 0.0)
     monthly = max(1.0, float(state.get("monthly_consumption") or 1.0))
     debt = max(0.0, float(state.get("revolving_debt") or 0.0))
-    low_liquidity = liquid < 2.0 * monthly or profile.get("liquidity_group") == "low"
     employed = bool(state.get("employed"))
     inflation = 3.1
     income = 0.4 if employed else -1.8
     job_risk = 12.0 if employed else 0.0
-    committed = float(state.get("baseline_committed_consumption") or monthly * 0.65)
-    discretionary = max(0.0, monthly - committed)
+    committed = float(
+        state.get("status_quo_next_month_committed_consumption")
+        or state.get("baseline_committed_consumption")
+        or monthly * 0.65
+    )
+    discretionary = float(
+        state.get("status_quo_next_month_discretionary_consumption")
+        or max(0.0, monthly - committed)
+    )
     return {
         "prompt_version": HOUSEHOLD_PROMPT_VERSION,
         "household_id": card["household"]["household_id"],
@@ -356,14 +404,12 @@ def fixture_response(card: Mapping[str, Any]) -> dict[str, Any]:
         "employed_policy": {
             "next_month_committed_consumption_nominal_usd": committed,
             "next_month_discretionary_consumption_nominal_usd": discretionary,
-            "deposit_change_intent_usd": monthly * (0.01 if low_liquidity else 0.04),
             "extra_debt_payment_usd": min(debt, monthly * 0.03),
             "borrowing_intent_usd": 0.0,
         },
         "not_employed_policy": {
             "next_month_committed_consumption_nominal_usd": committed * 0.92,
             "next_month_discretionary_consumption_nominal_usd": discretionary * 0.45,
-            "deposit_change_intent_usd": -min(liquid, monthly * 0.35),
             "extra_debt_payment_usd": 0.0,
             "borrowing_intent_usd": max(0.0, monthly - liquid) * 0.15,
         },
@@ -411,13 +457,21 @@ def normalize_household_payload(payload: Mapping[str, Any], household_id: str) -
         fields = {
             "next_month_committed_consumption_nominal_usd",
             "next_month_discretionary_consumption_nominal_usd",
-            "deposit_change_intent_usd",
             "extra_debt_payment_usd",
             "borrowing_intent_usd",
         }
         if not isinstance(value, Mapping) or set(value) != fields:
             raise ValueError(f"{name} policy schema mismatch")
-        return HouseholdPolicyBranch(**{field: float(value[field]) for field in fields})
+        return HouseholdPolicyBranch(
+            next_month_committed_consumption_nominal_usd=float(
+                value["next_month_committed_consumption_nominal_usd"]
+            ),
+            next_month_discretionary_consumption_nominal_usd=float(
+                value["next_month_discretionary_consumption_nominal_usd"]
+            ),
+            extra_debt_payment_usd=float(value["extra_debt_payment_usd"]),
+            borrowing_intent_usd=float(value["borrowing_intent_usd"]),
+        )
 
     response = HouseholdResponse(
         expected_inflation_pct=triplet("expected_inflation_pct"),
