@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import dataclasses
 import tempfile
 import unittest
 from unittest import mock
@@ -18,9 +19,12 @@ from macro_llm_tournament.ecology import (
     _state_from_row,
     _live_reference_path,
     _read_live_reference,
+    _rolling_reanchor,
+    _weighted_macro,
     build_arg_parser,
     run,
 )
+from macro_llm_tournament.ecology_engine import run_monthly_ecology
 from macro_llm_tournament.ecology_households import (
     HouseholdElicitor,
     LiveCallBudget,
@@ -30,7 +34,13 @@ from macro_llm_tournament.ecology_households import (
     household_request_identity,
     normalize_household_payload,
 )
-from macro_llm_tournament.ecology_models import household_response_schema
+from macro_llm_tournament.ecology_models import (
+    CreditIntermediaryState,
+    EmployerState,
+    HouseholdResponse,
+    QuantileTriplet,
+    household_response_schema,
+)
 from macro_llm_tournament.ecology_inputs import ORIGIN_SNAPSHOT_SCHEMA_VERSION, _canonical_sha256
 
 FIXTURE_ROOT = PROJECT_ROOT / "examples/ecology_fixture"
@@ -40,6 +50,86 @@ FIXTURE_BUNDLE = FIXTURE_ROOT / "origin_snapshot.json"
 
 
 class HouseholdEcologyTests(unittest.TestCase):
+    def test_rolling_reanchor_uses_observed_pce_without_overwriting_personal_balances(self) -> None:
+        anchor = _state_from_row(
+            pd.Series(
+                {
+                    "type_id": "h1",
+                    "annual_income": 60_000.0,
+                    "baseline_consumption_annual": 36_000.0,
+                    "employment_status": "employed",
+                    "liquid_assets": 2_000.0,
+                    "debt": 500.0,
+                }
+            )
+        )
+        evolved = dataclasses.replace(
+            anchor,
+            deposit_balance_usd=1_600.0,
+            revolving_debt_usd=700.0,
+            baseline_monthly_consumption_usd=2_400.0,
+        )
+        rows, metadata = _rolling_reanchor(
+            restored=[evolved],
+            anchors=[anchor],
+            prior_macro_state={"anchor_reference_pce_value": 100.0},
+            origin={"origin_visible_macro_context": {"PCE": {"value": 110.0}}},
+        )
+        self.assertAlmostEqual(rows[0].baseline_monthly_consumption_usd, 3_300.0)
+        self.assertEqual(rows[0].deposit_balance_usd, 1_600.0)
+        self.assertEqual(rows[0].revolving_debt_usd, 700.0)
+        self.assertAlmostEqual(metadata["applied_level_ratio"], 1.1)
+
+    def test_unknown_employment_uses_scf_donor_state_and_earned_income(self) -> None:
+        not_working = _state_from_row(
+            pd.Series(
+                {
+                    "type_id": "h_not_working",
+                    "annual_income_usd": 48_000.0,
+                    "monthly_earned_income_usd": 0.0,
+                    "employment_status": "unknown",
+                    "scf_donor_employment_group": "not_employed",
+                    "baseline_consumption_annual": 36_000.0,
+                }
+            )
+        )
+        self.assertEqual(not_working.employment_share, 0.0)
+        self.assertEqual(not_working.baseline_monthly_hours, 0.0)
+        working = _state_from_row(
+            pd.Series(
+                {
+                    "type_id": "h_working",
+                    "annual_income_usd": 48_000.0,
+                    "monthly_wage_income_usd": 0.0,
+                    "monthly_earned_income_usd": 3_200.0,
+                    "employment_status": "unknown",
+                    "scf_donor_employment_group": "employed",
+                    "baseline_consumption_annual": 36_000.0,
+                }
+            )
+        )
+        self.assertEqual(working.employment_share, 1.0)
+        self.assertAlmostEqual(working.hourly_wage_usd, 0.0)
+        self.assertAlmostEqual(working.monthly_household_earned_income_usd, 3_200.0)
+
+    def test_nonworking_respondent_keeps_other_household_earnings(self) -> None:
+        state = _state_from_row(
+            pd.Series(
+                {
+                    "type_id": "h_nonworking_respondent",
+                    "annual_income_usd": 72_000.0,
+                    "monthly_earned_income_usd": 5_000.0,
+                    "monthly_nonwage_income_usd": 500.0,
+                    "employment_status": "unemployed",
+                    "baseline_consumption_annual": 48_000.0,
+                }
+            )
+        )
+        self.assertEqual(state.employment_share, 0.0)
+        self.assertEqual(state.baseline_monthly_hours, 0.0)
+        self.assertAlmostEqual(state.monthly_household_earned_income_usd, 5_000.0)
+        self.assertAlmostEqual(state.monthly_nonwage_income_usd, 500.0)
+
     def test_cli_requires_all_input_paths(self) -> None:
         parser = build_arg_parser()
         with self.assertRaises(SystemExit):
@@ -122,6 +212,109 @@ class HouseholdEcologyTests(unittest.TestCase):
             "debt": 0.0,
         }))
         self.assertAlmostEqual(state.hourly_wage_usd * state.baseline_monthly_hours * 12.0, 72_000.0)
+
+    def test_unknown_cohort_member_with_zero_observed_wage_starts_out_of_work(self) -> None:
+        state = _state_from_row(pd.Series({
+            "type_id": "sce_unknown_zero_wage",
+            "employment_status": "unknown",
+            "annual_income_usd": 48_000.0,
+            "monthly_wage_income_usd": 0.0,
+            "monthly_nonwage_income_usd": 2_100.0,
+            "monthly_transfers_benefits_usd": 1_900.0,
+            "baseline_committed_consumption_monthly_usd": 1_500.0,
+            "baseline_discretionary_consumption_monthly_usd": 900.0,
+            "liquid_deposits_usd": 1_200.0,
+            "revolving_debt_usd": 800.0,
+            "revolving_credit_limit_usd": 2_000.0,
+        }))
+        self.assertEqual(state.employment_share, 0.0)
+        self.assertEqual(state.baseline_monthly_hours, 0.0)
+
+    def test_unknown_cohort_member_with_observed_wage_starts_employed(self) -> None:
+        state = _state_from_row(pd.Series({
+            "type_id": "sce_unknown_positive_wage",
+            "employment_status": "unknown",
+            "annual_income_usd": 72_000.0,
+            "monthly_wage_income_usd": 4_500.0,
+            "monthly_nonwage_income_usd": 1_000.0,
+            "monthly_transfers_benefits_usd": 500.0,
+            "baseline_committed_consumption_monthly_usd": 2_000.0,
+            "baseline_discretionary_consumption_monthly_usd": 1_500.0,
+            "liquid_deposits_usd": 4_000.0,
+            "revolving_debt_usd": 1_000.0,
+            "revolving_credit_limit_usd": 4_000.0,
+        }))
+        self.assertEqual(state.employment_share, 1.0)
+        self.assertEqual(state.baseline_monthly_hours, 160.0)
+        self.assertAlmostEqual(state.hourly_wage_usd, 0.0)
+        self.assertAlmostEqual(state.monthly_household_earned_income_usd, 4_500.0)
+
+    def test_saving_rate_uses_wages_nonwage_income_and_transfers(self) -> None:
+        state = _state_from_row(pd.Series({
+            "type_id": "income_components",
+            "employment_status": "employed",
+            "annual_income_usd": 12_000.0,
+            "monthly_wage_income_usd": 1_000.0,
+            "monthly_nonwage_income_usd": 200.0,
+            "monthly_transfers_benefits_usd": 300.0,
+            "baseline_committed_consumption_monthly_usd": 700.0,
+            "baseline_discretionary_consumption_monthly_usd": 100.0,
+            "liquid_deposits_usd": 500.0,
+            "revolving_debt_usd": 0.0,
+            "revolving_credit_limit_usd": 0.0,
+        }))
+        response = HouseholdResponse(
+            expected_inflation_pct=QuantileTriplet(2.0, 2.0, 2.0),
+            expected_income_growth_pct=QuantileTriplet(0.0, 0.0, 0.0),
+            job_loss_probability_pct=QuantileTriplet(0.0, 0.0, 0.0),
+            planned_consumption_change_pct=QuantileTriplet(0.0, 0.0, 0.0),
+            planned_work_hours=QuantileTriplet(160.0, 160.0, 160.0),
+            planned_job_search_hours=QuantileTriplet(0.0, 0.0, 0.0),
+            target_buffer_months=0.0,
+            buffer_contribution_intent_usd=0.0,
+            debt_payment_intent_usd=0.0,
+            borrowing_intent_usd=0.0,
+        )
+        result = run_monthly_ecology(
+            [state],
+            {state.household_id: response},
+            EmployerState(
+                employer_id="aggregate_employer",
+                productivity_per_hour=5.0,
+                monthly_capacity_units=2_000.0,
+                inventory_units=500.0,
+                price_per_unit_usd=1.0,
+                target_headcount=1.0,
+                wage_offer_usd=state.hourly_wage_usd,
+            ),
+            CreditIntermediaryState(
+                intermediary_id="aggregate_credit_intermediary",
+                annual_interest_rate_pct=0.0,
+                minimum_payment_rate_pct=0.0,
+            ),
+            institution_mode="household_demand",
+        )
+        macro = _weighted_macro(
+            result,
+            [state],
+            {"origin_visible_macro_context": {"FEDFUNDS": {"value": 4.0}}},
+        )
+        consumption = result.households[0].consumption_usd
+        self.assertAlmostEqual(macro["wage_income_usd"], 0.0)
+        self.assertAlmostEqual(macro["household_earned_income_usd"], 1_000.0)
+        self.assertAlmostEqual(macro["nonwage_income_usd"], 200.0)
+        self.assertAlmostEqual(macro["transfer_income_usd"], 300.0)
+        self.assertAlmostEqual(macro["disposable_income_usd"], 1_500.0)
+        self.assertAlmostEqual(macro["personal_saving_usd"], 1_500.0 - consumption)
+        self.assertAlmostEqual(
+            macro["saving_rate_pct"],
+            100.0 * (1_500.0 - consumption) / 1_500.0,
+        )
+        baseline_rate = 100.0 * (1_500.0 - 800.0) / 1_500.0
+        self.assertAlmostEqual(macro["baseline_saving_rate_pct"], baseline_rate)
+        self.assertAlmostEqual(
+            macro["saving_rate_change_pp"], macro["saving_rate_pct"] - baseline_rate
+        )
 
     def test_initial_institutions_use_population_mass(self) -> None:
         rows = []
@@ -262,7 +455,7 @@ class HouseholdEcologyTests(unittest.TestCase):
             self.assertEqual(expected, {path.name for path in output.iterdir()})
             paths = pd.read_csv(output / "macro_forecast_paths.csv")
             self.assertEqual(set(paths["scenario"]), {"downside", "median", "upside"})
-            self.assertFalse(paths["output_units"].equals(paths["units_sold"]))
+            self.assertTrue((paths["output_units"] >= paths["units_sold"]).all())
             decisions = pd.read_csv(output / "household_decisions.csv").query("scenario == 'median'")
             next_state = json.loads((output / "median_next_state.json").read_text())
             next_by_id = {row["household_id"]: row for row in next_state["households"]}
@@ -325,7 +518,12 @@ class HouseholdEcologyTests(unittest.TestCase):
             )
             recursive_cards = json.loads((recursive / "household_cards.json").read_text())
             self.assertTrue(
-                all("prior_simulated_state" in card["public_information"] for card in recursive_cards)
+                all(
+                    "prior_simulated_state" not in card["public_information"]
+                    and card["household"]["current_state"]["provenance"]
+                    == "rolling_observed_reanchor"
+                    for card in recursive_cards
+                )
             )
             self.assertTrue(json.loads((recursive / "manifest.json").read_text())["accounting_passed"])
 
@@ -341,7 +539,7 @@ class HouseholdEcologyTests(unittest.TestCase):
             self.assertTrue(
                 all(
                     card["household"]["current_state"]["provenance"]
-                    == "prior_simulated_month"
+                    == "rolling_observed_reanchor"
                     for card in recursive_cards
                 )
             )

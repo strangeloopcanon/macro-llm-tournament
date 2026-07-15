@@ -17,10 +17,10 @@ from .ecology_provider import (
     CODEX_TOOL_ISOLATION_VERSION,
     CodexJSONClient,
 )
-from .ecology_models import HouseholdResponse, QuantileTriplet
+from .ecology_models import HouseholdPolicyBranch, HouseholdResponse, QuantileTriplet
 
 
-HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v7"
+HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v14"
 
 
 class LiveCallBudget:
@@ -87,6 +87,29 @@ def _clean(value: Any) -> Any:
     return value
 
 
+def _own_history_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose only the household's dated, previously reported beliefs."""
+
+    rename = {
+        "actual_expected_inflation_1y": "reported_expected_inflation_1y",
+        "actual_expected_real_income_growth": "reported_expected_real_income_growth",
+        "actual_expected_unemployment_higher_prob": "reported_expected_unemployment_higher_prob",
+    }
+    allowed = {
+        "event_date",
+        "public_availability_date",
+        "observation_status",
+        "responded",
+        "employment_status",
+        *rename,
+    }
+    return {
+        rename.get(key, key): value
+        for key, value in row.items()
+        if key in allowed
+    }
+
+
 def household_card(
     state: Mapping[str, Any],
     *,
@@ -98,15 +121,18 @@ def household_card(
     household_id = str(state.get("household_id") or state.get("type_id") or "")
     if not household_id:
         raise ValueError("household state lacks household_id/type_id")
-    public = {
-        "origin_month": origin["origin_month"],
-        "as_of_date": origin["as_of_date"],
-        "macro_context": origin.get("origin_visible_macro_context", {}),
-        "macro_history": origin.get("origin_visible_macro_history", {}),
-        "public_events": origin.get("public_events", []),
-    }
-    if origin.get("prior_simulated_state"):
-        public["prior_simulated_state"] = origin["prior_simulated_state"]
+    compact = origin.get("compact_macro_information")
+    public = (
+        dict(compact)
+        if isinstance(compact, Mapping)
+        else {
+            "origin_month": origin["origin_month"],
+            "as_of_date": origin["as_of_date"],
+            "macro_context": origin.get("origin_visible_macro_context", {}),
+            "macro_history": origin.get("origin_visible_macro_history", {}),
+            "public_events": origin.get("public_events", []),
+        }
+    )
     recursive = "baseline_monthly_consumption_usd" in state
     state_provenance = str(
         state.get(
@@ -114,7 +140,11 @@ def household_card(
             "prior_simulated_month" if recursive else "survey_seeded_initial_state",
         )
     )
-    if state_provenance not in {"survey_seeded_initial_state", "prior_simulated_month"}:
+    if state_provenance not in {
+        "survey_seeded_initial_state",
+        "prior_simulated_month",
+        "rolling_observed_reanchor",
+    }:
         raise ValueError(f"unsupported household state provenance: {state_provenance}")
     monthly_consumption = (
         state.get("baseline_monthly_consumption_usd")
@@ -172,6 +202,22 @@ def household_card(
                 "employment_share",
                 1.0 if employed else 0.0,
             ),
+            "monthly_nonwage_income": state.get("monthly_nonwage_income_usd", 0.0),
+            "monthly_household_earned_income": state.get(
+                "monthly_household_earned_income_usd", 0.0
+            ),
+            "monthly_transfer_income": state.get("monthly_transfer_income_usd", 0.0),
+            "baseline_committed_consumption": state.get(
+                "baseline_committed_consumption_usd"
+            ),
+            "baseline_discretionary_consumption": state.get(
+                "baseline_discretionary_consumption_usd"
+            ),
+            "minimum_debt_payment": state.get("minimum_debt_payment_usd", 0.0),
+            "spending_baseline_semantics": (
+                "origin_safe_estimate_of_recent_typical_monthly_spending_in_"
+                "the_household_state_dollar_scale"
+            ),
         },
         "previous_beliefs": {
             "inflation_expectation_1y": state.get("inflation_expectation_1y"),
@@ -183,9 +229,13 @@ def household_card(
         "previous_intentions": state.get("previous_intentions", {}),
         "previous_outcomes": state.get("previous_outcomes", {}),
         "survey_history": sorted(
-            [dict(row) for row in own_history], key=lambda row: str(row.get("event_date", ""))
+            [_own_history_row(row) for row in own_history],
+            key=lambda row: str(row.get("event_date", "")),
         ),
     }
+    if state_provenance == "rolling_observed_reanchor":
+        private.pop("previous_intentions", None)
+        private.pop("previous_outcomes", None)
     return _clean({
         "prompt_version": HOUSEHOLD_PROMPT_VERSION,
         "household": private,
@@ -195,31 +245,56 @@ def household_card(
 
 def household_prompt(card: Mapping[str, Any]) -> str:
     return f"""
-You are one household making a one-month-ahead forecast and plan. Use only the
+You are one real household making its next-month choices. Use only this
 household's own state/history and the dated public information below. Do not
-invent a biography. Report intended choices, not socially desirable choices.
-You do not directly execute transactions; deterministic accounting code will
-enforce budgets and credit limits.
+invent a biography and do not answer as a financial adviser. State what this
+household will actually do, including ordinary inertia, habits, and imperfect
+adjustment. Deterministic code will execute the policy and enforce its budget,
+credit limit, and minimum debt payment.
 
 The inflation and income-growth fields are expected percentage changes over
 the next 12 months. Job-loss probability is the chance of losing the current
-job within the next 12 months. Planned consumption change is next month's
-nominal-dollar consumption relative to current_state.monthly_consumption.
-Work and job-search hours are totals for next month. current_state.provenance
-states whether the engine state is survey-seeded at the first origin or inherited
-from the immediately preceding simulated month.
+job during the next month; the survey-history probability is a 12-month prior,
+so translate it rather than copying it. If this household is currently not
+employed, return zero for job-loss probability; job search is handled separately.
+Work and job-search hours are totals for next
+month. Write two conditional dollar policies: one if employed next month and
+one if not employed next month. For a household that is already not employed,
+the second branch means its current status continues; it is not a fresh job-loss
+shock and should not trigger another automatic spending cut. For an employed
+household, the second branch does represent losing or leaving work before next
+month. Do not rebuild a prudent budget from zero. The
+baseline committed and discretionary amounts are an origin-safe estimate of
+this household's recent typical monthly expenditures, expressed in the same
+dollar scale as its income and balance sheet. Treat that estimate as the
+household's current normal spending level; it is not a newly observed bank
+statement. For each employment branch, return the total
+nominal dollars this household will actually spend next month, not an adjustment,
+residual, prudent budget, or recommendation. Include ordinary recurring purchases,
+expected price changes, known bill changes, and actual quantity or habit changes.
+If the household buys the same basket while prices rise, next month's nominal
+expenditure should normally be higher. Do not copy aggregate PCE growth or
+manufacture an aggregate forecast. Report unconstrained intended spending; do
+not reduce it merely to make all policy fields balance to income. Deterministic
+execution applies balances and constraints. deposit_change_intent_usd is signed: positive means adding to deposits,
+negative means drawing them down. extra_debt_payment_usd excludes the stated
+minimum payment. Do not force the five policy numbers to add to income; the
+executor reconciles them against the balance sheet.
 current_state.annualized_wage_income is current hourly wage times current
 monthly hours times 12; it is not a separate survey-income measure.
+current_state.monthly_household_earned_income is SCF family earned income. It is
+held fixed in this household-demand forecast because the data do not identify
+this respondent's wage share. Respondent employment must not be interpreted as
+the employment status of every earner in the household.
 
 For every p10/p50/p90 block, return finite numbers satisfying p10 <= p50 <=
 p90. Inflation must be within [-25, 40], income growth within [-50, 50], job
-loss probability within [0, 100], consumption change within [-100, 200], work
-hours within [0, 320], and job-search hours within [0, 200]. Planned work hours
+loss probability within [0, 100], work hours within [0, 320], and job-search hours within [0, 200]. Planned work hours
 are hours conditional on being employed next month; if currently unemployed,
 report hours conditional on finding work. The deterministic labor market uses
 the job-loss probability and employment_share to determine the expected employed
-share, then applies these conditional hours. Buffer months and all dollar
-intentions must be nonnegative.
+share, then applies these conditional hours. Consumption levels, debt-payment,
+and borrowing fields must be nonnegative; deposit change may be signed.
 
 INPUT
 {json.dumps(card, indent=2, sort_keys=True)}
@@ -231,13 +306,22 @@ Return exactly one JSON object with this shape:
   "expected_inflation_pct": {{"p10": 0.0, "p50": 0.0, "p90": 0.0}},
   "expected_income_growth_pct": {{"p10": 0.0, "p50": 0.0, "p90": 0.0}},
   "job_loss_probability_pct": {{"p10": 0.0, "p50": 0.0, "p90": 0.0}},
-  "planned_consumption_change_pct": {{"p10": 0.0, "p50": 0.0, "p90": 0.0}},
   "planned_work_hours": {{"p10": 0.0, "p50": 0.0, "p90": 0.0}},
   "planned_job_search_hours": {{"p10": 0.0, "p50": 0.0, "p90": 0.0}},
-  "target_buffer_months": 0.0,
-  "buffer_contribution_intent_usd": 0.0,
-  "debt_payment_intent_usd": 0.0,
-  "borrowing_intent_usd": 0.0,
+  "employed_policy": {{
+    "next_month_committed_consumption_nominal_usd": 0.0,
+    "next_month_discretionary_consumption_nominal_usd": 0.0,
+    "deposit_change_intent_usd": 0.0,
+    "extra_debt_payment_usd": 0.0,
+    "borrowing_intent_usd": 0.0
+  }},
+  "not_employed_policy": {{
+    "next_month_committed_consumption_nominal_usd": 0.0,
+    "next_month_discretionary_consumption_nominal_usd": 0.0,
+    "deposit_change_intent_usd": 0.0,
+    "extra_debt_payment_usd": 0.0,
+    "borrowing_intent_usd": 0.0
+  }},
   "reason_codes": ["short_machine_readable_reason"]
 }}
 """.strip()
@@ -253,21 +337,31 @@ def fixture_response(card: Mapping[str, Any]) -> dict[str, Any]:
     employed = bool(state.get("employed"))
     inflation = 3.1
     income = 0.4 if employed else -1.8
-    job_risk = 12.0 if employed else 65.0
-    consumption = -0.8 if low_liquidity else 0.2
+    job_risk = 12.0 if employed else 0.0
+    committed = float(state.get("baseline_committed_consumption") or monthly * 0.65)
+    discretionary = max(0.0, monthly - committed)
     return {
         "prompt_version": HOUSEHOLD_PROMPT_VERSION,
         "household_id": card["household"]["household_id"],
         "expected_inflation_pct": {"p10": inflation - 1.2, "p50": inflation, "p90": inflation + 1.8},
         "expected_income_growth_pct": {"p10": income - 2.0, "p50": income, "p90": income + 2.0},
         "job_loss_probability_pct": {"p10": max(0.0, job_risk - 8.0), "p50": job_risk, "p90": min(100.0, job_risk + 16.0)},
-        "planned_consumption_change_pct": {"p10": consumption - 2.0, "p50": consumption, "p90": consumption + 2.0},
         "planned_work_hours": {"p10": 120.0 if employed else 0.0, "p50": 160.0 if employed else 0.0, "p90": 180.0 if employed else 40.0},
         "planned_job_search_hours": {"p10": 1.0, "p50": 4.0 if employed else 30.0, "p90": 12.0 if employed else 80.0},
-        "target_buffer_months": 3.0 if low_liquidity else 5.0,
-        "buffer_contribution_intent_usd": monthly * (0.02 if low_liquidity else 0.08),
-        "debt_payment_intent_usd": min(debt, max(0.0, monthly * (0.04 if low_liquidity else 0.1))),
-        "borrowing_intent_usd": max(0.0, monthly - liquid) * (0.15 if low_liquidity else 0.0),
+        "employed_policy": {
+            "next_month_committed_consumption_nominal_usd": committed,
+            "next_month_discretionary_consumption_nominal_usd": discretionary,
+            "deposit_change_intent_usd": monthly * (0.01 if low_liquidity else 0.04),
+            "extra_debt_payment_usd": min(debt, monthly * 0.03),
+            "borrowing_intent_usd": 0.0,
+        },
+        "not_employed_policy": {
+            "next_month_committed_consumption_nominal_usd": committed * 0.92,
+            "next_month_discretionary_consumption_nominal_usd": discretionary * 0.45,
+            "deposit_change_intent_usd": -min(liquid, monthly * 0.35),
+            "extra_debt_payment_usd": 0.0,
+            "borrowing_intent_usd": max(0.0, monthly - liquid) * 0.15,
+        },
         "reason_codes": ["fixture_liquidity_and_employment_state"],
     }
 
@@ -278,13 +372,10 @@ _PAYLOAD_FIELDS = {
     "expected_inflation_pct",
     "expected_income_growth_pct",
     "job_loss_probability_pct",
-    "planned_consumption_change_pct",
     "planned_work_hours",
     "planned_job_search_hours",
-    "target_buffer_months",
-    "buffer_contribution_intent_usd",
-    "debt_payment_intent_usd",
-    "borrowing_intent_usd",
+    "employed_policy",
+    "not_employed_policy",
     "reason_codes",
 }
 
@@ -300,9 +391,9 @@ def normalize_household_payload(payload: Mapping[str, Any], household_id: str) -
         raise ValueError("household response identity mismatch")
     reasons = payload["reason_codes"]
     if not isinstance(reasons, list) or not reasons or not all(
-        isinstance(reason, str) and 0 < len(reason) <= 80 for reason in reasons
+        isinstance(reason, str) and 0 < len(reason) <= 240 for reason in reasons
     ):
-        raise ValueError("reason_codes must be a non-empty list of short strings")
+        raise ValueError("reason_codes must be a non-empty list of strings up to 240 characters")
 
     def triplet(name: str) -> QuantileTriplet:
         value = payload[name]
@@ -310,17 +401,32 @@ def normalize_household_payload(payload: Mapping[str, Any], household_id: str) -
             raise ValueError(f"{name} must contain only p10/p50/p90")
         return QuantileTriplet(float(value["p10"]), float(value["p50"]), float(value["p90"]))
 
+    def policy(name: str) -> HouseholdPolicyBranch:
+        value = payload[name]
+        fields = {
+            "next_month_committed_consumption_nominal_usd",
+            "next_month_discretionary_consumption_nominal_usd",
+            "deposit_change_intent_usd",
+            "extra_debt_payment_usd",
+            "borrowing_intent_usd",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ValueError(f"{name} policy schema mismatch")
+        return HouseholdPolicyBranch(**{field: float(value[field]) for field in fields})
+
     response = HouseholdResponse(
         expected_inflation_pct=triplet("expected_inflation_pct"),
         expected_income_growth_pct=triplet("expected_income_growth_pct"),
         job_loss_probability_pct=triplet("job_loss_probability_pct"),
-        planned_consumption_change_pct=triplet("planned_consumption_change_pct"),
+        planned_consumption_change_pct=None,
         planned_work_hours=triplet("planned_work_hours"),
         planned_job_search_hours=triplet("planned_job_search_hours"),
-        target_buffer_months=float(payload["target_buffer_months"]),
-        buffer_contribution_intent_usd=float(payload["buffer_contribution_intent_usd"]),
-        debt_payment_intent_usd=float(payload["debt_payment_intent_usd"]),
-        borrowing_intent_usd=float(payload["borrowing_intent_usd"]),
+        target_buffer_months=0.0,
+        buffer_contribution_intent_usd=0.0,
+        debt_payment_intent_usd=0.0,
+        borrowing_intent_usd=0.0,
+        employed_policy=policy("employed_policy"),
+        not_employed_policy=policy("not_employed_policy"),
     )
     response.validate()
     return response

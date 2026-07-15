@@ -1,4 +1,4 @@
-"""Run the household ecology recursively over historical rolling origins."""
+"""Run the household ecology over historical rolling one-month origins."""
 
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ from .ecology import (
 )
 
 
-SCHEMA_VERSION = "household_ecology_retrospective_v3"
-MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v2"
+SCHEMA_VERSION = "household_ecology_retrospective_v4"
+MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v3"
 METRIC_MAPPINGS: dict[str, dict[str, str]] = {
     "consumption_growth_pct": {
         "target_name": "pce_growth_pct",
@@ -32,17 +32,16 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "actual_transform": "identity",
         "mapping_quality": "closest_aggregate_proxy",
         "score_mode": "full",
-        "note": "Month-over-month ecology nominal household consumption growth mapped to month-over-month nominal PCE growth.",
+        "note": "Population-weighted feasible spending change from the origin-safe household baseline, mapped to first-release month-over-month nominal PCE growth.",
     },
-    "saving_rate_pct": {
+    "saving_rate_change_pp": {
         "target_name": "personal_saving_rate_change",
         "series_id": "PSAVERT",
-        "actual_field": "first_release_value",
+        "actual_field": "target_value",
         "actual_transform": "identity",
-        "source_value_semantics": "first_release_series_level_not_derived_change_target",
         "mapping_quality": "directional_proxy",
-        "score_mode": "descriptive_only",
-        "note": "Ecology income-less-consumption saving-rate level mapped to the raw first-release PSAVERT level; taxes and transfers are absent from the ecology.",
+        "score_mode": "direction_only",
+        "note": "Change in the ecology saving rate, using wage, business, non-wage, and transfer income, mapped to the first-release change in PSAVERT.",
     },
     "revolving_credit_growth_pct": {
         "target_name": "revolving_credit_growth_pct",
@@ -52,24 +51,6 @@ METRIC_MAPPINGS: dict[str, dict[str, str]] = {
         "mapping_quality": "directional_proxy",
         "score_mode": "direction_only",
         "note": "Ecology revolving-debt growth mapped to aggregate revolving consumer-credit growth.",
-    },
-    "employment_rate_change_pp": {
-        "target_name": "unemployment_rate_level",
-        "series_id": "UNRATE",
-        "actual_field": "first_release_value",
-        "actual_transform": "negative_first_difference",
-        "mapping_quality": "directional_proxy",
-        "score_mode": "direction_only",
-        "note": "Change in the ecology employed-household share mapped to the negative first-release change in UNRATE; levels are not compared because the cohort denominator is not the official labor force.",
-    },
-    "price_growth_pct": {
-        "target_name": "pce_price_growth_pct",
-        "series_id": "PCEPI",
-        "actual_field": "target_value",
-        "actual_transform": "identity",
-        "mapping_quality": "directional_proxy",
-        "score_mode": "direction_only",
-        "note": "Ecology unit-price growth mapped to PCE price-index growth.",
     },
 }
 SCENARIOS = ("downside", "median", "upside")
@@ -90,6 +71,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-live-calls", type=int, default=0)
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--state-policy",
+        choices=("rolling_reanchored", "recursive"),
+        default="rolling_reanchored",
+    )
     parser.add_argument(
         "--prospective-run",
         type=Path,
@@ -191,8 +177,8 @@ def _prospective_rows(run_dir: Path | None) -> pd.DataFrame:
 def _chart_subtitle(joined: pd.DataFrame, model: str) -> str:
     origins = pd.to_datetime(joined["origin_month"])
     return (
-        f"{model} rolling origins {origins.min():%b %Y}-{origins.max():%b %Y}; first origin is "
-        "survey-seeded and unscored; later origins are recursive. Shading is downside-upside."
+        f"{model} rolling origins {origins.min():%b %Y}-{origins.max():%b %Y}; every origin is "
+        "re-anchored to the fixed SCE-SCF household state and origin-visible public information."
     )
 
 
@@ -217,11 +203,10 @@ def _write_chart(
     import matplotlib.pyplot as plt
 
     labels = {
-        "cumulative_consumption_index": "Nominal consumption index (start=100)",
+        "cumulative_consumption_index": "Compounded one-step rates (start=100)",
         "consumption_growth_pct": "Consumption growth (%)",
-        "revolving_credit_growth_pct": "Credit growth (sign proxy)",
-        "employment_rate_change_pp": "Employment change (sign proxy)",
-        "price_growth_pct": "Price growth (sign proxy)",
+        "saving_rate_change_pp": "Saving-rate change (pp, sign proxy)",
+        "revolving_credit_growth_pct": "Credit growth (%, sign proxy)",
     }
     fig, axes = plt.subplots(len(labels), 1, figsize=(11.5, 11.5), sharex=True)
     actual_color = "#2463A6"
@@ -231,7 +216,9 @@ def _write_chart(
         if metric == "cumulative_consumption_index":
             subset = joined.loc[
                 joined["metric"].eq("consumption_growth_pct")
-                & joined["state_provenance"].eq("prior_simulated_month")
+                & joined["state_provenance"].isin(
+                    ["survey_seeded_initial_state", "fixed_survey_scf_anchor"]
+                )
             ].copy()
             pivot = subset.pivot(index="target_month", columns="scenario", values="prediction")
             dates = pd.to_datetime(pivot.index)
@@ -248,7 +235,7 @@ def _write_chart(
                 color=prediction_color,
                 marker="s",
                 linewidth=1.8,
-                label="LLM recursive median",
+                label="LLM one-step median",
             )
             axis.plot(
                 index_dates,
@@ -258,6 +245,21 @@ def _write_chart(
                 linewidth=2.1,
                 label="First-release actual",
             )
+            if "routine_nominal_spending_drift_pct" in subset:
+                routine_growth = (
+                    subset.drop_duplicates("target_month")
+                    .set_index("target_month")
+                    .loc[pivot.index, "routine_nominal_spending_drift_pct"]
+                    .to_numpy(dtype=float)
+                )
+                axis.plot(
+                    index_dates,
+                    _cumulative_growth_index(routine_growth),
+                    color="#6B6B6B",
+                    linestyle="--",
+                    linewidth=1.5,
+                    label="Origin-visible routine anchor",
+                )
             axis.set_ylabel(label, fontsize=9, labelpad=9)
             axis.grid(axis="y", color="#D7D7D7", linewidth=0.6)
             axis.spines[["top", "right"]].set_visible(False)
@@ -271,15 +273,18 @@ def _write_chart(
             .loc[pivot.index, "actual"]
             .to_numpy(dtype=float)
         )
-        axis.fill_between(
-            dates,
-            pivot["downside"].to_numpy(dtype=float),
-            pivot["upside"].to_numpy(dtype=float),
-            color=band_color,
-            alpha=0.38,
-            linewidth=0,
-            label="One-step scenario range" if metric == "consumption_growth_pct" else None,
-        )
+        lower = pivot["downside"].to_numpy(dtype=float)
+        upper = pivot["upside"].to_numpy(dtype=float)
+        if not np.allclose(lower, upper, atol=1e-12, rtol=0.0):
+            axis.fill_between(
+                dates,
+                lower,
+                upper,
+                color=band_color,
+                alpha=0.38,
+                linewidth=0,
+                label="One-step scenario range" if metric == "consumption_growth_pct" else None,
+            )
         axis.plot(
             dates,
             pivot["median"].to_numpy(dtype=float),
@@ -296,25 +301,23 @@ def _write_chart(
             linewidth=2.1,
             label="First-release actual" if metric == "consumption_growth_pct" else None,
         )
-        initialization = subset.loc[
-            subset["state_provenance"].eq("survey_seeded_initial_state")
-            & subset["scenario"].eq("median")
-        ]
-        if not initialization.empty:
-            axis.scatter(
-                pd.to_datetime(initialization["target_month"]),
-                initialization["prediction"],
-                marker="s",
-                s=58,
-                facecolors="white",
-                edgecolors="#777777",
-                linewidths=1.8,
-                zorder=5,
-                label=(
-                    "Survey-seeded transition, not scored"
-                    if metric == "consumption_growth_pct"
-                    else None
-                ),
+        if (
+            metric == "consumption_growth_pct"
+            and "routine_nominal_spending_drift_pct" in subset
+        ):
+            routine = (
+                subset.drop_duplicates("target_month")
+                .set_index("target_month")
+                .loc[pivot.index, "routine_nominal_spending_drift_pct"]
+                .to_numpy(dtype=float)
+            )
+            axis.plot(
+                dates,
+                routine,
+                color="#6B6B6B",
+                linestyle="--",
+                linewidth=1.5,
+                label="Origin-visible routine anchor",
             )
         marker = prospective.loc[
             prospective["metric"].eq(metric) & prospective["scenario"].eq("median")
@@ -338,7 +341,7 @@ def _write_chart(
     axes[-1].xaxis.set_major_locator(mdates.MonthLocator())
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
     fig.suptitle(
-        "Household ecology: one-month predictions vs first-release outcomes",
+        "Household ecology: rolling one-month estimates vs first-release outcomes",
         x=0.10,
         y=0.995,
         ha="left",
@@ -372,7 +375,7 @@ def _write_chart(
     fig.text(
         0.08,
         0.012,
-        f"Sources: recursive {model} household ecology; ALFRED/FRED first releases. First transition is unscored; credit, employment, and price mappings support signs only.",
+        f"Sources: rolling {model} household ecology; ALFRED/FRED first releases. Consumption is magnitude-scored; saving and credit mappings support signs only.",
         ha="left",
         fontsize=8.5,
         color="#555555",
@@ -389,6 +392,8 @@ def _joined_rows(forecasts: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame
         "state_provenance",
         "scenario",
     ]
+    if "routine_nominal_spending_drift_pct" in forecasts.columns:
+        id_columns.append("routine_nominal_spending_drift_pct")
     long = forecasts.melt(
         id_vars=id_columns,
         value_vars=list(METRIC_MAPPINGS),
@@ -408,12 +413,17 @@ def _joined_rows(forecasts: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame
     return joined.sort_values(["target_month", "metric", "scenario"]).reset_index(drop=True)
 
 
-def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
+def _score_rows(joined: pd.DataFrame, *, state_policy: str = "rolling_reanchored") -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for (scenario, metric), group in joined.groupby(["scenario", "metric"], sort=True):
-        eligible = group.loc[group["state_provenance"].eq("prior_simulated_month")]
+        eligible_states = (
+            ["survey_seeded_initial_state", "fixed_survey_scf_anchor"]
+            if state_policy == "rolling_reanchored"
+            else ["prior_simulated_month"]
+        )
+        eligible = group.loc[group["state_provenance"].isin(eligible_states)]
         if eligible.empty:
-            raise ValueError("retrospective score has no recursive observations")
+            raise ValueError("retrospective score has no eligible rolling observations")
         error = eligible["prediction"].to_numpy(dtype=float) - eligible["actual"].to_numpy(dtype=float)
         actual = eligible["actual"].to_numpy(dtype=float)
         prediction = eligible["prediction"].to_numpy(dtype=float)
@@ -455,6 +465,7 @@ def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    state_policy = getattr(args, "state_policy", "rolling_reanchored")
     origins = _parse_origins(args.origins)
     _validate_origins(args.bundle, origins)
     if args.mode != "live" and args.max_live_calls != 0:
@@ -491,13 +502,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 households=args.households,
                 history=args.history,
                 bundle=args.bundle,
-                state_json=prior_state,
+                state_json=(prior_state if state_policy == "recursive" else None),
+                state_policy=state_policy,
                 expected_replay_sha256=None,
                 cache_dir=args.cache_dir,
                 output_dir=run_dir,
             )
             state_provenance = (
-                "prior_simulated_month" if prior_state is not None else "survey_seeded_initial_state"
+                "fixed_survey_scf_anchor"
+                if state_policy == "rolling_reanchored"
+                else (
+                    "prior_simulated_month"
+                    if prior_state is not None
+                    else "survey_seeded_initial_state"
+                )
             )
             manifest = run_ecology(child_args)
             remaining_calls -= int(manifest["live_call_count"])
@@ -508,13 +526,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             frame.insert(0, "target_month", manifest["target_month"])
             frame.insert(0, "origin_month", manifest["origin_month"])
             forecast_frames.append(frame)
-            prior_state = run_dir / "median_next_state.json"
+            if state_policy == "recursive":
+                prior_state = run_dir / "median_next_state.json"
 
         forecasts = pd.concat(forecast_frames, ignore_index=True)
         target_months = list(dict.fromkeys(forecasts["target_month"].astype(str)))
         actuals = _realization_rows(args.targets, target_months)
         joined = _joined_rows(forecasts, actuals)
-        scores = _score_rows(joined)
+        scores = _score_rows(joined, state_policy=state_policy)
 
         forecasts.to_csv(staging / "one_step_forecasts_by_origin.csv", index=False)
         actuals.to_csv(staging / "realized_outcomes_by_target.csv", index=False)
@@ -531,17 +550,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "schema_version": SCHEMA_VERSION,
             "mapping_schema_version": MAPPING_SCHEMA_VERSION,
             "evaluation_status": "retrospective_diagnostic_not_confirmatory",
-            "state_policy": "median_recursive_spine",
+            "state_policy": state_policy,
             "outcomes_loaded_after_all_forecasts": True,
             "forecast_process_opened_realization_files": False,
-            "score_eligibility": "prior_simulated_month_only",
-            "initialization_transition": "survey_seeded_initial_state_unscored",
+            "score_eligibility": (
+                "all_rolling_one_month_origins"
+                if state_policy == "rolling_reanchored"
+                else "recursive_transitions_after_initialization"
+            ),
+            "initialization_transition": "fixed_survey_scf_anchor_reinitialized_at_each_rolling_origin",
             "forecast_semantics": {
-                "consumption_growth_pct": "current simulated month versus immediately preceding simulated month",
-                "price_growth_pct": "current to next simulated unit-price change",
+                "consumption_growth_pct": "population-weighted feasible target-month spending versus the origin-safe synthetic estimate of recent typical household spending",
                 "revolving_credit_growth_pct": "simulated month opening to closing debt-stock change",
-                "saving_rate_pct": "simulated wage income less consumption, divided by wage income",
-                "employment_rate_change_pp": "simulated employed-household share change from prior month",
+                "saving_rate_change_pp": "change in household saving as a share of modeled wage, business, non-wage, and transfer income",
             },
             "origin_months": origins,
             "target_months": target_months,
@@ -594,9 +615,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         report = [
             "# Household Ecology Retrospective",
             "",
-            "This diagnostic runs the current household ecology recursively over historical origin vintages. "
-            "The first transition is survey-seeded and excluded from scores; the median simulated state is then carried into each later origin. "
-            "The forecast process opens only origin and history files. Realized outcomes are loaded only after every forecast is complete.",
+            "This diagnostic runs the current household ecology as rolling one-month estimates over historical origin vintages. "
+            "Every origin is scored in rolling mode. Each forecast restarts from the same fixed SCE-SCF household anchor; only information available at that origin updates. Simulated balances and forecast errors never enter the next origin. "
+            "The forecast process does not open realization values. Realized outcomes are loaded only after every forecast is complete.",
             "",
             "It is not confirmatory evidence. The dates are historical and the model may know them. Its purpose is to reveal sign, scale, and mapping failures before prospective outcomes arrive.",
             "",

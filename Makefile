@@ -1,4 +1,4 @@
-.PHONY: all check test ecology-fixture ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay household-cohort vintage-bundle origin-snapshot
+.PHONY: all check test ecology-fixture ecology-financial-states ecology-live-canary ecology-live-200 ecology-current-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay household-cohort vintage-bundle origin-snapshot
 
 ORIGIN ?= 2026-07-01
 AS_OF ?= 2026-07-10
@@ -6,14 +6,14 @@ MODEL ?= gpt-5.5
 ECOLOGY_WORKERS ?= 8
 RETROSPECTIVE_WORKERS ?= 16
 ORIGIN_SNAPSHOT ?= work/ecology_origins/$(AS_OF).json
-ECOLOGY_CACHE ?= work/ecology_cache_200_july_v7
-ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv
+ECOLOGY_CACHE ?= work/ecology_cache_200_july_v18
+ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v3/initial_households_200.csv
 ECOLOGY_HISTORY ?= work/persona_beliefs/persistent_household_scale_v1/selected_observed_history.csv
 ECOLOGY_BUNDLE ?= work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
 ECOLOGY_FIXTURE_DIR := examples/ecology_fixture
-CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v7_current
-RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v7
-RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v7
+CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v18_current
+RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v18
+RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v18
 
 all: check test
 
@@ -40,6 +40,15 @@ ecology-fixture:
 		--workers $(ECOLOGY_WORKERS) \
 		--max-live-calls 0 \
 		--output-dir outputs/household_ecology_fixture_v1
+
+ecology-financial-states:
+	mkdir -p work/persona_beliefs/persistent_household_scale_v3
+	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_financial_states \
+		--households work/persona_beliefs/persistent_household_scale_v1/initial_households_200.csv \
+		--scf-zip work/scf/2022/scfp2022s.zip \
+		--output-csv $(ECOLOGY_HOUSEHOLDS) \
+		--manifest work/persona_beliefs/persistent_household_scale_v3/financial_state_manifest.json \
+		--seed 20260714
 
 ecology-live-canary:
 	rm -rf outputs/household_ecology_canary_v1
@@ -112,7 +121,7 @@ ecology-retrospective-live:
 		--workers $(RETROSPECTIVE_WORKERS) \
 		--max-live-calls 920 \
 		--cache-dir $(RETROSPECTIVE_CACHE) \
-		--prospective-run $(CURRENT_RUN_DIR) \
+		--state-policy rolling_reanchored \
 		--output-dir $(RETROSPECTIVE_DIR)
 
 ecology-retrospective-replay:
@@ -130,7 +139,7 @@ ecology-retrospective-replay:
 		--workers $(RETROSPECTIVE_WORKERS) \
 		--max-live-calls 0 \
 		--cache-dir $(RETROSPECTIVE_CACHE) \
-		--prospective-run $(CURRENT_RUN_DIR) \
+		--state-policy rolling_reanchored \
 		--output-dir $(RETROSPECTIVE_DIR)
 
 household-cohort:

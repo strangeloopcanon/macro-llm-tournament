@@ -8,8 +8,8 @@ from typing import Any
 # Sub-micro-dollar tolerance absorbs floating-point summation at 200-household
 # scale while remaining far below any economically meaningful transaction.
 ACCOUNTING_TOLERANCE = 1e-6
-ECOLOGY_SCHEMA_VERSION = "household_first_monthly_ecology_v1"
-HOUSEHOLD_RESPONSE_SCHEMA_VERSION = "household_first_response_v1"
+ECOLOGY_SCHEMA_VERSION = "household_first_monthly_ecology_v4"
+HOUSEHOLD_RESPONSE_SCHEMA_VERSION = "household_conditional_nominal_policy_v5"
 
 
 def _require_finite(value: float, field_name: str) -> float:
@@ -81,17 +81,52 @@ class HouseholdTrajectory:
 
 
 @dataclass(frozen=True)
+class HouseholdPolicyBranch:
+    """A one-month household plan conditional on employment state."""
+
+    next_month_committed_consumption_nominal_usd: float
+    next_month_discretionary_consumption_nominal_usd: float
+    deposit_change_intent_usd: float
+    extra_debt_payment_usd: float
+    borrowing_intent_usd: float
+
+    def validate(self, field_name: str) -> None:
+        _require_nonnegative(
+            self.next_month_committed_consumption_nominal_usd,
+            f"{field_name}.next_month_committed_consumption_nominal_usd",
+        )
+        _require_nonnegative(
+            self.next_month_discretionary_consumption_nominal_usd,
+            f"{field_name}.next_month_discretionary_consumption_nominal_usd",
+        )
+        _require_finite(
+            self.deposit_change_intent_usd,
+            f"{field_name}.deposit_change_intent_usd",
+        )
+        _require_nonnegative(
+            self.extra_debt_payment_usd,
+            f"{field_name}.extra_debt_payment_usd",
+        )
+        _require_nonnegative(
+            self.borrowing_intent_usd,
+            f"{field_name}.borrowing_intent_usd",
+        )
+
+
+@dataclass(frozen=True)
 class HouseholdResponse:
     expected_inflation_pct: QuantileTriplet
     expected_income_growth_pct: QuantileTriplet
     job_loss_probability_pct: QuantileTriplet
-    planned_consumption_change_pct: QuantileTriplet
+    planned_consumption_change_pct: QuantileTriplet | None
     planned_work_hours: QuantileTriplet
     planned_job_search_hours: QuantileTriplet
     target_buffer_months: float
     buffer_contribution_intent_usd: float
     debt_payment_intent_usd: float
     borrowing_intent_usd: float
+    employed_policy: HouseholdPolicyBranch | None = None
+    not_employed_policy: HouseholdPolicyBranch | None = None
 
     def validate(self) -> None:
         self.expected_inflation_pct.validate(
@@ -109,11 +144,26 @@ class HouseholdResponse:
             lower_bound=0.0,
             upper_bound=100.0,
         )
-        self.planned_consumption_change_pct.validate(
-            "planned_consumption_change_pct",
-            lower_bound=-100.0,
-            upper_bound=200.0,
+        has_legacy_consumption = self.planned_consumption_change_pct is not None
+        has_conditional_policy = (
+            self.employed_policy is not None and self.not_employed_policy is not None
         )
+        if has_legacy_consumption == has_conditional_policy:
+            raise ValueError(
+                "household response must provide exactly one of legacy consumption "
+                "change or employed/not-employed policy branches"
+            )
+        if self.planned_consumption_change_pct is not None:
+            self.planned_consumption_change_pct.validate(
+                "planned_consumption_change_pct",
+                lower_bound=-100.0,
+                upper_bound=200.0,
+            )
+        else:
+            assert self.employed_policy is not None
+            assert self.not_employed_policy is not None
+            self.employed_policy.validate("employed_policy")
+            self.not_employed_policy.validate("not_employed_policy")
         self.planned_work_hours.validate(
             "planned_work_hours",
             lower_bound=0.0,
@@ -148,6 +198,12 @@ class HouseholdState:
     liquid_buffer_floor_months: float = 0.5
     subsistence_consumption_share: float = 0.45
     population_weight: float = 1.0
+    monthly_household_earned_income_usd: float = 0.0
+    monthly_nonwage_income_usd: float = 0.0
+    monthly_transfer_income_usd: float = 0.0
+    baseline_committed_consumption_usd: float | None = None
+    baseline_discretionary_consumption_usd: float | None = None
+    minimum_debt_payment_usd: float = 0.0
 
     def validate(self) -> None:
         if not self.household_id:
@@ -184,6 +240,28 @@ class HouseholdState:
         if share < 0.0 or share > 1.0:
             raise ValueError("subsistence_consumption_share must be between 0 and 1")
         _require_nonnegative(self.population_weight, "population_weight")
+        _require_nonnegative(
+            self.monthly_household_earned_income_usd,
+            "monthly_household_earned_income_usd",
+        )
+        _require_nonnegative(
+            self.monthly_nonwage_income_usd,
+            "monthly_nonwage_income_usd",
+        )
+        _require_nonnegative(
+            self.monthly_transfer_income_usd,
+            "monthly_transfer_income_usd",
+        )
+        for field_name, value in (
+            ("baseline_committed_consumption_usd", self.baseline_committed_consumption_usd),
+            ("baseline_discretionary_consumption_usd", self.baseline_discretionary_consumption_usd),
+        ):
+            if value is not None:
+                _require_nonnegative(value, field_name)
+        _require_nonnegative(
+            self.minimum_debt_payment_usd,
+            "minimum_debt_payment_usd",
+        )
 
 
 @dataclass(frozen=True)
@@ -398,6 +476,23 @@ def household_response_schema() -> dict[str, Any]:
         },
         "rule": "p10 <= p50 <= p90",
     }
+    policy_block = {
+        "type": "object",
+        "required": [
+            "next_month_committed_consumption_nominal_usd",
+            "next_month_discretionary_consumption_nominal_usd",
+            "deposit_change_intent_usd",
+            "extra_debt_payment_usd",
+            "borrowing_intent_usd",
+        ],
+        "properties": {
+            "next_month_committed_consumption_nominal_usd": {"type": "number", "minimum": 0.0},
+            "next_month_discretionary_consumption_nominal_usd": {"type": "number", "minimum": 0.0},
+            "deposit_change_intent_usd": {"type": "number"},
+            "extra_debt_payment_usd": {"type": "number", "minimum": 0.0},
+            "borrowing_intent_usd": {"type": "number", "minimum": 0.0},
+        },
+    }
     return {
         "schema_version": HOUSEHOLD_RESPONSE_SCHEMA_VERSION,
         "type": "object",
@@ -407,44 +502,26 @@ def household_response_schema() -> dict[str, Any]:
             "expected_inflation_pct",
             "expected_income_growth_pct",
             "job_loss_probability_pct",
-            "planned_consumption_change_pct",
             "planned_work_hours",
             "planned_job_search_hours",
-            "target_buffer_months",
-            "buffer_contribution_intent_usd",
-            "debt_payment_intent_usd",
-            "borrowing_intent_usd",
+            "employed_policy",
+            "not_employed_policy",
             "reason_codes",
         ],
         "properties": {
-            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v7"},
+            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v14"},
             "household_id": {"type": "string", "minLength": 1},
             "expected_inflation_pct": quantile_block,
             "expected_income_growth_pct": quantile_block,
             "job_loss_probability_pct": quantile_block,
-            "planned_consumption_change_pct": quantile_block,
             "planned_work_hours": quantile_block,
             "planned_job_search_hours": quantile_block,
-            "target_buffer_months": {
-                "type": "number",
-                "minimum": 0.0,
-            },
-            "buffer_contribution_intent_usd": {
-                "type": "number",
-                "minimum": 0.0,
-            },
-            "debt_payment_intent_usd": {
-                "type": "number",
-                "minimum": 0.0,
-            },
-            "borrowing_intent_usd": {
-                "type": "number",
-                "minimum": 0.0,
-            },
+            "employed_policy": policy_block,
+            "not_employed_policy": policy_block,
             "reason_codes": {
                 "type": "array",
                 "minItems": 1,
-                "items": {"type": "string", "maxLength": 80},
+                "items": {"type": "string", "maxLength": 240},
             },
         },
         "trajectory_mapping": {
@@ -452,7 +529,7 @@ def household_response_schema() -> dict[str, Any]:
                 "inflation_pct": "expected_inflation_pct.p90",
                 "income_growth_pct": "expected_income_growth_pct.p10",
                 "job_loss_probability_pct": "job_loss_probability_pct.p90",
-                "consumption_change_pct": "planned_consumption_change_pct.p10",
+                "consumption_policy": "employed/not_employed_policy mixed by employment share",
                 "planned_work_hours": "planned_work_hours.p10",
                 "planned_job_search_hours": "planned_job_search_hours.p90",
             },
@@ -460,7 +537,7 @@ def household_response_schema() -> dict[str, Any]:
                 "inflation_pct": "expected_inflation_pct.p50",
                 "income_growth_pct": "expected_income_growth_pct.p50",
                 "job_loss_probability_pct": "job_loss_probability_pct.p50",
-                "consumption_change_pct": "planned_consumption_change_pct.p50",
+                "consumption_policy": "employed/not_employed_policy mixed by employment share",
                 "planned_work_hours": "planned_work_hours.p50",
                 "planned_job_search_hours": "planned_job_search_hours.p50",
             },
@@ -468,7 +545,7 @@ def household_response_schema() -> dict[str, Any]:
                 "inflation_pct": "expected_inflation_pct.p10",
                 "income_growth_pct": "expected_income_growth_pct.p90",
                 "job_loss_probability_pct": "job_loss_probability_pct.p10",
-                "consumption_change_pct": "planned_consumption_change_pct.p90",
+                "consumption_policy": "employed/not_employed_policy mixed by employment share",
                 "planned_work_hours": "planned_work_hours.p90",
                 "planned_job_search_hours": "planned_job_search_hours.p10",
             },

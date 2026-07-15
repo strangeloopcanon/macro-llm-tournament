@@ -4,10 +4,10 @@ This project asks whether LLM-updated household beliefs can produce useful macro
 forecasts and counterfactuals inside an explicit, accounting-constrained economy.
 Real survey data supplies household heterogeneity. Each household gets one tool-isolated
 LLM elicitation to report its beliefs and intended choices; deterministic code then
-enforces budgets, credit, production, employment, inventories, and settlement.
-Survey weights determine each household type's population mass, and annual job-loss
-risk is converted to a monthly hazard. The aggregate path emerges from those
-household decisions.
+enforces budgets, credit, production feasibility, inventories, and settlement.
+Survey weights determine each household type's population mass. The current forecasting
+experiment holds wages and respondent employment fixed so the aggregate demand path
+comes from household choices rather than an uncalibrated labor market.
 
 The household panel comes from the Federal Reserve Bank of New York's Survey of
 Consumer Expectations (SCE).
@@ -21,26 +21,23 @@ survey-seeded SCE household state + own history + as-of public information
                               |
           deterministic budget and credit feasibility
                               |
- household actions ---> aggregate employer ---> jobs, wages, output, prices
-         |                      |                         |
-         +------ credit intermediary <------------------+
-                                |
-                 next household and macro state
+ household actions ---> aggregate demand ---> production and inventories
+         |
+         +------ deterministic credit and settlement
 ```
 
-The first version deliberately has one aggregate employer and one credit
-intermediary. Firms and banks are not additional role-play agents. This keeps the
-economy interpretable while allowing demand, production, labor, prices, borrowing,
-debt repayment, defaults, and inventories to interact.
+Firms and banks are not role-play agents in the current version. Production follows
+expected sales with gradual inventory adjustment; credit and settlement are mechanical.
+That keeps the behavioral test focused on the 200 households.
 
 ## Current Result
 
 The corrected full run gave 200 GPT-5.5 households only information available by
 July 10, 2026, and froze their path for August before August outcomes were known.
-Every prompt now receives the exact engine state it will execute and says whether
-that state is survey-seeded or inherited. The median path has household intentions
-at **-3.64%** consumption growth and feasible consumption at **-3.77%**, with
-lower-liquidity households cutting more.
+The median path predicts **+0.28%** nominal consumption growth. A separate four-origin
+historical diagnostic gets the consumption direction right in **4/4** months, with
+RMSE **0.47 percentage points**. That is a large improvement over the retired ecology,
+but a simple origin-visible nominal-spending drift remains better at **0.24 points**.
 
 ### Run facts
 
@@ -51,32 +48,33 @@ lower-liquidity households cutting more.
 | One-month-ahead target | `2026-08-01` |
 | Provider and model | `codex_cli` / `gpt-5.5` |
 | Household responses | 200 accepted, one tool-isolated response per household |
-| Reproducibility check | 200 replay hits, 0 fresh calls |
-| Accounting | **PASS**, maximum residual `2.79e-09` |
-| Replay | **PASS**, exact economy hash reproduced |
+| Reproducibility check | 200 replay hits, 0 fresh calls, immutable live reference matched |
+| Accounting | **PASS**, maximum residual `1.12e-08` |
+| Replay | **PASS**, exact replay-equivalence hash reproduced |
 
 ### Forecast paths
 
 | Scenario | Consumption growth | Saving rate | Revolving-credit growth | Employment rate | Price growth |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Downside | -9.76% | 18.11% | -5.62% | 90.70% | -1.11% |
-| Median | -3.77% | 18.23% | -5.65% | 90.70% | -1.27% |
-| Upside | 1.50% | 18.67% | -5.66% | 90.70% | -1.50% |
+| Downside | 0.28% | 16.73% | -2.06% | 66.20% | 0.00% |
+| Median | 0.28% | 16.73% | -2.06% | 66.20% | 0.00% |
+| Upside | 0.28% | 16.73% | -2.06% | 66.20% | 0.00% |
 
-The population-weighted mean of household p50 responses implies **5.16%**
-inflation, **-0.80%** income growth, and a **9.12%** one-year job-loss
+The population-weighted mean of household p50 responses implies **5.01%**
+inflation, **-0.64%** income growth, and a **0.74%** next-month job-loss
 probability. In the median economy, 200 household types representing 200
-population-equivalent units execute `$915,697` of consumption, `$134,377` of
-debt payments, and `$11,922` of new borrowing.
+population-equivalent units execute `$3,118,296` of consumption, `$22,247` of
+debt payments, and `$2,244` of new borrowing. Scenario paths coincide in this
+fixed-labor diagnostic; they are not an uncertainty interval.
 
 ### Evidence boundary
 
 | This run shows | This run does not yet show |
 | --- | --- |
-| A branchable, recursive household microeconomy runs end to end. | That its August forecast is accurate. |
+| A 200-household demand economy runs end to end. | That its August forecast is accurate. |
 | Household heterogeneity affects feasible consumption and balance sheets. | That one origin validates the economy's dynamics. |
-| Production, inventories, employment, credit, and settlement have explicit counterparties. | That one aggregate employer is sufficient. |
-| All three scenarios satisfy household, employer, credit, and stock-flow accounting. | That coarse survey-mapped balance sheets equal measured household accounts. |
+| Production, inventories, credit, and settlement have explicit counterparties. | That firms or banks need LLM decision agents. |
+| All three scenarios satisfy household, employer, credit, and stock-flow accounting. | That SCE-conditioned SCF matches are linked household accounts. |
 
 The August outcome surface was unavailable and excluded when the forecast was
 frozen. The persistent cohort is initialized from March-April 2025 SCE
@@ -131,36 +129,34 @@ one-month-ahead `target_month`; the command verifies the frozen artifacts first
 and never rewrites the forecast manifest.
 
 To diagnose period-by-period scale and direction before the prospective August
-outcome arrives, run the current ecology recursively over the four available
+outcome arrives, run the current ecology independently over the four available
 post-cutoff historical origins:
 
 ```bash
 make ecology-retrospective-live
 ```
 
-This is explicitly retrospective, not confirmatory. It carries the median
-simulated state forward after an unscored survey-seeded initialization transition,
-opens only origin/history inputs during forecasting, loads first-release outcomes
-only after all forecasts finish, and writes both long-form predicted-versus-actual rows and a chart. It uses
-a separate cache and reads the frozen July-to-August run only to add its unscored
-August marker.
+This is explicitly retrospective, not confirmatory. Every origin restarts from the
+same fixed SCE-SCF household anchor, receives only origin-visible public information,
+and is scored as a one-month forecast. Simulated balances and errors never enter the
+next origin. Realizations load only after all forecasts finish.
 
 Once the response cache exists, `make ecology-retrospective-replay` reconstructs
 the same diagnostic with zero model calls.
 
-The current retrospective result is a negative: on the three valid recursive
-months, nominal-consumption RMSE is **5.48 percentage points** and the sign is
-wrong in all three. The chained prediction falls from 100 to **86.40** while the
-first-release PCE path rises to **102.14**. This is useful diagnosis, not evidence
-that the economy is already an accurate macro predictor.
+The current retrospective result is promising but not yet competitive. Nominal
+consumption has the right sign in **4/4** months and RMSE **0.47 percentage points**.
+The compounded LLM path reaches **100.90** versus first-release PCE at **102.63**.
+The origin-visible routine anchor reaches **101.75** and has lower RMSE (**0.24**),
+so the LLM households still underreact to normal nominal spending growth.
 
 ## Current Boundary
 
 - 200 persistent anonymized SCE households are available locally.
 - Their survey histories are append-only and availability dated.
-- Balance sheets remain coarse mappings from survey groups, not measured SCF-linked
-  household accounts.
-- The employer and credit intermediary are intentionally aggregate.
+- Financial states are deterministic SCE-conditioned matches to SCF 2022 households,
+  not linked or contemporaneous household accounts.
+- Wages and respondent employment are fixed in the active forecast diagnostic.
 - The present target is repeated one-month-ahead forecasting. Sectoral firms or
   additional institutions are justified only by stable errors across new origins.
 

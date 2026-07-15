@@ -12,6 +12,7 @@ from macro_llm_tournament.ecology_models import (
     CreditIntermediaryState,
     EmployerState,
     HouseholdResponse,
+    HouseholdPolicyBranch,
     HouseholdState,
     QuantileTriplet,
     household_response_schema,
@@ -46,10 +47,121 @@ def _response(
 
 
 class EcologyEngineTests(unittest.TestCase):
+    def test_dynamic_labor_rejects_unsplit_household_earned_income(self) -> None:
+        household = HouseholdState(
+            household_id="h1",
+            employer_id="firm",
+            deposit_balance_usd=500.0,
+            revolving_debt_usd=0.0,
+            revolving_credit_limit_usd=0.0,
+            hourly_wage_usd=0.0,
+            baseline_monthly_hours=160.0,
+            baseline_monthly_consumption_usd=800.0,
+            monthly_household_earned_income_usd=1_000.0,
+        )
+        employer = EmployerState(
+            employer_id="firm",
+            productivity_per_hour=5.0,
+            monthly_capacity_units=2_000.0,
+            inventory_units=0.0,
+            price_per_unit_usd=1.0,
+            target_headcount=1.0,
+            wage_offer_usd=20.0,
+        )
+        credit = CreditIntermediaryState(
+            intermediary_id="bank",
+            annual_interest_rate_pct=0.0,
+            minimum_payment_rate_pct=0.0,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "respondent-level earned-income split"
+        ):
+            run_monthly_ecology(
+                [household],
+                {"h1": _response()},
+                employer,
+                credit,
+                institution_mode="dynamic",
+            )
+
+    def test_household_demand_freezes_labor_state_but_dynamic_mode_branches(self) -> None:
+        household = HouseholdState(
+            household_id="h1",
+            employer_id="firm",
+            deposit_balance_usd=2_000.0,
+            revolving_debt_usd=0.0,
+            revolving_credit_limit_usd=2_000.0,
+            hourly_wage_usd=25.0,
+            baseline_monthly_hours=160.0,
+            baseline_monthly_consumption_usd=1_000.0,
+            employment_share=1.0,
+        )
+
+        def policy(job_loss: float) -> HouseholdResponse:
+            return HouseholdResponse(
+                expected_inflation_pct=QuantileTriplet(2.0, 3.0, 4.0),
+                expected_income_growth_pct=QuantileTriplet(-1.0, 1.0, 3.0),
+                job_loss_probability_pct=QuantileTriplet(job_loss, job_loss, job_loss),
+                planned_consumption_change_pct=None,
+                planned_work_hours=QuantileTriplet(160.0, 160.0, 160.0),
+                planned_job_search_hours=QuantileTriplet(0.0, 0.0, 0.0),
+                target_buffer_months=0.0,
+                buffer_contribution_intent_usd=0.0,
+                debt_payment_intent_usd=0.0,
+                borrowing_intent_usd=0.0,
+                employed_policy=HouseholdPolicyBranch(450.0, 550.0, 0.0, 0.0, 0.0),
+                not_employed_policy=HouseholdPolicyBranch(250.0, 250.0, -300.0, 0.0, 0.0),
+            )
+
+        employer = EmployerState(
+            employer_id="firm",
+            productivity_per_hour=10.0,
+            monthly_capacity_units=2_000.0,
+            inventory_units=80.0,
+            price_per_unit_usd=1.0,
+            target_headcount=0.0,
+            wage_offer_usd=25.0,
+            target_inventory_units=80.0,
+        )
+        credit = CreditIntermediaryState(
+            intermediary_id="bank",
+            annual_interest_rate_pct=18.0,
+            minimum_payment_rate_pct=3.0,
+        )
+        employed = run_monthly_ecology(
+            [household], {"h1": policy(0.0)}, employer, credit,
+            institution_mode="household_demand",
+        )
+        jobless = run_monthly_ecology(
+            [household], {"h1": policy(100.0)}, employer, credit,
+            institution_mode="household_demand",
+        )
+        dynamic_jobless = run_monthly_ecology(
+            [household], {"h1": policy(100.0)}, employer, credit,
+            institution_mode="dynamic",
+        )
+        self.assertAlmostEqual(employed.households[0].desired_consumption_usd, 1_000.0)
+        self.assertAlmostEqual(jobless.households[0].desired_consumption_usd, 1_000.0)
+        self.assertAlmostEqual(dynamic_jobless.households[0].desired_consumption_usd, 500.0)
+        self.assertEqual(jobless.households[0].employment_share_end, 1.0)
+        self.assertAlmostEqual(employed.employer.next_wage_offer_usd, 25.0)
+        self.assertAlmostEqual(employed.employer.next_price_per_unit_usd, 1.0)
+        self.assertLessEqual(employed.max_abs_residual(), ACCOUNTING_TOLERANCE)
+        self.assertLessEqual(jobless.max_abs_residual(), ACCOUNTING_TOLERANCE)
+
     def test_schema_exposes_required_quantile_fields(self) -> None:
         schema = household_response_schema()
-        self.assertEqual(schema["schema_version"], "household_first_response_v1")
+        self.assertEqual(
+            schema["schema_version"],
+            "household_conditional_nominal_policy_v5",
+        )
+        self.assertEqual(
+            schema["properties"]["prompt_version"]["const"],
+            "household_ecology_monthly_v14",
+        )
         self.assertIn("expected_inflation_pct", schema["required"])
+        self.assertIn("not_employed_policy", schema["required"])
+        self.assertNotIn("job_loss_policy", schema["required"])
         self.assertEqual(
             schema["trajectory_mapping"]["downside"]["inflation_pct"],
             "expected_inflation_pct.p90",
@@ -140,7 +252,7 @@ class EcologyEngineTests(unittest.TestCase):
 
         result = run_monthly_ecology(households, responses, employer, credit)
 
-        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v1")
+        self.assertEqual(result.schema_version, "household_first_monthly_ecology_v4")
         self.assertEqual(len(result.households), 2)
         self.assertLessEqual(result.max_abs_residual(), ACCOUNTING_TOLERANCE)
         self.assertLess(result.credit.rationing_ratio, 1.0)

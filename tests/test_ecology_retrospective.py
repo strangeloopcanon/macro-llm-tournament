@@ -17,21 +17,21 @@ class EcologyRetrospectiveTests(unittest.TestCase):
         joined = pd.DataFrame({"origin_month": ["2025-09-01", "2025-10-01"]})
         self.assertEqual(
             ecology_retrospective._chart_subtitle(joined, "gpt-test"),
-            "gpt-test rolling origins Sep 2025-Oct 2025; first origin is survey-seeded and unscored; later origins are recursive. Shading is downside-upside.",
+            "gpt-test rolling origins Sep 2025-Oct 2025; every origin is re-anchored to the fixed SCE-SCF household state and origin-visible public information.",
         )
 
     def test_direction_scoring_excludes_joint_zero_ties(self) -> None:
         joined = pd.DataFrame(
             {
                 "scenario": ["median"] * 4,
-                "metric": ["employment_rate_change_pp"] * 4,
+                "metric": ["saving_rate_change_pp"] * 4,
                 "prediction": [-0.2, 0.0, 0.0, 0.0],
                 "actual": [-0.1, 0.1, 0.0, 0.0],
                 "state_provenance": ["prior_simulated_month"] * 4,
                 "mapping_quality": ["directional_proxy"] * 4,
             }
         )
-        row = ecology_retrospective._score_rows(joined).iloc[0]
+        row = ecology_retrospective._score_rows(joined, state_policy="recursive").iloc[0]
         self.assertEqual(row["direction_n"], 2)
         self.assertEqual(row["direction_accuracy"], 0.5)
 
@@ -76,8 +76,6 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             "pce_growth_pct": (0.4, 100.4),
             "personal_saving_rate_change": (-0.2, 3.8),
             "revolving_credit_growth_pct": (0.7, 100.7),
-            "unemployment_rate_level": (4.2, 4.2),
-            "pce_price_growth_pct": (0.3, 100.3),
         }
         for target_name, (target_value, first_release) in values.items():
             mapping = next(row for row in ecology_retrospective.METRIC_MAPPINGS.values() if row["target_name"] == target_name)
@@ -88,7 +86,7 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                 "target_observation_date": "2026-02-01",
                 "first_release_as_of_date": "2026-04-01",
                 "first_release_value": first_release,
-                "first_release_denominator_value": 4.4 if target_name == "unemployment_rate_level" else first_release,
+                "first_release_denominator_value": first_release,
                 "target_value": target_value,
             })
         with tempfile.TemporaryDirectory() as temporary:
@@ -97,8 +95,7 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             actuals = ecology_retrospective._realization_rows(path, ["2026-02-01"])
         by_metric = actuals.set_index("metric")["actual"].to_dict()
         self.assertEqual(by_metric["consumption_growth_pct"], 0.4)
-        self.assertEqual(by_metric["saving_rate_pct"], 3.8)
-        self.assertAlmostEqual(by_metric["employment_rate_change_pp"], 0.2)
+        self.assertEqual(by_metric["saving_rate_change_pp"], -0.2)
 
     def test_two_origin_runner_carries_median_state_and_joins_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -121,8 +118,8 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                         "series_id": mapping["series_id"],
                         "target_observation_date": month,
                         "first_release_as_of_date": "2026-04-01",
-                        "first_release_value": 4.0 if metric == "saving_rate_pct" else 5.0,
-                        "first_release_denominator_value": 4.1 if metric == "employment_rate_change_pp" else 5.0,
+                        "first_release_value": 5.0,
+                        "first_release_denominator_value": 5.0,
                         "target_value": 0.5,
                     })
             pd.DataFrame(target_rows).to_csv(targets, index=False)
@@ -178,19 +175,16 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                 manifest = ecology_retrospective.run(args)
 
             self.assertIsNone(seen_states[0])
-            self.assertEqual(
-                seen_states[1],
-                output.resolve().with_name(output.name + ".building") / "runs/2026-01-01/median_next_state.json",
-            )
+            self.assertIsNone(seen_states[1])
             self.assertEqual(len(pd.read_csv(output / "one_step_forecasts_by_origin.csv")), 6)
-            self.assertEqual(len(pd.read_csv(output / "predicted_vs_actual.csv")), 30)
+            self.assertEqual(len(pd.read_csv(output / "predicted_vs_actual.csv")), 18)
             self.assertTrue((output / "predicted_vs_actual.png").exists())
-            self.assertEqual(manifest["state_policy"], "median_recursive_spine")
-            self.assertEqual(manifest["score_eligibility"], "prior_simulated_month_only")
+            self.assertEqual(manifest["state_policy"], "rolling_reanchored")
+            self.assertEqual(manifest["score_eligibility"], "all_rolling_one_month_origins")
             self.assertFalse(manifest["forecast_process_opened_realization_files"])
             self.assertTrue(manifest["source_sha256"])
             scored = pd.read_csv(output / "retrospective_scores.csv")
-            self.assertTrue(scored["n"].eq(1).all())
+            self.assertTrue(scored["n"].eq(2).all())
 
     def test_origin_range_must_be_ascending_month_starts(self) -> None:
         with self.assertRaisesRegex(ValueError, "ascending month starts"):

@@ -181,6 +181,8 @@ class EcologyIOTests(unittest.TestCase):
             assert isinstance(command, list)
             self.assertIn("--ignore-user-config", command)
             self.assertIn("shell_tool", command)
+            self.assertIn("plugins", command)
+            self.assertIn("skill_mcp_dependency_install", command)
             self.assertIn('web_search="disabled"', command)
             self.assertNotEqual(Path(seen["cwd"]), root.resolve())
             self.assertEqual(result["tool_isolation_version"], CODEX_TOOL_ISOLATION_VERSION)

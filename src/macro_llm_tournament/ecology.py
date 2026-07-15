@@ -17,6 +17,7 @@ import pandas as pd
 
 from .ecology_engine import run_monthly_ecology
 from .ecology_inputs import load_origin_information
+from .ecology_information import build_macro_information_card
 from .ecology_households import (
     HOUSEHOLD_PROMPT_VERSION,
     HouseholdElicitor,
@@ -51,6 +52,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--history", type=Path, required=True)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--state-json", type=Path)
+    parser.add_argument(
+        "--state-policy",
+        choices=("rolling_reanchored", "recursive"),
+        default="rolling_reanchored",
+    )
     parser.add_argument("--expected-replay-sha256")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -196,21 +202,85 @@ def _coverage_sample(frame: pd.DataFrame, count: int) -> pd.DataFrame:
 
 
 def _state_from_row(row: pd.Series) -> HouseholdState:
-    monthly_consumption = float(row["baseline_consumption_annual"]) / 12.0
-    income = float(row["annual_income"])
-    status = str(row.get("employment_status", "unknown")).lower()
-    employed = status not in {"unemployed", "not_employed"}
+    committed = row.get("baseline_committed_consumption_monthly_usd")
+    discretionary = row.get("baseline_discretionary_consumption_monthly_usd")
+    has_components = pd.notna(committed) and pd.notna(discretionary)
+    monthly_consumption = (
+        float(committed) + float(discretionary)
+        if has_components
+        else float(row["baseline_consumption_annual"]) / 12.0
+    )
+    income = float(row.get("annual_income_usd", row.get("annual_income", 0.0)))
+    reported_monthly_earned = row.get(
+        "monthly_earned_income_usd", row.get("monthly_wage_income_usd")
+    )
+    has_reported_earned = pd.notna(reported_monthly_earned)
+    monthly_earned = (
+        float(reported_monthly_earned) if has_reported_earned else income / 12.0
+    )
+    status = (
+        str(row.get("employment_status", "unknown"))
+        .strip()
+        .lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+    explicitly_employed = {
+        "employed",
+        "self_employed",
+        "full_time",
+        "part_time",
+        "employed_full_time",
+        "employed_part_time",
+        "working",
+    }
+    explicitly_not_employed = {
+        "unemployed",
+        "not_employed",
+        "retired",
+        "out_of_labor_force",
+        "not_in_labor_force",
+        "disabled",
+        "student",
+        "homemaker",
+    }
+    if status in explicitly_employed:
+        employed = True
+    elif status in explicitly_not_employed:
+        employed = False
+    else:
+        donor_status = str(row.get("scf_donor_employment_group", "")).strip().lower()
+        # Unknown SCE employment inherits the matched SCF donor's labor-force
+        # state. Legacy rows without donor provenance fall back to earned income.
+        employed = (
+            donor_status == "employed"
+            if donor_status in {"employed", "not_employed"}
+            else monthly_earned > 0.0
+        )
     hours = 160.0 if employed else 0.0
-    # The engine and prompt define 160 hours as one working month, so the wage
-    # conversion must use the same 1,920-hour simulation year.
-    hourly_wage = income / (12.0 * 160.0) if employed else max(7.25, income / (12.0 * 160.0))
-    debt = max(0.0, float(row.get("debt", 0.0)))
+    # SCF earned income is measured for the family, not this SCE respondent.
+    # Real matched states therefore keep it fixed at the household boundary.
+    # Synthetic legacy fixtures without an explicit earned-income field retain
+    # their respondent-wage interpretation for dynamic-engine tests.
+    household_earned = monthly_earned if has_reported_earned else 0.0
+    respondent_earned = monthly_earned if employed and not has_reported_earned else 0.0
+    hourly_wage = respondent_earned / 160.0 if respondent_earned > 0.0 else 0.0
+    debt = max(0.0, float(row.get("revolving_debt_usd", row.get("debt", 0.0))))
+    credit_limit = float(
+        row.get(
+            "revolving_credit_limit_usd",
+            max(debt, debt * 1.5, monthly_consumption * 2.0),
+        )
+    )
     return HouseholdState(
         household_id=str(row["type_id"]),
         employer_id="aggregate_employer",
-        deposit_balance_usd=max(0.0, float(row.get("liquid_assets", 0.0))),
+        deposit_balance_usd=max(
+            0.0,
+            float(row.get("liquid_deposits_usd", row.get("liquid_assets", 0.0))),
+        ),
         revolving_debt_usd=debt,
-        revolving_credit_limit_usd=max(debt, debt * 1.5, monthly_consumption * 2.0),
+        revolving_credit_limit_usd=max(debt, credit_limit),
         hourly_wage_usd=hourly_wage,
         baseline_monthly_hours=hours,
         baseline_monthly_consumption_usd=monthly_consumption,
@@ -219,6 +289,20 @@ def _state_from_row(row: pd.Series) -> HouseholdState:
         liquid_buffer_floor_months=float(row.get("subsistence_floor_share", 0.5)),
         subsistence_consumption_share=float(row.get("subsistence_floor_share", 0.45)),
         population_weight=float(row.get("population_weight", 1.0 / 200.0)),
+        monthly_household_earned_income_usd=household_earned,
+        monthly_nonwage_income_usd=max(
+            0.0, float(row.get("monthly_nonwage_income_usd", 0.0))
+        ),
+        monthly_transfer_income_usd=max(
+            0.0, float(row.get("monthly_transfers_benefits_usd", 0.0))
+        ),
+        baseline_committed_consumption_usd=(float(committed) if has_components else None),
+        baseline_discretionary_consumption_usd=(
+            float(discretionary) if has_components else None
+        ),
+        minimum_debt_payment_usd=max(
+            0.0, float(row.get("recurring_minimum_debt_payment_usd", 0.0))
+        ),
     )
 
 
@@ -292,7 +376,10 @@ def _load_recursive_state(
     if path is None:
         return states, employer, credit, {}, {}, None
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "household_ecology_recursive_state_v2":
+    if payload.get("schema_version") not in {
+        "household_ecology_recursive_state_v2",
+        "household_ecology_recursive_state_v3",
+    }:
         raise ValueError("recursive state schema mismatch")
     if payload.get("next_origin_month") != origin_month:
         raise ValueError("recursive state month continuity mismatch")
@@ -306,19 +393,106 @@ def _load_recursive_state(
     if set(by_id) != {row.household_id for row in states}:
         raise ValueError("recursive state household membership mismatch")
     restored = [
-        HouseholdState(**{field.name: by_id[state.household_id][field.name] for field in dataclasses.fields(HouseholdState)})
+        HouseholdState(
+            **{
+                field.name: by_id[state.household_id].get(
+                    field.name, getattr(state, field.name)
+                )
+                for field in dataclasses.fields(HouseholdState)
+            }
+        )
         for state in states
     ]
-    restored_employer = EmployerState(
-        **{field.name: payload["employer"][field.name] for field in dataclasses.fields(EmployerState)}
-    )
-    restored_credit = CreditIntermediaryState(
-        **{field.name: payload["credit"][field.name] for field in dataclasses.fields(CreditIntermediaryState)}
-    )
+    restored_employer = employer
+    if isinstance(payload.get("employer"), dict):
+        restored_employer = EmployerState(
+            **{
+                field.name: payload["employer"][field.name]
+                for field in dataclasses.fields(EmployerState)
+            }
+        )
+    restored_credit = credit
+    if isinstance(payload.get("credit"), dict):
+        restored_credit = CreditIntermediaryState(
+            **{
+                field.name: payload["credit"][field.name]
+                for field in dataclasses.fields(CreditIntermediaryState)
+            }
+        )
     macro_state = payload.get("macro_state", {})
     if not isinstance(macro_state, dict):
         raise ValueError("recursive macro state must be an object")
     return restored, restored_employer, restored_credit, by_id, macro_state, str(parent_scenario)
+
+
+def _latest_visible_value(origin: dict[str, Any], series_id: str) -> float | None:
+    row = origin.get("origin_visible_macro_context", {}).get(series_id)
+    if not isinstance(row, dict):
+        return None
+    try:
+        value = float(row["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _rolling_reanchor(
+    *,
+    restored: list[HouseholdState],
+    anchors: list[HouseholdState],
+    prior_macro_state: dict[str, Any],
+    origin: dict[str, Any],
+) -> tuple[list[HouseholdState], dict[str, Any]]:
+    """Anchor each one-step forecast to the latest visible consumption level.
+
+    Individual deposits, revolving debt, and employment state continue from the
+    preceding simulation. The spending baseline is rebuilt from each household's
+    fixed SCF-conditioned anchor and the aggregate PCE movement visible at the
+    current origin, so forecast errors do not become next month's observed fact.
+    """
+
+    anchor_by_id = {row.household_id: row for row in anchors}
+    current_pce = _latest_visible_value(origin, "PCE")
+    reference_pce = prior_macro_state.get("anchor_reference_pce_value")
+    if reference_pce is None:
+        reference_pce = prior_macro_state.get("latest_visible_pce_value")
+    if current_pce is None or reference_pce is None or float(reference_pce) <= 0.0:
+        ratio = 1.0
+        status = "pce_anchor_unavailable"
+    else:
+        ratio = max(0.75, min(1.25, current_pce / float(reference_pce)))
+        status = "pce_level_reanchored"
+    rows: list[HouseholdState] = []
+    for state in restored:
+        anchor = anchor_by_id[state.household_id]
+        committed = (
+            anchor.baseline_committed_consumption_usd * ratio
+            if anchor.baseline_committed_consumption_usd is not None
+            else None
+        )
+        discretionary = (
+            anchor.baseline_discretionary_consumption_usd * ratio
+            if anchor.baseline_discretionary_consumption_usd is not None
+            else None
+        )
+        rows.append(
+            dataclasses.replace(
+                state,
+                baseline_monthly_consumption_usd=(
+                    anchor.baseline_monthly_consumption_usd * ratio
+                ),
+                baseline_committed_consumption_usd=committed,
+                baseline_discretionary_consumption_usd=discretionary,
+                hourly_wage_usd=anchor.hourly_wage_usd,
+            )
+        )
+    return rows, {
+        "status": status,
+        "series_id": "PCE",
+        "reference_visible_value": reference_pce,
+        "current_visible_value": current_pce,
+        "applied_level_ratio": ratio,
+    }
 
 
 def _next_recursive_state(
@@ -331,6 +505,7 @@ def _next_recursive_state(
     employer: EmployerState,
     credit: CreditIntermediaryState,
     origin: dict[str, Any],
+    institution_mode: str = "dynamic",
 ) -> dict[str, Any]:
     prior_by_id = {row.household_id: row for row in states}
     household_rows: list[dict[str, Any]] = []
@@ -357,6 +532,12 @@ def _next_recursive_state(
                 liquid_buffer_floor_months=prior.liquid_buffer_floor_months,
                 subsistence_consumption_share=prior.subsistence_consumption_share,
                 population_weight=prior.population_weight,
+                monthly_household_earned_income_usd=prior.monthly_household_earned_income_usd,
+                monthly_nonwage_income_usd=prior.monthly_nonwage_income_usd,
+                monthly_transfer_income_usd=prior.monthly_transfer_income_usd,
+                baseline_committed_consumption_usd=prior.baseline_committed_consumption_usd,
+                baseline_discretionary_consumption_usd=prior.baseline_discretionary_consumption_usd,
+                minimum_debt_payment_usd=prior.minimum_debt_payment_usd,
             )
         )
         next_household.update(
@@ -388,7 +569,11 @@ def _next_recursive_state(
             ),
             inventory_units=max(0.0, result.employer.inventory_end_units),
             price_per_unit_usd=result.employer.next_price_per_unit_usd,
-            target_headcount=max(1.0, result.employer.employment_count * pressure),
+            target_headcount=(
+                employer.target_headcount
+                if institution_mode == "household_demand"
+                else max(1.0, result.employer.employment_count * pressure)
+            ),
             wage_offer_usd=result.employer.next_wage_offer_usd,
             target_inventory_units=employer.target_inventory_units,
             fixed_cost_usd=employer.fixed_cost_usd,
@@ -413,21 +598,33 @@ def _next_recursive_state(
             new_lending_budget_usd=headroom * 0.2,
         )
     )
-    return {
-        "schema_version": "household_ecology_recursive_state_v2",
+    payload = {
+        "schema_version": "household_ecology_recursive_state_v3",
         "source_origin_month": origin["origin_month"],
         "next_origin_month": (
             pd.Timestamp(origin["origin_month"]) + pd.offsets.MonthBegin(1)
         ).date().isoformat(),
         "scenario": scenario,
         "households": household_rows,
-        "employer": next_employer,
-        "credit": next_credit,
         "macro_state": _weighted_macro(result, states, origin),
     }
+    if institution_mode == "household_demand":
+        macro = payload["macro_state"]
+        payload["macro_state"] = {
+            key: macro[key]
+            for key in (
+                "latest_visible_pce_value",
+                "anchor_reference_pce_value",
+                "state_policy",
+            )
+        }
+    else:
+        payload["employer"] = next_employer
+        payload["credit"] = next_credit
+    return payload
 
 
-def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str, Any]) -> dict[str, float]:
+def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str, Any]) -> dict[str, Any]:
     weights = {row.household_id: row.population_weight for row in states}
     total_weight = sum(weights.values()) or 1.0
     def weighted(field: str) -> float:
@@ -445,14 +642,62 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
     employed_weight = sum(
         weights[row.household_id] * row.employment_share_end for row in result.households
     ) / total_weight
-    # Personal saving is income less consumption. Borrowing and debt repayment
-    # change financing composition; they are not personal saving or dissaving.
-    saving = weighted("wage_income_usd") - weighted("consumption_usd")
-    saving_rate = 100.0 * saving / max(weighted("wage_income_usd"), 1.0)
+    wage_income = weighted("wage_income_usd")
+    household_earned_income = sum(
+        row.monthly_household_earned_income_usd * weights[row.household_id]
+        for row in states
+    ) / total_weight
+    nonwage_income = sum(
+        row.monthly_nonwage_income_usd * weights[row.household_id]
+        for row in states
+    ) / total_weight
+    transfer_income = sum(
+        row.monthly_transfer_income_usd * weights[row.household_id]
+        for row in states
+    ) / total_weight
+    disposable_income = (
+        wage_income + household_earned_income + nonwage_income + transfer_income
+    )
+    consumption = weighted("consumption_usd")
+    # Borrowing and debt repayment change financing composition; they are not
+    # personal saving or dissaving. Household earned, nonwage, and transfer
+    # income are resources in the engine, so reported saving includes them.
+    saving = disposable_income - consumption
+    saving_rate = 100.0 * saving / max(disposable_income, 1.0)
+    baseline_wage_income = sum(
+        row.hourly_wage_usd
+        * row.baseline_monthly_hours
+        * weights[row.household_id]
+        for row in states
+    ) / total_weight
+    baseline_disposable_income = (
+        baseline_wage_income
+        + household_earned_income
+        + nonwage_income
+        + transfer_income
+    )
+    baseline_saving_rate = 100.0 * (
+        baseline_disposable_income - baseline_consumption
+    ) / max(baseline_disposable_income, 1.0)
     price_growth = 100.0 * (result.employer.next_price_per_unit_usd / result.employer.current_price_per_unit_usd - 1.0)
+    latest_visible_pce = _latest_visible_value(origin, "PCE")
+    consumption_growth = 100.0 * (
+        weighted("consumption_usd") / max(baseline_consumption, 1.0) - 1.0
+    )
+    routine_drift = float(origin.get("routine_nominal_spending_drift_pct", 0.0))
     return {
-        "consumption_growth_pct": 100.0 * (weighted("consumption_usd") / max(baseline_consumption, 1.0) - 1.0),
+        "consumption_growth_pct": consumption_growth,
+        "routine_nominal_spending_drift_pct": routine_drift,
+        "household_residual_contribution_pct": consumption_growth - routine_drift,
         "saving_rate_pct": saving_rate,
+        "baseline_saving_rate_pct": baseline_saving_rate,
+        "saving_rate_change_pp": saving_rate - baseline_saving_rate,
+        "wage_income_usd": wage_income,
+        "household_earned_income_usd": household_earned_income,
+        "nonwage_income_usd": nonwage_income,
+        "transfer_income_usd": transfer_income,
+        "disposable_income_usd": disposable_income,
+        "personal_saving_usd": saving,
         "revolving_credit_growth_pct": 100.0 * (debt_end / max(debt_start, 1.0) - 1.0),
         "employment_rate_pct": 100.0 * employed_weight,
         "employment_rate_change_pp": 100.0 * (employed_weight - prior_employed_weight),
@@ -462,6 +707,11 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         "units_sold": result.employer.units_sold,
         "inventory_end_units": result.employer.inventory_end_units,
         "policy_rate_pct": float(origin["origin_visible_macro_context"].get("FEDFUNDS", {}).get("value", 0.0)),
+        "latest_visible_pce_value": latest_visible_pce,
+        "anchor_reference_pce_value": origin.get(
+            "anchor_reference_pce_value", latest_visible_pce
+        ),
+        "state_policy": origin.get("state_policy", "recursive"),
     }
 
 
@@ -472,6 +722,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(f"output directory is not empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     states = [_state_from_row(row) for _, row in households.iterrows()]
+    anchor_states = list(states)
     histories = {
         household_id: group.to_dict("records")
         for household_id, group in history.groupby("household_id", sort=True)
@@ -491,9 +742,51 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     states, employer, credit, recursive_rows, prior_macro_state, parent_scenario = _load_recursive_state(
         getattr(args, "state_json", None), states, employer, credit, args.origin
     )
-    if prior_macro_state:
-        origin = dict(origin)
-        origin["prior_simulated_state"] = prior_macro_state
+    state_policy = getattr(args, "state_policy", "rolling_reanchored")
+    reanchor = {
+        "status": "survey_seeded_initial_state",
+        "applied_level_ratio": 1.0,
+    }
+    if prior_macro_state and state_policy == "rolling_reanchored":
+        states, reanchor = _rolling_reanchor(
+            restored=states,
+            anchors=anchor_states,
+            prior_macro_state=prior_macro_state,
+            origin=origin,
+        )
+        employer = _initial_employer(states)
+        credit = _initial_credit(states, origin)
+    elif prior_macro_state:
+        reanchor = {
+            "status": "recursive_unanchored",
+            "applied_level_ratio": None,
+        }
+    origin = dict(origin)
+    origin["state_policy"] = state_policy
+    origin["anchor_reference_pce_value"] = prior_macro_state.get(
+        "anchor_reference_pce_value",
+        _latest_visible_value(origin, "PCE"),
+    )
+    origin["compact_macro_information"] = build_macro_information_card(
+        origin,
+        policy_declarations={
+            "declared_spread_bps": 1400.0,
+            "declared_pass_through_fraction": 1.0,
+        },
+    )
+    pce_change = (
+        origin["compact_macro_information"]
+        .get("series", {})
+        .get("PCE", {})
+        .get("changes", {})
+        .get("1m")
+    )
+    routine_nominal_drift_pct = (
+        float(pce_change["value"])
+        if isinstance(pce_change, dict) and pce_change.get("value") is not None
+        else 0.0
+    )
+    origin["routine_nominal_spending_drift_pct"] = routine_nominal_drift_pct
     cards: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     responses: dict[str, Any] = {}
@@ -505,14 +798,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if str(row.get("public_availability_date", "")) <= origin["as_of_date"]
         ]
         card_state = households.loc[households["type_id"].eq(state.household_id)].iloc[0].to_dict()
-        # Prompts must see the exact state that the engine will execute, including
-        # the first origin. Survey fields remain available for profile metadata.
-        card_state.update(dataclasses.asdict(state))
+        # Recursive rows contribute belief and outcome memory only. The exact
+        # re-anchored engine state must win every overlapping field.
         card_state.update(recursive_rows.get(state.household_id, {}))
+        card_state.update(dataclasses.asdict(state))
+        card_state["employed"] = state.employment_share is not None and state.employment_share > 0.0
+        card_state["annual_income"] = (
+            state.hourly_wage_usd * state.baseline_monthly_hours * 12.0
+        )
         card_state["state_provenance"] = (
-            "prior_simulated_month"
+            "rolling_observed_reanchor"
             if state.household_id in recursive_rows
-            else "survey_seeded_initial_state"
+            and state_policy == "rolling_reanchored"
+            else (
+                "prior_simulated_month"
+                if state.household_id in recursive_rows
+                else "survey_seeded_initial_state"
+            )
         )
         card = household_card(
             card_state,
@@ -549,8 +851,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "cache_hit": bool(record.get("cache_hit", False)),
         })
 
+    institution_mode = "household_demand" if state_policy == "rolling_reanchored" else "dynamic"
     scenarios = {
-        scenario: run_monthly_ecology(states, responses, employer, credit, scenario=scenario)
+        scenario: run_monthly_ecology(
+            states,
+            responses,
+            employer,
+            credit,
+            scenario=scenario,
+            institution_mode=institution_mode,
+        )
         for scenario in ("downside", "median", "upside")
     }
     replay_equivalence_sha256 = canonical_sha256(
@@ -618,6 +928,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 employer=employer,
                 credit=credit,
                 origin=origin,
+                institution_mode=institution_mode,
             ),
         )
     (output / "next_state.json").write_bytes((output / "median_next_state.json").read_bytes())
@@ -655,7 +966,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "one_accepted_response_per_household": True,
         "population_mass_formula": "household_count * population_weight / sum(population_weight)",
         "institutional_aggregation": "population_mass_weighted",
-        "employment_transition": "expected_mass_from_constant_monthly_hazard_implied_by_annual_job_loss_probability_with_fractional_hiring",
+        "state_policy": state_policy,
+        "reanchor": reanchor,
+        "institution_mode": institution_mode,
+        "macro_information_card_sha256": origin["compact_macro_information"][
+            "card_sha256"
+        ],
+        "routine_nominal_spending_drift_pct": routine_nominal_drift_pct,
+        "routine_nominal_spending_drift_source": (
+            "latest origin-visible one-month PCE change; zero only when unavailable"
+        ),
+        "employment_transition": (
+            "origin_employment_state_frozen_for_household_demand_diagnostic"
+            if institution_mode == "household_demand"
+            else "expected_mass_from_monthly_job_loss_probability_with_fractional_hiring"
+        ),
         "one_call_per_household": (
             args.mode == "live" and call_budget.used == len(records) and call_budget.failed == 0
         ),
@@ -672,10 +997,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "worker_count": worker_count,
         "household_prompt_version": HOUSEHOLD_PROMPT_VERSION,
         "codex_tool_isolation_version": (
-            CODEX_TOOL_ISOLATION_VERSION if args.mode in {"live", "replay"} else None
+            CODEX_TOOL_ISOLATION_VERSION
+            if args.mode in {"live", "replay"}
+            else None
         ),
         "codex_instruction_context_version": (
-            CODEX_INSTRUCTION_CONTEXT_VERSION if args.mode in {"live", "replay"} else None
+            CODEX_INSTRUCTION_CONTEXT_VERSION
+            if args.mode in {"live", "replay"}
+            else None
         ),
         "local_text_file_tools_available_to_model": (
             False if args.mode in {"live", "replay"} else None
@@ -726,19 +1055,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         weights[row.household_id] * median_by_id[row.household_id].desired_consumption_usd
         for row in states
     ) / weight_sum
+    intended_growth = 100.0 * (median_desired / max(median_baseline, 1.0) - 1.0)
+    executed_growth = next(
+        row["consumption_growth_pct"]
+        for row in macro_rows
+        if row["scenario"] == "median"
+    )
+    feasibility_wedge = executed_growth - intended_growth
+    execution_sentence = (
+        "Deterministic execution leaves that aggregate intention unchanged."
+        if abs(feasibility_wedge) < 0.005
+        else (
+            f"Deterministic feasibility changes it by **{feasibility_wedge:+.2f} percentage points** "
+            "through debt service and binding household resources."
+        )
+    )
     target_label = pd.Timestamp(target_month).strftime("%B %Y")
     report = [
         "# Household-First Rolling Microeconomy",
         "",
         "## Bottom Line",
         "",
-        f"This is the first complete **{len(states)}-household** forecast from the new ecology. "
-        "Each household was elicited separately; deterministic institutions then reconciled "
-        "their choices into production, employment, inventories, credit, and settlement.",
+        f"This is a complete **{len(states)}-household** forecast from the household-first ecology. "
+        "Each household was elicited separately; deterministic code then enforced budgets, "
+        "credit limits, production feasibility, and settlement.",
         "",
-        f"The median path predicts consumption growth of **{next(row['consumption_growth_pct'] for row in macro_rows if row['scenario'] == 'median'):.2f}%**. "
-        f"Households themselves intended **{100.0 * (median_desired / max(median_baseline, 1.0) - 1.0):.2f}%**; "
-        "the additional contraction comes from mandatory debt service and binding household resources, not an arbitrary aggregate gain.",
+        f"The median path predicts consumption growth of **{executed_growth:.2f}%**. "
+        f"Households themselves intended **{intended_growth:.2f}%**. {execution_sentence}",
         "",
         (
             f"This is a frozen forecast, not an accuracy claim. {target_label} outcomes were not used and are not yet scored."
@@ -757,7 +1100,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "                              |",
         "          deterministic budgets, credit, and production",
         "                              |",
-        "       household actions -> employer -> macro state -> next origin",
+        "          household actions -> aggregate demand and balances",
         "```",
         "",
         "## Run Facts",
@@ -795,21 +1138,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "",
             f"The population-weighted mean of household p50 beliefs implies inflation of **{weighted_response('expected_inflation_pct'):.2f}%**, "
             f"income growth of **{weighted_response('expected_income_growth_pct'):.2f}%**, and a "
-            f"**{weighted_response('job_loss_probability_pct'):.2f}%** one-year job-loss probability.",
+            f"**{weighted_response('job_loss_probability_pct'):.2f}%** next-month job-loss probability.",
             "",
             f"The population-mass-weighted median economy executes `${median_result.employer.revenue_usd:,.0f}` of consumption, "
             f"`${median_result.credit.debt_payments_received_usd:,.0f}` of debt payments, and "
             f"`${median_result.credit.borrowing_total_usd:,.0f}` of new borrowing across {len(states)} household types representing {len(states)} population-equivalent units.",
             "",
-            "The cross-section is not a repeated representative household: low-liquidity agents plan larger consumption cuts, beliefs vary materially, and balance-sheet constraints alter feasible actions household by household.",
+            "The cross-section is not a repeated representative household: beliefs, intended spending, debt actions, and binding balance-sheet constraints differ household by household.",
             "",
             "## What This Establishes",
             "",
-            "The system is now a branchable, recursive microeconomy rather than an aggregate demand identity. Production comes from labor and capacity; sales clear against production plus inventories; employment and vacancies are explicit; loans, payments, deposits, and defaults have counterparties; and every scenario emits the exact state used by the next origin.",
+            "This run is a household-demand microeconomy rather than an aggregate demand identity. Household policies generate demand from the bottom up; deterministic production follows expected sales with gradual inventory adjustment; loans, payments, deposits, and sales have explicit counterparties. Wages and respondent employment are held fixed in this diagnostic so an uncalibrated labor market cannot manufacture the consumption result.",
             "",
-            "The cohort is initialized from March-April 2025 SCE observations, the latest common two-wave panel used here, while the public macro card is current to the forecast cutoff. Household balance sheets are coarse survey mappings rather than contemporaneous measured accounts.",
+            "The cohort is initialized from March-April 2025 SCE observations, the latest common two-wave panel used here, while the public macro card is current to the forecast cutoff. Financial states are deterministic SCE-conditioned matches to public 2022 SCF households, not contemporaneous linked household accounts.",
             "",
-            f"It does not yet establish predictive accuracy. Employment is still governed by one aggregate employer, and one untouched forecast origin cannot validate dynamics. The next evidence comes from appending realized {target_label} outcomes and repeating the same frozen procedure over several new months.",
+            f"It does not yet establish predictive accuracy. The current run deliberately omits firm and bank decision agents, and one untouched forecast origin cannot validate dynamics. The next evidence comes from appending realized {target_label} outcomes and repeating the same frozen procedure over several new months.",
         ]
     )
     (output / "ecology_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")

@@ -11,7 +11,7 @@ import tempfile
 from typing import Any
 
 
-CODEX_TOOL_ISOLATION_VERSION = "codex_cli_no_shell_web_textfiles_v2"
+CODEX_TOOL_ISOLATION_VERSION = "codex_cli_no_shell_web_textfiles_plugins_v3"
 CODEX_INSTRUCTION_CONTEXT_VERSION = "instruction_free_codex_home_v1"
 _DISABLED_CODEX_FEATURES = (
     "shell_tool",
@@ -26,6 +26,8 @@ _DISABLED_CODEX_FEATURES = (
     "multi_agent_v2",
     "tool_search",
     "plugin_sharing",
+    "plugins",
+    "skill_mcp_dependency_install",
     "workspace_dependencies",
     "memories",
     "image_generation",

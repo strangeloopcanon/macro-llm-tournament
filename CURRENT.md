@@ -3,50 +3,57 @@
 The active system is the household-first rolling microeconomy in
 `macro_llm_tournament.ecology`.
 
-It starts from the fixed 200-household SCE cohort, admits only household records
-available by the forecast origin, and gives each household a separate prompt. A
-response contains uncertainty bands for inflation, income, job loss, consumption,
-hours, and job search, plus buffer, debt-payment, and borrowing intentions.
-Deterministic code converts those intentions into feasible actions and clears them
-through production, employment, inventories, and credit. Survey weights enter every
-household-to-institution aggregate. Annual job-loss probabilities are converted to
-constant monthly hazards before the labor transition.
+It contains 200 persistent anonymized SCE household types. Each household receives
+its own survey history, an SCE-conditioned SCF 2022 financial state, and a compact
+public-information card containing only data visible at the forecast origin. GPT-5.5
+returns beliefs and conditional dollar policies for committed spending,
+discretionary spending, deposits, debt repayment, and borrowing. Deterministic code
+enforces the budget and accounting identities.
 
-The corrected July 2026 origin run is complete for an August 2026 target. It contains 200 accepted GPT-5.5
-household responses elicited through Codex CLI from an origin-only ALFRED snapshot.
-Each call ran without shell, local text-file, web, browser, app, memory, or multi-agent
-tools in a fresh empty directory.
-The final executable replays those responses with zero calls and produces distinct
-downside, median, and upside paths. The median path has intended consumption growth
-of -3.64% and feasible consumption growth of -3.77%; accounting passes with a
-maximum numerical residual below 1e-6.
+The active diagnostic isolates household demand. Respondent employment and wages are
+held fixed, production follows expected sales with gradual inventory adjustment, and
+firms and banks are not LLM agents. Every rolling origin restarts from the same fixed
+SCE-SCF anchor; only the origin-visible information changes. Simulated cash, debt, and
+forecast errors never enter the next rolling forecast.
 
-The public information card is current to July 10, 2026. The persistent household
-cohort is initialized from March-April 2025 SCE observations, so the run should be
-read as a current environment acting on a survey-seeded population, not as a
-contemporaneous July household survey.
+## What The Historical Run Shows
 
-This establishes a runnable, recursive economy and a genuinely frozen forecast.
-A separate retrospective diagnostic runs the exact mechanism over four post-cutoff
-2026 origins, with 800 accepted tool-isolated household responses. The first origin
-is a stale survey-seeded initialization transition and is shown but not scored;
-each later origin carries the preceding median simulated state forward. On the
-three valid recursive transitions, consumption RMSE is 5.48 percentage points
-with the wrong sign in all three months. Price signs are wrong in all three months,
-credit signs in two of three, and employment signs are wrong in all three. The
-compounded March-May consumption index falls from 100 to 86.40 while the
-first-release actual rises to 102.14. Accounting still passes.
+Across January-April 2026 origins and February-May first-release outcomes, the
+median consumption forecasts are **+0.13%, +0.16%, +0.30%, and +0.31%**. Actual
+nominal PCE growth is **+0.48%, +0.90%, +0.51%, and +0.71%**.
 
-The next gates are therefore:
+- Consumption direction: **4/4 correct**.
+- Consumption RMSE: **0.47 percentage points**.
+- Retired ecology RMSE: **5.48 points**, with 0/3 signs correct.
+- Origin-visible routine-drift RMSE: **0.24 points**.
+- Saving-rate direction: **3/4 correct**.
+- Revolving-credit direction: **1/4 correct**.
+- Accounting: **PASS** in all four runs; maximum residual `1.68e-08`.
 
-1. append the August native outcomes once released, without rewriting the forecast;
-2. diagnose the remaining contractionary behavior and feedback on retrospective
-   development origins without changing the corrected frozen August forecast;
-3. rerun the historical path and require credible signs and magnitudes before adding
-   firms, banks, or other institutional complexity;
-4. run August and subsequent origins under a newly locked procedure only after that
-   development gate is met.
+The improvement is real, but the LLM path remains too conservative. It compounds to
+**100.90** from a base of 100, versus **102.63** for first-release PCE and **101.75**
+for the routine drift anchor. The remaining problem is ordinary nominal-spending
+amplitude, not a collapse caused by labor feedback or a broken household budget.
 
-The old adaptive-twin tournament is retired from the active path. Its code and
-results remain recoverable at Git tag `macro-v1-weighted-demand` and in the local
-hashed archive under `~/Downloads/llm-hank-docs/archive/v1/`.
+## Frozen Forecast
+
+The July 1 origin, using information through July 10, is frozen for August 2026.
+Its median consumption forecast is **+0.28%**. The run contains 200 accepted Codex
+CLI responses, replays with 200 cache hits and zero calls, matches its immutable live
+reference, and passes accounting with maximum residual `1.12e-08`.
+
+This is not an accuracy claim until the August first release exists. The household
+survey anchor is from March-April 2025, while public macro information is current to
+the forecast cutoff.
+
+## Next Work
+
+1. Append the August realization without changing the frozen forecast.
+2. Continue the same rolling procedure at each new origin.
+3. Diagnose why household policies omit part of routine nominal drift; do not add
+   LLM firms or banks until repeated errors show an institutional mechanism is missing.
+4. Keep the historical chart as development evidence, not confirmatory evidence.
+
+The retired adaptive-twin and macro-tournament work remains recoverable at Git tag
+`macro-v1-weighted-demand` and in the local hashed archive under
+`~/Downloads/llm-hank-docs/archive/v1/`.

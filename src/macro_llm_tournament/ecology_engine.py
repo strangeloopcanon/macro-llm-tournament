@@ -37,9 +37,11 @@ class _Plan:
     wage_income_usd: float
     interest_accrued_usd: float
     minimum_payment_due_usd: float
+    nonwage_income_usd: float
     borrowing_requested_usd: float
     desired_consumption_usd: float
     desired_buffer_end_usd: float
+    debt_payment_intent_usd: float
     debt_payment_usd: float
     consumption_before_goods_usd: float
     default_chargeoff_usd: float
@@ -50,12 +52,16 @@ class _Plan:
 
 def build_household_trajectory(response: HouseholdResponse) -> HouseholdTrajectory:
     response.validate()
+    consumption = response.planned_consumption_change_pct
+    consumption_p10 = float(consumption.p10) if consumption is not None else 0.0
+    consumption_p50 = float(consumption.p50) if consumption is not None else 0.0
+    consumption_p90 = float(consumption.p90) if consumption is not None else 0.0
     return HouseholdTrajectory(
         downside=HouseholdTrajectoryPoint(
             inflation_pct=float(response.expected_inflation_pct.p90),
             income_growth_pct=float(response.expected_income_growth_pct.p10),
             job_loss_probability_pct=float(response.job_loss_probability_pct.p90),
-            consumption_change_pct=float(response.planned_consumption_change_pct.p10),
+            consumption_change_pct=consumption_p10,
             planned_work_hours=float(response.planned_work_hours.p10),
             planned_job_search_hours=float(response.planned_job_search_hours.p90),
         ),
@@ -63,7 +69,7 @@ def build_household_trajectory(response: HouseholdResponse) -> HouseholdTrajecto
             inflation_pct=float(response.expected_inflation_pct.p50),
             income_growth_pct=float(response.expected_income_growth_pct.p50),
             job_loss_probability_pct=float(response.job_loss_probability_pct.p50),
-            consumption_change_pct=float(response.planned_consumption_change_pct.p50),
+            consumption_change_pct=consumption_p50,
             planned_work_hours=float(response.planned_work_hours.p50),
             planned_job_search_hours=float(response.planned_job_search_hours.p50),
         ),
@@ -71,7 +77,7 @@ def build_household_trajectory(response: HouseholdResponse) -> HouseholdTrajecto
             inflation_pct=float(response.expected_inflation_pct.p10),
             income_growth_pct=float(response.expected_income_growth_pct.p90),
             job_loss_probability_pct=float(response.job_loss_probability_pct.p10),
-            consumption_change_pct=float(response.planned_consumption_change_pct.p90),
+            consumption_change_pct=consumption_p90,
             planned_work_hours=float(response.planned_work_hours.p90),
             planned_job_search_hours=float(response.planned_job_search_hours.p10),
         ),
@@ -92,9 +98,12 @@ def run_monthly_ecology(
     credit: CreditIntermediaryState,
     *,
     scenario: str = "median",
+    institution_mode: str = "dynamic",
 ) -> MonthlyEcologyResult:
     if scenario not in {"downside", "median", "upside"}:
         raise ValueError("scenario must be downside, median, or upside")
+    if institution_mode not in {"dynamic", "household_demand"}:
+        raise ValueError("institution_mode must be dynamic or household_demand")
     if not households:
         raise ValueError("households must be non-empty")
     employer.validate()
@@ -108,6 +117,13 @@ def run_monthly_ecology(
             )
         if household.household_id not in responses:
             raise ValueError(f"missing response for household {household.household_id}")
+    if institution_mode == "dynamic" and any(
+        row.monthly_household_earned_income_usd > ACCOUNTING_TOLERANCE
+        for row in ordered_households
+    ):
+        raise ValueError(
+            "dynamic labor requires a respondent-level earned-income split"
+        )
 
     weight_total = sum(row.population_weight for row in ordered_households)
     if weight_total <= 0.0:
@@ -143,18 +159,33 @@ def run_monthly_ecology(
     employment_start = {
         row.household_id: starting_employment_share(row) for row in ordered_households
     }
-    retained_shares = {
-        row.household_id: employment_start[row.household_id]
-        * (
-            1.0
-            - annual_probability_to_monthly(
-                points[row.household_id].job_loss_probability_pct
+    if institution_mode == "household_demand":
+        # The household-demand diagnostic holds labor state and wages fixed so
+        # consumption tests are not confounded by an uncalibrated matching
+        # model. Conditional employment policies remain banked for later shock
+        # and counterfactual runs.
+        retained_shares = dict(employment_start)
+    else:
+        retained_shares = {
+            row.household_id: employment_start[row.household_id]
+            * (
+                1.0
+                - (
+                    points[row.household_id].job_loss_probability_pct / 100.0
+                    if responses[row.household_id].employed_policy is not None
+                    else annual_probability_to_monthly(
+                        points[row.household_id].job_loss_probability_pct
+                    )
+                )
             )
-        )
-        for row in ordered_households
-    }
+            for row in ordered_households
+        }
     retained_mass = aggregate(retained_shares)
-    openings = max(0.0, employer.target_headcount - retained_mass)
+    openings = (
+        0.0
+        if institution_mode == "household_demand"
+        else max(0.0, employer.target_headcount - retained_mass)
+    )
     candidates = sorted(
         (
             household
@@ -204,7 +235,10 @@ def run_monthly_ecology(
     for plan in plans:
         borrowing_usd = plan.borrowing_requested_usd * rationing_ratio
         resources_after_rationing = (
-            plan.household.deposit_balance_usd + plan.wage_income_usd + borrowing_usd
+            plan.household.deposit_balance_usd
+            + plan.wage_income_usd
+            + plan.nonwage_income_usd
+            + borrowing_usd
         )
         debt_available = (
             plan.household.revolving_debt_usd
@@ -224,7 +258,7 @@ def run_monthly_ecology(
         remaining_after_consumption = remaining_after_mandatory - consumption_before_goods_usd
         desired_total_payment_usd = max(
             plan.minimum_payment_due_usd,
-            plan.response.debt_payment_intent_usd,
+            plan.debt_payment_intent_usd,
         )
         extra_payment_target_usd = max(0.0, desired_total_payment_usd - mandatory_payment_usd)
         extra_payment_capacity_usd = max(
@@ -257,6 +291,7 @@ def run_monthly_ecology(
         remaining_cash_after_payment = (
             plan.household.deposit_balance_usd
             + plan.wage_income_usd
+            + plan.nonwage_income_usd
             + borrowing_usd
             - debt_payment_usd
         )
@@ -279,17 +314,31 @@ def run_monthly_ecology(
             for row in goods_ready
         }
     )
-    output_units = min(
-        employer.monthly_capacity_units,
-        employer.productivity_per_hour * total_hours,
-    )
-    available_units = employer.inventory_units + output_units
     desired_consumption_total = aggregate(
         {
             row["plan"].household.household_id: float(row["consumption_before_goods_usd"])
             for row in goods_ready
         }
     )
+    if institution_mode == "household_demand":
+        desired_units = (
+            desired_consumption_total / employer.price_per_unit_usd
+            if employer.price_per_unit_usd > 0.0
+            else 0.0
+        )
+        inventory_adjustment = 0.25 * (
+            employer.target_inventory_units - employer.inventory_units
+        )
+        output_units = min(
+            employer.monthly_capacity_units,
+            max(0.0, desired_units + inventory_adjustment),
+        )
+    else:
+        output_units = min(
+            employer.monthly_capacity_units,
+            employer.productivity_per_hour * total_hours,
+        )
+    available_units = employer.inventory_units + output_units
     nominal_sales_capacity = available_units * employer.price_per_unit_usd
     goods_rationing_ratio = (
         min(1.0, nominal_sales_capacity / desired_consumption_total)
@@ -308,6 +357,7 @@ def run_monthly_ecology(
         cash_residual = (
             plan.household.deposit_balance_usd
             + plan.wage_income_usd
+            + plan.nonwage_income_usd
             + borrowing_usd
             - debt_payment_usd
             - consumption_usd
@@ -326,6 +376,7 @@ def run_monthly_ecology(
             employer=employer,
             credit=credit,
             wage_income_usd=plan.wage_income_usd,
+            nonwage_income_usd=plan.nonwage_income_usd,
             borrowing_usd=borrowing_usd,
             debt_payment_usd=debt_payment_usd,
             consumption_usd=consumption_usd,
@@ -406,18 +457,34 @@ def run_monthly_ecology(
         employer.inventory_units + output_units - units_sold - inventory_end_units
     )
     target_inventory = max(employer.target_inventory_units, 1.0)
+    opening_normal_demand = aggregate(
+        {
+            row.household_id: row.baseline_monthly_consumption_usd
+            for row in ordered_households
+        }
+    )
     demand_pressure = (
-        desired_consumption_total / nominal_sales_capacity
-        if nominal_sales_capacity > 0.0
-        else 0.0
+        desired_consumption_total / max(opening_normal_demand, 1.0)
+        if institution_mode == "household_demand"
+        else (
+            desired_consumption_total / nominal_sales_capacity
+            if nominal_sales_capacity > 0.0
+            else 0.0
+        )
     )
     inventory_gap = (target_inventory - inventory_end_units) / target_inventory
-    next_price = employer.price_per_unit_usd * (
-        1.0 + max(-0.10, min(0.10, 0.03 * (demand_pressure - 1.0) + 0.02 * inventory_gap))
+    price_adjustment = (
+        max(-0.02, min(0.02, 0.005 * (demand_pressure - 1.0) + 0.002 * inventory_gap))
+        if institution_mode == "household_demand"
+        else max(-0.10, min(0.10, 0.03 * (demand_pressure - 1.0) + 0.02 * inventory_gap))
     )
+    next_price = employer.price_per_unit_usd * (1.0 + price_adjustment)
     vacancy_rate = vacancies / max(employer.target_headcount, 1.0)
-    next_wage = employer.wage_offer_usd * (
-        1.0 + max(-0.05, min(0.08, 0.02 * vacancy_rate + 0.01 * inventory_gap))
+    next_wage = (
+        employer.wage_offer_usd
+        if institution_mode == "household_demand"
+        else employer.wage_offer_usd
+        * (1.0 + max(-0.05, min(0.08, 0.02 * vacancy_rate + 0.01 * inventory_gap)))
     )
     employer_result = EmployerMonthResult(
         employer_id=employer.employer_id,
@@ -476,9 +543,18 @@ def run_monthly_ecology(
     chargeoffs = aggregate(
         {household_id: row.default_chargeoff_usd for household_id, row in results_by_id.items()}
     )
+    nonwage_income_total = aggregate(
+        {
+            row.household_id: row.monthly_household_earned_income_usd
+            + row.monthly_nonwage_income_usd
+            + row.monthly_transfer_income_usd
+            for row in ordered_households
+        }
+    )
     deposit_stock_residual = deposits_end - (
         deposits_start
         + wage_bill_usd
+        + nonwage_income_total
         + borrowing_total
         - debt_payments_received
         - aggregate_consumption_usd
@@ -563,30 +639,65 @@ def _build_plan(
         max(
             credit.minimum_payment_floor_usd,
             household.revolving_debt_usd * credit.minimum_payment_rate_pct / 100.0,
+            household.minimum_debt_payment_usd,
         ),
     )
     borrowing_headroom = max(
         0.0,
         household.revolving_credit_limit_usd - household.revolving_debt_usd,
     )
-    desired_consumption_usd = household.baseline_monthly_consumption_usd * (
-        1.0 + point.consumption_change_pct / 100.0
-    )
+    if response.employed_policy is not None and response.not_employed_policy is not None:
+        employed = response.employed_policy
+        not_employed = response.not_employed_policy
+        jobless_share = 1.0 - employment_share_end
+
+        def mixed(field: str) -> float:
+            return (
+                employment_share_end * float(getattr(employed, field))
+                + jobless_share * float(getattr(not_employed, field))
+            )
+
+        desired_consumption_usd = mixed(
+            "next_month_committed_consumption_nominal_usd"
+        ) + mixed("next_month_discretionary_consumption_nominal_usd")
+        deposit_change_intent_usd = mixed("deposit_change_intent_usd")
+        debt_payment_intent_usd = minimum_payment_due_usd + mixed(
+            "extra_debt_payment_usd"
+        )
+        borrowing_intent_usd = mixed("borrowing_intent_usd")
+        desired_buffer_end_usd = max(
+            0.0,
+            household.deposit_balance_usd + deposit_change_intent_usd,
+        )
+    else:
+        desired_consumption_usd = household.baseline_monthly_consumption_usd * (
+            1.0 + point.consumption_change_pct / 100.0
+        )
+        target_buffer_usd = max(
+            household.liquid_buffer_floor_months
+            * household.baseline_monthly_consumption_usd,
+            response.target_buffer_months
+            * household.baseline_monthly_consumption_usd,
+        )
+        desired_buffer_end_usd = max(
+            household.deposit_balance_usd,
+            min(
+                target_buffer_usd,
+                household.deposit_balance_usd
+                + response.buffer_contribution_intent_usd,
+            ),
+        )
+        debt_payment_intent_usd = response.debt_payment_intent_usd
+        borrowing_intent_usd = response.borrowing_intent_usd
     desired_consumption_usd = max(0.0, desired_consumption_usd)
-    target_buffer_usd = max(
-        household.liquid_buffer_floor_months * household.baseline_monthly_consumption_usd,
-        response.target_buffer_months * household.baseline_monthly_consumption_usd,
+    nonwage_income_usd = (
+        household.monthly_household_earned_income_usd
+        + household.monthly_nonwage_income_usd
+        + household.monthly_transfer_income_usd
     )
-    # A buffer target is a stock objective, not an instruction to close the
-    # entire gap this month. The stated contribution controls the monthly flow.
-    desired_buffer_end_usd = max(
-        household.deposit_balance_usd,
-        min(
-            target_buffer_usd,
-            household.deposit_balance_usd + response.buffer_contribution_intent_usd,
-        ),
+    resources_before_borrow = (
+        household.deposit_balance_usd + wage_income_usd + nonwage_income_usd
     )
-    resources_before_borrow = household.deposit_balance_usd + wage_income_usd
     subsistence_usd = (
         household.subsistence_consumption_share
         * household.baseline_monthly_consumption_usd
@@ -597,12 +708,12 @@ def _build_plan(
     )
     borrowing_requested_usd = min(
         borrowing_headroom,
-        response.borrowing_intent_usd + emergency_need,
+        borrowing_intent_usd + emergency_need,
     )
     resources_after_borrow = resources_before_borrow + borrowing_requested_usd
     desired_total_payment = min(
         household.revolving_debt_usd + interest_accrued_usd + borrowing_requested_usd,
-        max(minimum_payment_due_usd, response.debt_payment_intent_usd),
+        max(minimum_payment_due_usd, debt_payment_intent_usd),
     )
     debt_payment_cap = max(0.0, resources_after_borrow - subsistence_usd)
     debt_payment_usd = min(desired_total_payment, debt_payment_cap)
@@ -658,9 +769,11 @@ def _build_plan(
         wage_income_usd=wage_income_usd,
         interest_accrued_usd=interest_accrued_usd,
         minimum_payment_due_usd=minimum_payment_due_usd,
+        nonwage_income_usd=nonwage_income_usd,
         borrowing_requested_usd=borrowing_requested_usd,
         desired_consumption_usd=desired_consumption_usd,
         desired_buffer_end_usd=desired_buffer_end_usd,
+        debt_payment_intent_usd=debt_payment_intent_usd,
         debt_payment_usd=debt_payment_usd,
         consumption_before_goods_usd=consumption_before_goods_usd,
         default_chargeoff_usd=default_chargeoff_usd,
@@ -676,6 +789,7 @@ def _counterparty_flows(
     employer: EmployerState,
     credit: CreditIntermediaryState,
     wage_income_usd: float,
+    nonwage_income_usd: float,
     borrowing_usd: float,
     debt_payment_usd: float,
     consumption_usd: float,
@@ -683,6 +797,17 @@ def _counterparty_flows(
     population_mass: float,
 ) -> list[CounterpartyFlow]:
     flows: list[CounterpartyFlow] = []
+    if nonwage_income_usd > 0.0:
+        flows.append(
+            CounterpartyFlow(
+                from_party_id="external_income_sector",
+                from_party_type="external_sector",
+                to_party_id=household.household_id,
+                to_party_type="household",
+                category="nonwage_and_transfer_income",
+                amount_usd=nonwage_income_usd * population_mass,
+            )
+        )
     if wage_income_usd > 0.0:
         flows.append(
             CounterpartyFlow(
