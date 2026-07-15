@@ -6,14 +6,14 @@ MODEL ?= gpt-5.5
 ECOLOGY_WORKERS ?= 8
 RETROSPECTIVE_WORKERS ?= 16
 ORIGIN_SNAPSHOT ?= work/ecology_origins/$(AS_OF).json
-ECOLOGY_CACHE ?= work/ecology_cache_200_july_v19
+ECOLOGY_CACHE ?= work/ecology_cache_200_july_v20
 ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v3/initial_households_200.csv
 ECOLOGY_HISTORY ?= work/persona_beliefs/persistent_household_scale_v2/selected_observed_history.csv
 ECOLOGY_BUNDLE ?= work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
 ECOLOGY_FIXTURE_DIR := examples/ecology_fixture
-CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v19_current
-RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v19
-RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v19
+CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v20_current
+RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v20
+RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v20
 
 all: check test
 

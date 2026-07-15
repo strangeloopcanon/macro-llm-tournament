@@ -103,7 +103,11 @@ class EcologyEngineTests(unittest.TestCase):
                 expected_income_growth_pct=QuantileTriplet(-1.0, 1.0, 3.0),
                 job_loss_probability_pct=QuantileTriplet(job_loss, job_loss, job_loss),
                 planned_consumption_change_pct=None,
-                planned_work_hours=QuantileTriplet(160.0, 160.0, 160.0),
+                planned_work_hours=QuantileTriplet(
+                    80.0 if job_loss else 200.0,
+                    80.0 if job_loss else 200.0,
+                    80.0 if job_loss else 200.0,
+                ),
                 planned_job_search_hours=QuantileTriplet(0.0, 0.0, 0.0),
                 target_buffer_months=0.0,
                 buffer_contribution_intent_usd=0.0,
@@ -144,6 +148,10 @@ class EcologyEngineTests(unittest.TestCase):
         self.assertAlmostEqual(jobless.households[0].desired_consumption_usd, 1_000.0)
         self.assertAlmostEqual(dynamic_jobless.households[0].desired_consumption_usd, 500.0)
         self.assertEqual(jobless.households[0].employment_share_end, 1.0)
+        self.assertAlmostEqual(employed.households[0].actual_hours_worked, 160.0)
+        self.assertAlmostEqual(jobless.households[0].actual_hours_worked, 160.0)
+        self.assertAlmostEqual(employed.households[0].wage_income_usd, 4_000.0)
+        self.assertAlmostEqual(jobless.households[0].wage_income_usd, 4_000.0)
         self.assertAlmostEqual(employed.employer.next_wage_offer_usd, 25.0)
         self.assertAlmostEqual(employed.employer.next_price_per_unit_usd, 1.0)
         self.assertLessEqual(employed.max_abs_residual(), ACCOUNTING_TOLERANCE)
@@ -157,7 +165,7 @@ class EcologyEngineTests(unittest.TestCase):
         )
         self.assertEqual(
             schema["properties"]["prompt_version"]["const"],
-            "household_ecology_monthly_v15",
+            "household_ecology_monthly_v16",
         )
         self.assertIn("expected_inflation_pct", schema["required"])
         self.assertIn("not_employed_policy", schema["required"])

@@ -217,6 +217,7 @@ def run_monthly_ecology(
             employment_share_start=employment_start[household.household_id],
             retained_share=retained_shares[household.household_id],
             hired_share=hired_shares[household.household_id],
+            fixed_labor=institution_mode == "household_demand",
         )
         for household in ordered_households
     ]
@@ -612,20 +613,20 @@ def _build_plan(
     employment_share_start: float,
     retained_share: float,
     hired_share: float,
+    fixed_labor: bool,
 ) -> _Plan:
     trajectory = build_household_trajectory(response)
     point = getattr(trajectory, scenario)
     employment_share_end = min(1.0, retained_share + hired_share)
     job_loss_share = max(0.0, employment_share_start - retained_share)
     realized_job_loss = job_loss_share > ACCOUNTING_TOLERANCE
-    conditional_hours = min(
+    conditional_hours = household.baseline_monthly_hours if fixed_labor else min(
         point.planned_work_hours,
         max(160.0, household.baseline_monthly_hours * 1.25),
     )
     actual_hours_worked = conditional_hours * employment_share_end
-    actual_job_search_hours = max(
-        point.planned_job_search_hours,
-        12.0 * job_loss_share,
+    actual_job_search_hours = 0.0 if fixed_labor else max(
+        point.planned_job_search_hours, 12.0 * job_loss_share
     )
     wage_income_usd = conditional_hours * (
         retained_share * household.hourly_wage_usd

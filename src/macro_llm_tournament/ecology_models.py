@@ -509,7 +509,7 @@ def household_response_schema() -> dict[str, Any]:
             "reason_codes",
         ],
         "properties": {
-            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v15"},
+            "prompt_version": {"type": "string", "const": "household_ecology_monthly_v16"},
             "household_id": {"type": "string", "minLength": 1},
             "expected_inflation_pct": quantile_block,
             "expected_income_growth_pct": quantile_block,

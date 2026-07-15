@@ -34,8 +34,7 @@ SCE_REQUIRED_COLUMNS = (
     "Q9_cent50",
     "Q25v2part2",
 )
-SCE_OPTIONAL_COLUMNS = (
-    "Q13new",
+SCE_DEMOGRAPHIC_COLUMNS = (
     "Q32",
     "_AGE_CAT",
     "Q33",
@@ -48,6 +47,7 @@ SCE_OPTIONAL_COLUMNS = (
     "_EDU_CAT",
     "_HH_INC_CAT",
 )
+SCE_OPTIONAL_COLUMNS = ("Q13new", *SCE_DEMOGRAPHIC_COLUMNS)
 SCE_OUTPUT_COLUMNS = (
     "respondent_id",
     "survey_source",
@@ -219,7 +219,7 @@ def read_sce_demographic_lookup(*, raw_dir: Path | None, primary: Path, max_rows
         if pd.isna(userid):
             continue
         row: dict[str, Any] = {"userid": userid}
-        for column in SCE_OPTIONAL_COLUMNS:
+        for column in SCE_DEMOGRAPHIC_COLUMNS:
             if column not in group:
                 continue
             values = group[column].replace("", pd.NA).dropna()
@@ -251,7 +251,7 @@ def normalize_sce_raw_frame(
     frame["survey_timestamp"] = pd.to_datetime(frame["survey_date"], errors="coerce")
     frame = frame.dropna(subset=["survey_timestamp"]).sort_values(["userid", "survey_timestamp"])
     if demographic_lookup is not None and not demographic_lookup.empty:
-        for column in SCE_OPTIONAL_COLUMNS:
+        for column in SCE_DEMOGRAPHIC_COLUMNS:
             if column in demographic_lookup:
                 if column not in frame:
                     frame[column] = pd.NA

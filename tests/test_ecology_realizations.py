@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -28,15 +29,7 @@ class EcologyRealizationsTests(unittest.TestCase):
             original_files = {path.name: path.read_bytes() for path in run_dir.iterdir()}
             realizations_csv = root / "realizations.csv"
             pd.DataFrame(
-                [
-                    {
-                        "target_month": "2026-06-01",
-                        "consumption_growth_pct": 1.25,
-                        "revolving_credit_growth_pct": -1.0,
-                        "employment_rate_pct": 91.25,
-                        "price_growth_pct": 2.75,
-                    }
-                ],
+                self._realization_rows(),
                 columns=list(REALIZATION_COLUMNS),
             ).to_csv(realizations_csv, index=False)
 
@@ -45,16 +38,21 @@ class EcologyRealizationsTests(unittest.TestCase):
             for name, original_bytes in original_files.items():
                 self.assertEqual(original_bytes, (run_dir / name).read_bytes(), name)
             self.assertEqual(
-                set(original_files) | {"realized_outcomes.csv", "forecast_errors.csv", "realization_manifest.json"},
+                set(original_files) | {"realization_append"},
                 {path.name for path in run_dir.iterdir()},
             )
 
-            realized_outcomes = pd.read_csv(run_dir / "realized_outcomes.csv")
-            self.assertEqual(list(REALIZATION_COLUMNS), realized_outcomes.columns.tolist())
+            append_dir = run_dir / "realization_append"
+            self.assertEqual(
+                {"realized_outcomes.csv", "forecast_errors.csv", "canonical_realizations.csv", "realization_manifest.json"},
+                {path.name for path in append_dir.iterdir()},
+            )
+            realized_outcomes = pd.read_csv(append_dir / "realized_outcomes.csv")
+            self.assertEqual(["target_month", *REALIZATION_METRICS], realized_outcomes.columns.tolist())
             self.assertEqual("2026-06-01", realized_outcomes.iloc[0]["target_month"])
             self.assertAlmostEqual(2.75, float(realized_outcomes.iloc[0]["price_growth_pct"]))
 
-            forecast_errors = pd.read_csv(run_dir / "forecast_errors.csv")
+            forecast_errors = pd.read_csv(append_dir / "forecast_errors.csv")
             self.assertEqual(["median"], forecast_errors["scenario"].tolist())
             self.assertEqual(["2026-06-01"], forecast_errors["target_month"].tolist())
             for metric in REALIZATION_METRICS:
@@ -67,13 +65,21 @@ class EcologyRealizationsTests(unittest.TestCase):
                 float(median_row["error_price_growth_pct"]),
             )
 
-            realization_manifest = json.loads((run_dir / "realization_manifest.json").read_text(encoding="utf-8"))
+            realization_manifest = json.loads((append_dir / "realization_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(RETROSPECTIVE_LABEL, realization_manifest["retrospective_label"])
             self.assertEqual("realized_minus_forecast", realization_manifest["error_definition"])
+            self.assertEqual("2026-05-15", realization_manifest["forecast_cutoff_as_of_date"])
             self.assertIn("source_forecast_manifest_sha256", realization_manifest)
             self.assertEqual(
-                {"realized_outcomes.csv", "forecast_errors.csv"},
+                {"realized_outcomes.csv", "forecast_errors.csv", "canonical_realizations.csv"},
                 set(realization_manifest["output_artifacts_sha256"]),
+            )
+            canonical = pd.read_csv(append_dir / "canonical_realizations.csv").to_dict(orient="records")
+            self.assertEqual(self._realization_rows(), realization_manifest["normalized_realization_rows"])
+            self.assertEqual("BEA", canonical[0]["source"])
+            self.assertEqual(
+                realization_manifest["canonical_realization_input_sha256"],
+                self._sha256(append_dir / "canonical_realizations.csv"),
             )
 
     def test_refuses_to_append_when_outputs_already_exist(self) -> None:
@@ -81,7 +87,7 @@ class EcologyRealizationsTests(unittest.TestCase):
             root = Path(directory)
             run_dir = self._build_fixture_run(root)
             realizations_csv = self._write_valid_realizations_csv(root / "realizations.csv")
-            (run_dir / "realized_outcomes.csv").write_text("already here\n", encoding="utf-8")
+            (run_dir / "realization_append").mkdir()
 
             with self.assertRaisesRegex(ValueError, "Realization outputs already exist"):
                 append_realizations(run_dir=run_dir, realizations_csv=realizations_csv)
@@ -93,81 +99,33 @@ class EcologyRealizationsTests(unittest.TestCase):
         cases = [
             (
                 "extra column",
-                [
-                    {
-                        "target_month": "2026-06-01",
-                        "consumption_growth_pct": 1.0,
-                        "revolving_credit_growth_pct": 3.0,
-                        "employment_rate_pct": 4.0,
-                        "price_growth_pct": 5.0,
-                        "extra_metric": 6.0,
-                    }
-                ],
-                ["target_month", *REALIZATION_METRICS, "extra_metric"],
+                self._realization_rows(),
+                [*REALIZATION_COLUMNS, "extra_metric"],
                 "exactly these columns",
             ),
             (
                 "nonnumeric",
-                [
-                    {
-                        "target_month": "2026-06-01",
-                        "consumption_growth_pct": "nope",
-                        "revolving_credit_growth_pct": 3.0,
-                        "employment_rate_pct": 4.0,
-                        "price_growth_pct": 5.0,
-                    }
-                ],
+                [self._realization_rows()[0] | {"value": "nope"}, *self._realization_rows()[1:]],
                 list(REALIZATION_COLUMNS),
                 "must be numeric",
             ),
             (
                 "nonfinite",
-                [
-                    {
-                        "target_month": "2026-06-01",
-                        "consumption_growth_pct": float("inf"),
-                        "revolving_credit_growth_pct": 3.0,
-                        "employment_rate_pct": 4.0,
-                        "price_growth_pct": 5.0,
-                    }
-                ],
+                [self._realization_rows()[0] | {"value": float("inf")}, *self._realization_rows()[1:]],
                 list(REALIZATION_COLUMNS),
                 "must be finite",
             ),
             (
                 "target mismatch",
-                [
-                    {
-                        "target_month": "2026-05-01",
-                        "consumption_growth_pct": 1.0,
-                        "revolving_credit_growth_pct": 3.0,
-                        "employment_rate_pct": 4.0,
-                        "price_growth_pct": 5.0,
-                    }
-                ],
+                [self._realization_rows()[0] | {"target_month": "2026-05-01"}, *self._realization_rows()[1:]],
                 list(REALIZATION_COLUMNS),
                 "does not match manifest target",
             ),
             (
                 "wrong row count",
-                [
-                    {
-                        "target_month": "2026-06-01",
-                        "consumption_growth_pct": 1.0,
-                        "revolving_credit_growth_pct": 3.0,
-                        "employment_rate_pct": 4.0,
-                        "price_growth_pct": 5.0,
-                    },
-                    {
-                        "target_month": "2026-06-01",
-                        "consumption_growth_pct": 1.1,
-                        "revolving_credit_growth_pct": 3.1,
-                        "employment_rate_pct": 4.1,
-                        "price_growth_pct": 5.1,
-                    },
-                ],
+                self._realization_rows()[:3],
                 list(REALIZATION_COLUMNS),
-                "exactly one row",
+                "exactly 4 rows",
             ),
         ]
         for label, rows, columns, message in cases:
@@ -179,6 +137,37 @@ class EcologyRealizationsTests(unittest.TestCase):
                     pd.DataFrame(rows, columns=columns).to_csv(realizations_csv, index=False)
                     with self.assertRaisesRegex(ValueError, message):
                         append_realizations(run_dir=run_dir, realizations_csv=realizations_csv)
+
+    def test_rejects_realization_provenance_that_cannot_prove_post_cutoff_availability(self) -> None:
+        cases = [
+            ("release at cutoff", {"release_date": "2026-05-15"}, "must be after forecast cutoff"),
+            ("missing source", {"source": ""}, "source .* must be non-empty"),
+            ("non-url source reference", {"source_url": "BEA table 2.3.5"}, "must be an http\\(s\\) URL"),
+            ("vintage predates release", {"vintage_date": "2026-05-15"}, "cannot precede release_date"),
+        ]
+        for label, replacement, message in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                run_dir = self._build_fixture_run(root)
+                rows = [self._realization_rows()[0] | replacement, *self._realization_rows()[1:]]
+                realizations_csv = root / "realizations.csv"
+                pd.DataFrame(rows, columns=list(REALIZATION_COLUMNS)).to_csv(realizations_csv, index=False)
+                with self.assertRaisesRegex(ValueError, message):
+                    append_realizations(run_dir=run_dir, realizations_csv=realizations_csv)
+
+    def test_publish_failure_leaves_no_accepted_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._build_fixture_run(root)
+            realizations_csv = self._write_valid_realizations_csv(root / "realizations.csv")
+
+            with mock.patch("macro_llm_tournament.ecology_realizations.os.replace", side_effect=OSError("publish failed")):
+                with self.assertRaisesRegex(OSError, "publish failed"):
+                    append_realizations(run_dir=run_dir, realizations_csv=realizations_csv)
+
+            self.assertFalse((run_dir / "realization_append").exists())
+            self.assertFalse((run_dir / ".realization_append.lock").exists())
+            self.assertFalse(any(path.name.endswith(".staging") for path in run_dir.iterdir()))
 
     def test_rejects_manifest_schema_and_hash_mismatches(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -248,19 +237,35 @@ class EcologyRealizationsTests(unittest.TestCase):
 
     @staticmethod
     def _write_valid_realizations_csv(path: Path) -> Path:
-        pd.DataFrame(
-            [
-                {
-                    "target_month": "2026-06-01",
-                    "consumption_growth_pct": 1.0,
-                    "revolving_credit_growth_pct": 3.0,
-                    "employment_rate_pct": 4.0,
-                    "price_growth_pct": 5.0,
-                }
-            ],
-            columns=list(REALIZATION_COLUMNS),
-        ).to_csv(path, index=False)
+        pd.DataFrame(EcologyRealizationsTests._realization_rows(), columns=list(REALIZATION_COLUMNS)).to_csv(path, index=False)
         return path
+
+    @staticmethod
+    def _realization_rows() -> list[dict[str, object]]:
+        values = {
+            "consumption_growth_pct": 1.25,
+            "revolving_credit_growth_pct": -1.0,
+            "employment_rate_pct": 91.25,
+            "price_growth_pct": 2.75,
+        }
+        return [
+            {
+                "target_month": "2026-06-01",
+                "metric": metric,
+                "value": value,
+                "source": "BEA",
+                "source_url": f"https://example.test/{metric}",
+                "vintage_date": "2026-06-16",
+                "release_date": "2026-06-15",
+            }
+            for metric, value in values.items()
+        ]
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        import hashlib
+
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 if __name__ == "__main__":

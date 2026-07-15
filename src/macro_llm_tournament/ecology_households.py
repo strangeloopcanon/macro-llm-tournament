@@ -20,7 +20,7 @@ from .ecology_provider import (
 from .ecology_models import HouseholdPolicyBranch, HouseholdResponse, QuantileTriplet
 
 
-HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v15"
+HOUSEHOLD_PROMPT_VERSION = "household_ecology_monthly_v16"
 
 
 class LiveCallBudget:
@@ -257,15 +257,18 @@ the next 12 months. The personal job-loss prior, when present, is the respondent
 reported chance of losing the current job over 12 months. Translate that personal
 prior into a next-month probability rather than copying it. The separate
 unemployment-higher probability is an aggregate U.S. outlook and must never be
-treated as personal job-loss risk. If this household is currently not
-employed, return zero for job-loss probability; job search is handled separately.
-Work and job-search hours are totals for next
-month. Write two conditional dollar policies: one if employed next month and
-one if not employed next month. For a household that is already not employed,
-the second branch means its current status continues; it is not a fresh job-loss
-shock and should not trigger another automatic spending cut. For an employed
-household, the second branch does represent losing or leaving work before next
-month. Do not rebuild a prudent budget from zero. The
+treated as personal job-loss risk. If this household is currently not employed,
+return zero for job-loss probability.
+
+This rolling household-demand forecast holds the observed employment share,
+hours, and wage income fixed for the next month. The job-loss and labor-hour
+answers are recorded beliefs and conditional plans for later counterfactual
+work; they do not change employment or income in this run. The executor applies
+the employed policy to the currently employed share and the not-employed policy
+to the currently not-employed share. Do not make either policy react to a job
+loss that this rolling executor does not realize. Work and job-search hours are
+totals for next month, conditional on the corresponding labor state. Do not
+rebuild a prudent budget from zero. The
 baseline committed and discretionary amounts are an origin-safe estimate of
 this household's recent typical monthly expenditures, expressed in the same
 dollar scale as its income and balance sheet. Treat that estimate as the
@@ -293,9 +296,9 @@ For every p10/p50/p90 block, return finite numbers satisfying p10 <= p50 <=
 p90. Inflation must be within [-25, 40], income growth within [-50, 50], job
 loss probability within [0, 100], work hours within [0, 320], and job-search hours within [0, 200]. Planned work hours
 are hours conditional on being employed next month; if currently unemployed,
-report hours conditional on finding work. The deterministic labor market uses
-the job-loss probability and employment_share to determine the expected employed
-share, then applies these conditional hours. Consumption levels, debt-payment,
+report hours conditional on finding work. The rolling household-demand executor
+does not use these labor fields to alter the observed employment state.
+Consumption levels, debt-payment,
 and borrowing fields must be nonnegative; deposit change may be signed.
 
 INPUT
