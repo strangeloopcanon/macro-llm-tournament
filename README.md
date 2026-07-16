@@ -1,5 +1,11 @@
 # Macro LLM Tournament
 
+![LLM household economy one-month predictions versus first-release reality](reports/current_macro_prediction_surface.png)
+
+The current result at a glance: four rolling one-month forecasts for nine declared
+macro outputs, plus the frozen and unscored August forecast. Red is the LLM household
+economy, blue is first-release reality, and gray is the information-visible baseline.
+
 This repository contains a runnable 200-household LLM economy. Real SCE histories
 supply household priors, matched SCF records supply continuous financial states,
 GPT-5.5 writes conditional household policies in dollars, and ordinary code settles
