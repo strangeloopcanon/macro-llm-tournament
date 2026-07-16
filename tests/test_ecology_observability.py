@@ -202,7 +202,7 @@ class EcologyObservabilityTests(unittest.TestCase):
         )
         self.assertEqual(
             next(row for row in rows if row["layer"] == "firm_plan")["source_class"],
-            "mechanical_firm_feedback",
+            "household_demand_driven_firm_plan",
         )
         macro_execution = {
             row["metric"]: row["value"]

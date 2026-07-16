@@ -91,8 +91,8 @@ for August and unscored.
 | Price growth | PCEPI | household-belief/deflation proxy; RMSE 0.193 pp, 4/4 direction |
 | Real consumption growth | real PCE | belief/deflation proxy; RMSE 0.622 pp, 0/4 direction |
 | Real disposable income growth | real disposable income | belief/deflation proxy; RMSE 0.313 pp, 3/4 direction |
-| Payroll growth | PAYEMS | target-month producer-plan proxy using origin inventory; score regenerated below |
-| Unemployment-rate level | UNRATE | target-month producer-plan proxy using origin inventory; score regenerated below |
+| Payroll growth | PAYEMS | target-month producer-plan proxy using origin inventory; RMSE 0.104 pp, 2/4 direction |
+| Unemployment-rate level | UNRATE | target-month producer-plan proxy using origin inventory; RMSE 0.069 pp, 0/4 direction |
 | Saving-rate change | PSAVERT | gross household budget-residual proxy; RMSE 0.510 pp, 1/4 direction |
 | Revolving-credit growth | revolving credit | direction-only proxy; 1/4 direction, no level-error score |
 | Retail-sales growth | retail sales | declared demand proxy; RMSE 1.103 pp, 1/4 direction |

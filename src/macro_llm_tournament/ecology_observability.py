@@ -375,7 +375,7 @@ def _run_payload(run_dir: Path, weights: dict[str, float]) -> tuple[dict[str, An
             field,
             value,
             unit,
-            "mechanical_firm_feedback",
+            "household_demand_driven_firm_plan",
             "Target-month firm plan from predicted household demand and origin inventory; code-enforced, not a separate LLM output.",
         )
     return manifest, rows

@@ -83,7 +83,7 @@ MACRO_TARGET_CONTRACT: dict[str, dict[str, str]] = {
     "payroll_growth_pct": {
         "target_name": "payroll_growth_pct",
         "series_id": "PAYEMS",
-        "mapping_quality": "mechanical_firm_feedback_proxy",
+        "mapping_quality": "target_month_firm_plan_proxy",
         "score_mode": "full",
         "unit": "percent",
         "unit_label": "Monthly growth (%)",
@@ -96,7 +96,7 @@ MACRO_TARGET_CONTRACT: dict[str, dict[str, str]] = {
     "unemployment_rate_level": {
         "target_name": "unemployment_rate_level",
         "series_id": "UNRATE",
-        "mapping_quality": "mechanical_firm_feedback_proxy",
+        "mapping_quality": "target_month_firm_plan_proxy",
         "score_mode": "full",
         "direction_mode": "change_from_visible_baseline",
         "unit": "percent",
