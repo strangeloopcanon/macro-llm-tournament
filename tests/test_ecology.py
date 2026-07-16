@@ -34,6 +34,11 @@ from macro_llm_tournament.ecology_households import (
     household_request_identity,
     normalize_household_payload,
 )
+from macro_llm_tournament.ecology_information import build_macro_information_card
+from macro_llm_tournament.ecology_macro import (
+    MACRO_TARGET_CONTRACT,
+    visible_baseline_from_card,
+)
 from macro_llm_tournament.ecology_models import (
     CreditIntermediaryState,
     EmployerState,
@@ -48,6 +53,12 @@ FIXTURE_ROOT = PROJECT_ROOT / "examples/ecology_fixture"
 FIXTURE_HOUSEHOLDS = FIXTURE_ROOT / "households.csv"
 FIXTURE_HISTORY = FIXTURE_ROOT / "history.csv"
 FIXTURE_BUNDLE = FIXTURE_ROOT / "origin_snapshot.json"
+
+
+def _fixture_origin_with_macro_card() -> dict[str, object]:
+    origin = json.loads(FIXTURE_BUNDLE.read_text(encoding="utf-8"))["origin_information"]
+    origin["compact_macro_information"] = build_macro_information_card(origin)
+    return origin
 
 
 def _valid_materialized_history() -> pd.DataFrame:
@@ -418,7 +429,7 @@ class HouseholdEcologyTests(unittest.TestCase):
         macro = _weighted_macro(
             result,
             [state],
-            {"origin_visible_macro_context": {"FEDFUNDS": {"value": 4.0}}},
+            _fixture_origin_with_macro_card(),
         )
         consumption = result.households[0].consumption_usd
         self.assertAlmostEqual(macro["wage_income_usd"], 1_000.0)
@@ -757,6 +768,18 @@ class HouseholdEcologyTests(unittest.TestCase):
             paths = pd.read_csv(output / "macro_forecast_paths.csv")
             self.assertEqual(paths["scenario"].tolist(), ["median"])
             self.assertTrue((paths["output_units"] >= paths["units_sold"]).all())
+            self.assertTrue(set(MACRO_TARGET_CONTRACT).issubset(paths.columns))
+            baseline_fields = {
+                mapping["visible_baseline_field"]
+                for mapping in MACRO_TARGET_CONTRACT.values()
+            }
+            self.assertTrue(baseline_fields.issubset(paths.columns))
+            self.assertIn("next_period_price_growth_pct", paths.columns)
+            self.assertNotIn("unemployment_rate_pct", paths.columns)
+            self.assertNotEqual(
+                float(paths.loc[0, "price_growth_pct"]),
+                float(paths.loc[0, "next_period_price_growth_pct"]),
+            )
             self.assertEqual(len(pd.read_csv(output / "household_decisions.csv")), 12)
             cards = json.loads((output / "household_cards.json").read_text())
             for card in cards:
@@ -769,6 +792,33 @@ class HouseholdEcologyTests(unittest.TestCase):
                 )
             self.assertEqual(manifest["state_policy"], "rolling_reanchored")
             self.assertEqual(manifest["source_binding_authority"], "source_sha256")
+
+    def test_fixture_macro_baselines_are_visible_at_the_origin_and_reject_future_data(self) -> None:
+        origin = _fixture_origin_with_macro_card()
+        as_of_date = pd.Timestamp(origin["as_of_date"])
+        histories = origin["origin_visible_macro_history"]
+        card = origin["compact_macro_information"]
+        for metric, mapping in MACRO_TARGET_CONTRACT.items():
+            series_id = mapping["series_id"]
+            self.assertTrue(
+                all(pd.Timestamp(row["observation_date"]) <= as_of_date for row in histories[series_id]),
+                metric,
+            )
+            self.assertTrue(card["series"][series_id]["available"], metric)
+            self.assertIsInstance(
+                visible_baseline_from_card(
+                    card, series_id, mapping["visible_baseline_kind"]
+                ),
+                float,
+                metric,
+            )
+
+        leaked = json.loads(FIXTURE_BUNDLE.read_text(encoding="utf-8"))["origin_information"]
+        leaked["origin_visible_macro_history"]["PCE"].append(
+            {"observation_date": "2026-06-01", "value": 99_999.0}
+        )
+        with self.assertRaisesRegex(ValueError, "PCE has a future observation"):
+            build_macro_information_card(leaked)
 
     def test_recursive_state_policy_is_rejected(self) -> None:
         parser = build_arg_parser()

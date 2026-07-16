@@ -167,6 +167,7 @@ ecology-retrospective-live: ecology-history
 		--workers $(RETROSPECTIVE_WORKERS) \
 		--max-live-calls 920 \
 		--cache-dir $(RETROSPECTIVE_CACHE) \
+		--prospective-run $(CURRENT_RUN_DIR) \
 		--output-dir $(RETROSPECTIVE_DIR)
 
 ecology-retrospective-replay: ecology-history
@@ -184,6 +185,7 @@ ecology-retrospective-replay: ecology-history
 		--workers $(RETROSPECTIVE_WORKERS) \
 		--max-live-calls 0 \
 		--cache-dir $(RETROSPECTIVE_CACHE) \
+		--prospective-run $(CURRENT_RUN_DIR) \
 		--output-dir $(RETROSPECTIVE_DIR)
 
 ecology-observability:

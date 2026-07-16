@@ -7,19 +7,23 @@ import pandas as pd
 
 from macro_llm_tournament import ecology_observability
 from macro_llm_tournament.ecology import _artifact_sha256
+from macro_llm_tournament.ecology_macro import (
+    MACRO_TARGET_CONTRACT,
+    contemporaneous_firm_plan,
+)
 
 
 class EcologyObservabilityTests(unittest.TestCase):
-    def test_firm_shadow_maps_demand_and_inventory_with_declared_signs(self) -> None:
-        balanced = ecology_observability.firm_response_shadow(
+    def test_firm_plan_maps_demand_and_origin_inventory_with_declared_signs(self) -> None:
+        balanced = contemporaneous_firm_plan(
             consumption_growth_pct=2.0,
-            inventory_end_units=8.0,
-            units_sold=100.0,
+            inventory_start_units=8.0,
+            baseline_sales_units=100.0,
         )
-        shortage = ecology_observability.firm_response_shadow(
+        shortage = contemporaneous_firm_plan(
             consumption_growth_pct=2.0,
-            inventory_end_units=4.0,
-            units_sold=100.0,
+            inventory_start_units=4.0,
+            baseline_sales_units=100.0,
         )
         self.assertAlmostEqual(balanced["firm_expected_sales_index"], 102.0)
         self.assertAlmostEqual(balanced["firm_target_output_index"], 102.0)
@@ -27,17 +31,17 @@ class EcologyObservabilityTests(unittest.TestCase):
         self.assertAlmostEqual(balanced["firm_planned_employment_index"], 100.5)
         self.assertGreater(shortage["firm_target_output_index"], balanced["firm_target_output_index"])
         self.assertGreater(shortage["firm_price_pressure_pp"], balanced["firm_price_pressure_pp"])
-        with self.assertRaisesRegex(ValueError, "units_sold must be positive"):
-            ecology_observability.firm_response_shadow(
+        with self.assertRaisesRegex(ValueError, "baseline_sales_units must be positive"):
+            contemporaneous_firm_plan(
                 consumption_growth_pct=2.0,
-                inventory_end_units=8.0,
-                units_sold=0.0,
+                inventory_start_units=8.0,
+                baseline_sales_units=0.0,
             )
-        with self.assertRaisesRegex(ValueError, "inventory_end_units must be nonnegative"):
-            ecology_observability.firm_response_shadow(
+        with self.assertRaisesRegex(ValueError, "inventory_start_units must be nonnegative"):
+            contemporaneous_firm_plan(
                 consumption_growth_pct=2.0,
-                inventory_end_units=-1.0,
-                units_sold=100.0,
+                inventory_start_units=-1.0,
+                baseline_sales_units=100.0,
             )
 
     def test_employment_branch_requires_a_json_boolean(self) -> None:
@@ -116,23 +120,33 @@ class EcologyObservabilityTests(unittest.TestCase):
                     }
                 ]
             ).to_csv(run_dir / "household_decisions.csv", index=False)
-            pd.DataFrame(
-                [
-                    {
-                        "scenario": "median",
-                        "consumption_growth_pct": -12.5,
-                        "routine_nominal_spending_drift_pct": 1.0,
-                        "gross_income_residual_rate_pct": 2.0,
-                        "gross_income_residual_rate_change_pp": -0.5,
-                        "revolving_credit_growth_pct": 12.5,
-                        "employment_rate_pct": 95.0,
-                        "price_growth_pct": 0.3,
-                        "output_units": 90.0,
-                        "units_sold": 90.0,
-                        "inventory_end_units": 9.0,
-                    }
-                ]
-            ).to_csv(run_dir / "macro_forecast_paths.csv", index=False)
+            macro_row = {
+                "scenario": "median",
+                "routine_nominal_spending_drift_pct": 1.0,
+                "gross_income_residual_rate_pct": 2.0,
+                "gross_income_residual_rate_change_pp": -0.5,
+                "next_period_price_growth_pct": 0.3,
+                "employment_rate_pct": 95.0,
+                "household_nonemployment_share_pct": 5.0,
+                "expected_inflation_annual_pct": 2.0,
+                "expected_income_growth_annual_pct": 1.5,
+                "output_units": 90.0,
+                "units_sold": 90.0,
+                "inventory_end_units": 9.0,
+                "firm_expected_sales_index": 87.5,
+                "firm_target_output_index": 87.15,
+                "firm_required_labor_index": 87.15,
+                "firm_planned_employment_index": 96.7875,
+                "firm_price_pressure_pp": -1.0,
+                "firm_inventory_share_pct": 10.0,
+                "firm_inventory_gap_pp": -2.0,
+            }
+            for index, (metric, mapping) in enumerate(MACRO_TARGET_CONTRACT.items()):
+                macro_row[metric] = float(index + 1)
+                macro_row[mapping["visible_baseline_field"]] = float(index) / 10.0
+            pd.DataFrame([macro_row]).to_csv(
+                run_dir / "macro_forecast_paths.csv", index=False
+            )
             (run_dir / "median_economy.json").write_text(
                 json.dumps(
                     {
@@ -187,9 +201,17 @@ class EcologyObservabilityTests(unittest.TestCase):
             "llm_household_intention",
         )
         self.assertEqual(
-            next(row for row in rows if row["layer"] == "firm_response_shadow")["source_class"],
+            next(row for row in rows if row["layer"] == "firm_plan")["source_class"],
             "mechanical_firm_feedback",
         )
+        macro_execution = {
+            row["metric"]: row["value"]
+            for row in rows
+            if row["layer"] == "macro_execution"
+        }
+        self.assertTrue(set(MACRO_TARGET_CONTRACT).issubset(macro_execution))
+        self.assertEqual(macro_execution["price_growth_pct"], 3.0)
+        self.assertEqual(macro_execution["next_period_price_growth_pct"], 0.3)
 
     def test_feedback_period_two_adds_unscored_household_and_firm_markers(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -310,13 +332,14 @@ class EcologyObservabilityTests(unittest.TestCase):
                     {
                         "origin_month": "2026-01-01",
                         "target_month": "2026-02-01",
-                        "metric": "consumption_growth_pct",
-                        "prediction": 0.2,
-                        "actual": 0.4,
-                        "routine_nominal_spending_drift_pct": 0.3,
-                        "mapping_quality": "closest_aggregate_proxy",
-                        "mapping_note": "test mapping",
+                        "metric": metric,
+                        "prediction": float(index + 1),
+                        "context_prediction": float(index) / 10.0,
+                        "actual": float(index + 2),
+                        "mapping_quality": mapping["mapping_quality"],
+                        "mapping_note": mapping["note"],
                     }
+                    for index, (metric, mapping) in enumerate(MACRO_TARGET_CONTRACT.items())
                 ]
             )
             joined.to_csv(retrospective / "predicted_vs_actual.csv", index=False)
@@ -332,16 +355,13 @@ class EcologyObservabilityTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            pd.DataFrame(
-                [
-                    {
-                        "scenario": "median",
-                        "consumption_growth_pct": 0.5,
-                        "routine_nominal_spending_drift_pct": 0.6,
-                        "revolving_credit_growth_pct": -1.0,
-                    }
-                ]
-            ).to_csv(prospective / "macro_forecast_paths.csv", index=False)
+            prospective_row = {"scenario": "median"}
+            for index, (metric, mapping) in enumerate(MACRO_TARGET_CONTRACT.items()):
+                prospective_row[metric] = float(index + 1)
+                prospective_row[mapping["visible_baseline_field"]] = float(index) / 10.0
+            pd.DataFrame([prospective_row]).to_csv(
+                prospective / "macro_forecast_paths.csv", index=False
+            )
             (prospective / "manifest.json").write_text(
                 json.dumps(
                     {
@@ -365,10 +385,25 @@ class EcologyObservabilityTests(unittest.TestCase):
             )
             self.assertFalse(frozen["series_role"].eq("first_release_actual").any())
             economy_rows = frozen.loc[frozen["series_role"].eq("llm_household_economy")]
+            baseline_rows = frozen.loc[
+                frozen["series_role"].eq("origin_visible_baseline")
+            ]
+            self.assertEqual(set(economy_rows["metric"]), set(MACRO_TARGET_CONTRACT))
+            self.assertEqual(set(baseline_rows["metric"]), set(MACRO_TARGET_CONTRACT))
             self.assertTrue(
                 economy_rows["source_class"].eq(
                     "llm_household_economy_code_enforced_budgets_and_settlement"
                 ).all()
+            )
+            derivation_by_metric = economy_rows.set_index("metric")[
+                "derivation_class"
+            ].to_dict()
+            self.assertEqual(
+                derivation_by_metric,
+                {
+                    metric: mapping["mapping_quality"]
+                    for metric, mapping in MACRO_TARGET_CONTRACT.items()
+                },
             )
 
     def test_public_economy_label_names_code_enforced_settlement(self) -> None:

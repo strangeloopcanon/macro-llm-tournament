@@ -20,30 +20,12 @@ from .ecology import (
     _write_json,
     run as run_ecology,
 )
+from .ecology_macro import MACRO_PREDICTION_SCHEMA_VERSION, MACRO_TARGET_CONTRACT
 
 
-SCHEMA_VERSION = "household_ecology_retrospective_v7"
-MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v4"
-METRIC_MAPPINGS: dict[str, dict[str, str]] = {
-    "consumption_growth_pct": {
-        "target_name": "pce_growth_pct",
-        "series_id": "PCE",
-        "actual_field": "target_value",
-        "actual_transform": "identity",
-        "mapping_quality": "closest_aggregate_proxy",
-        "score_mode": "full",
-        "note": "Prediction is executed target-month spending relative to an SCF-conditioned recent-typical recurring baseline; origin-visible PCE growth is context only and is not pre-applied. The result is interpreted as month-over-month nominal PCE growth, a load-bearing aggregate proxy rather than linked household-level growth.",
-    },
-    "revolving_credit_growth_pct": {
-        "target_name": "revolving_credit_growth_pct",
-        "series_id": "REVOLSL",
-        "actual_field": "target_value",
-        "actual_transform": "identity",
-        "mapping_quality": "directional_proxy",
-        "score_mode": "direction_only",
-        "note": "Ecology revolving-debt growth mapped to aggregate revolving consumer-credit growth.",
-    },
-}
+SCHEMA_VERSION = "household_ecology_retrospective_v8"
+MAPPING_SCHEMA_VERSION = "household_ecology_macro_mapping_v5"
+METRIC_MAPPINGS: dict[str, dict[str, str]] = MACRO_TARGET_CONTRACT
 SCENARIOS = ("median",)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -92,10 +74,11 @@ def _validate_origins(bundle: Path, origins: list[str]) -> None:
 
 
 def _mapped_actual(row: pd.Series, mapping: dict[str, str]) -> float:
-    value = float(row[mapping["actual_field"]])
-    if mapping["actual_transform"] == "one_hundred_minus":
+    value = float(row[mapping.get("actual_field", "target_value")])
+    transform = mapping.get("actual_transform", "identity")
+    if transform == "one_hundred_minus":
         value = 100.0 - value
-    elif mapping["actual_transform"] == "negative_first_difference":
+    elif transform == "negative_first_difference":
         value = -(value - float(row["first_release_denominator_value"]))
     if not math.isfinite(value):
         raise ValueError("mapped actual must be finite")
@@ -147,20 +130,32 @@ def _realization_rows(targets_path: Path, target_months: list[str]) -> pd.DataFr
 
 
 def _prospective_rows(run_dir: Path | None) -> pd.DataFrame:
+    columns = [
+        "target_month",
+        "metric",
+        "scenario",
+        "prediction",
+        "context_prediction",
+    ]
     if run_dir is None:
-        return pd.DataFrame(columns=["target_month", "metric", "scenario", "prediction"])
+        return pd.DataFrame(columns=columns)
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     paths = pd.read_csv(run_dir / "macro_forecast_paths.csv")
     if len(paths) != 1 or set(paths["scenario"].astype(str)) != set(SCENARIOS):
         raise ValueError("macro_forecast_paths.csv must contain exactly one median point path")
-    long = paths.melt(
-        id_vars=["scenario"],
-        value_vars=list(METRIC_MAPPINGS),
-        var_name="metric",
-        value_name="prediction",
-    )
-    long.insert(0, "target_month", str(manifest["target_month"]))
-    return long
+    rows = []
+    source = paths.iloc[0]
+    for metric, mapping in METRIC_MAPPINGS.items():
+        rows.append(
+            {
+                "target_month": str(manifest["target_month"]),
+                "metric": metric,
+                "scenario": str(source["scenario"]),
+                "prediction": float(source[metric]),
+                "context_prediction": float(source[mapping["visible_baseline_field"]]),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _chart_subtitle(joined: pd.DataFrame, model: str) -> str:
@@ -170,13 +165,6 @@ def _chart_subtitle(joined: pd.DataFrame, model: str) -> str:
         "re-anchored to its SCF financial state, latest origin-safe SCE history, "
         "and origin-visible public information."
     )
-
-
-def _cumulative_growth_index(values: Sequence[float], *, base: float = 100.0) -> np.ndarray:
-    growth = np.asarray(values, dtype=float)
-    if not np.all(np.isfinite(growth)) or np.any(growth < -100.0):
-        raise ValueError("growth rates must be finite and no smaller than -100 percent")
-    return np.concatenate(([base], base * np.cumprod(1.0 + growth / 100.0)))
 
 
 def _write_chart(
@@ -192,64 +180,12 @@ def _write_chart(
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
 
-    labels = {
-        "cumulative_consumption_index": "Compounded one-step rates (start=100)",
-        "consumption_growth_pct": "Consumption growth (%)",
-        "revolving_credit_growth_pct": "Credit growth (%, sign proxy)",
-    }
-    fig, axes = plt.subplots(len(labels), 1, figsize=(11.5, 11.5), sharex=True)
+    metrics = list(METRIC_MAPPINGS)
+    fig, axes = plt.subplots(3, 3, figsize=(16.5, 12.5), sharex=True)
     actual_color = "#2463A6"
     prediction_color = "#B23A2B"
-    for axis, (metric, label) in zip(axes, labels.items(), strict=True):
-        if metric == "cumulative_consumption_index":
-            subset = joined.loc[
-                joined["metric"].eq("consumption_growth_pct")
-                & joined["state_provenance"].eq("fixed_survey_scf_anchor")
-            ].copy()
-            pivot = subset.pivot(index="target_month", columns="scenario", values="prediction")
-            dates = pd.to_datetime(pivot.index)
-            actual_growth = (
-                subset.drop_duplicates("target_month")
-                .set_index("target_month")
-                .loc[pivot.index, "actual"]
-                .to_numpy(dtype=float)
-            )
-            index_dates = pd.DatetimeIndex([pd.to_datetime(subset["origin_month"]).min(), *dates])
-            axis.plot(
-                index_dates,
-                _cumulative_growth_index(pivot["median"].to_numpy(dtype=float)),
-                color=prediction_color,
-                marker="s",
-                linewidth=1.8,
-                label="LLM one-step median",
-            )
-            axis.plot(
-                index_dates,
-                _cumulative_growth_index(actual_growth),
-                color=actual_color,
-                marker="o",
-                linewidth=2.1,
-                label="First-release actual",
-            )
-            if "routine_nominal_spending_drift_pct" in subset:
-                routine_growth = (
-                    subset.drop_duplicates("target_month")
-                    .set_index("target_month")
-                    .loc[pivot.index, "routine_nominal_spending_drift_pct"]
-                    .to_numpy(dtype=float)
-                )
-                axis.plot(
-                    index_dates,
-                    _cumulative_growth_index(routine_growth),
-                    color="#6B6B6B",
-                    linestyle="--",
-                    linewidth=1.5,
-                    label="Origin-visible routine anchor",
-                )
-            axis.set_ylabel(label, fontsize=9, labelpad=9)
-            axis.grid(axis="y", color="#D7D7D7", linewidth=0.6)
-            axis.spines[["top", "right"]].set_visible(False)
-            continue
+    for axis, metric in zip(axes.flat, metrics, strict=True):
+        mapping = METRIC_MAPPINGS[metric]
         subset = joined.loc[joined["metric"].eq(metric)].copy()
         pivot = subset.pivot(index="target_month", columns="scenario", values="prediction")
         dates = pd.to_datetime(pivot.index)
@@ -259,70 +195,101 @@ def _write_chart(
             .loc[pivot.index, "actual"]
             .to_numpy(dtype=float)
         )
+        prediction = pivot["median"].to_numpy(dtype=float)
         axis.plot(
             dates,
-            pivot["median"].to_numpy(dtype=float),
+            np.sign(prediction) if mapping["score_mode"] == "direction_only" else prediction,
             color=prediction_color,
             marker="s",
             linewidth=1.8,
-            label="LLM one-step median" if metric == "consumption_growth_pct" else None,
+            label="LLM economy",
         )
         axis.plot(
             dates,
-            actual,
+            np.sign(actual) if mapping["score_mode"] == "direction_only" else actual,
             color=actual_color,
             marker="o",
             linewidth=2.1,
-            label="First-release actual" if metric == "consumption_growth_pct" else None,
+            label="First-release actual",
         )
-        if (
-            metric == "consumption_growth_pct"
-            and "routine_nominal_spending_drift_pct" in subset
-        ):
-            routine = (
-                subset.drop_duplicates("target_month")
-                .set_index("target_month")
-                .loc[pivot.index, "routine_nominal_spending_drift_pct"]
-                .to_numpy(dtype=float)
-            )
-            axis.plot(
-                dates,
-                routine,
-                color="#6B6B6B",
-                linestyle="--",
-                linewidth=1.5,
-                label="Origin-visible routine anchor",
-            )
+        context = (
+            subset.drop_duplicates("target_month")
+            .set_index("target_month")
+            .loc[pivot.index, "context_prediction"]
+            .to_numpy(dtype=float)
+        )
+        axis.plot(
+            dates,
+            np.sign(context) if mapping["score_mode"] == "direction_only" else context,
+            color="#6B6B6B",
+            linestyle="--",
+            linewidth=1.5,
+            marker="^",
+            label="Origin-visible baseline",
+        )
         marker = prospective.loc[
             prospective["metric"].eq(metric) & prospective["scenario"].eq("median")
         ]
         if not marker.empty:
             axis.scatter(
                 pd.to_datetime(marker["target_month"]),
-                marker["prediction"],
+                np.sign(marker["prediction"])
+                if mapping["score_mode"] == "direction_only"
+                else marker["prediction"],
                 marker="D",
                 s=54,
                 facecolors="white",
                 edgecolors=prediction_color,
                 linewidths=1.8,
                 zorder=4,
-                label="Prospective, not yet scored" if metric == "consumption_growth_pct" else None,
+                label="Frozen, unscored",
             )
-        axis.axhline(0.0, color="#888888", linewidth=0.7)
-        axis.set_ylabel(label, fontsize=9, labelpad=9)
+            axis.scatter(
+                pd.to_datetime(marker["target_month"]),
+                np.sign(marker["context_prediction"])
+                if mapping["score_mode"] == "direction_only"
+                else marker["context_prediction"],
+                marker="D",
+                s=42,
+                facecolors="white",
+                edgecolors="#6B6B6B",
+                linewidths=1.4,
+                zorder=4,
+            )
+        if metric != "unemployment_rate_level":
+            axis.axhline(0.0, color="#888888", linewidth=0.7)
+        axis.set_title(mapping["chart_title"], fontsize=10.5)
+        axis.set_ylabel(mapping["unit_label"], fontsize=8.5, labelpad=7)
+        if mapping["score_mode"] == "direction_only":
+            axis.set_yticks([-1.0, 0.0, 1.0], ["contract", "zero", "expand"])
+            axis.set_ylim(-1.25, 1.25)
+        else:
+            axis.margins(y=0.16)
+        axis.text(
+            0.01,
+            0.98,
+            mapping["mapping_quality"].replace("_", " "),
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7.5,
+            color="#666666",
+        )
         axis.grid(axis="y", color="#D7D7D7", linewidth=0.6)
         axis.spines[["top", "right"]].set_visible(False)
-    axes[-1].xaxis.set_major_locator(mdates.MonthLocator())
-    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    for axis in axes[-1, :]:
+        axis.xaxis.set_major_locator(mdates.MonthLocator())
+        axis.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
     fig.suptitle(
-        "Household ecology: rolling one-month estimates vs first-release outcomes",
-        x=0.10,
+        "LLM Household Economy: One-Month Predictions vs First-Release Reality",
+        x=0.05,
         y=0.995,
         ha="left",
-        fontsize=15,
+        fontsize=16,
+        fontweight="bold",
     )
     fig.text(
-        0.08,
+        0.05,
         0.971,
         _chart_subtitle(joined, model),
         ha="left",
@@ -331,7 +298,7 @@ def _write_chart(
     )
     handles: list[Any] = []
     legend_labels: list[str] = []
-    for axis in axes:
+    for axis in axes.flat:
         for handle, label in zip(*axis.get_legend_handles_labels(), strict=True):
             if label not in legend_labels:
                 handles.append(handle)
@@ -339,17 +306,17 @@ def _write_chart(
     fig.legend(
         handles,
         legend_labels,
-        loc="upper center",
-        bbox_to_anchor=(0.57, 0.953),
+        loc="upper right",
+        bbox_to_anchor=(0.99, 0.958),
         frameon=False,
-        ncol=3,
+        ncol=4,
         fontsize=9,
     )
-    fig.subplots_adjust(left=0.14, right=0.98, top=0.91, bottom=0.06, hspace=0.11)
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.91, bottom=0.07, hspace=0.25, wspace=0.22)
     fig.text(
-        0.08,
+        0.05,
         0.012,
-        f"Sources: rolling {model} household ecology; ALFRED/FRED first releases. Consumption is magnitude-scored; revolving-credit mapping supports signs only.",
+        f"Sources: rolling {model} household ecology; ALFRED/FRED first releases. Every panel uses the same target month; proxy strength is stated inside each panel.",
         ha="left",
         fontsize=8.5,
         color="#555555",
@@ -359,21 +326,24 @@ def _write_chart(
 
 
 def _joined_rows(forecasts: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame:
-    id_columns = [
-        "origin_month",
-        "target_month",
-        "as_of_date",
-        "state_provenance",
-        "scenario",
-    ]
-    if "routine_nominal_spending_drift_pct" in forecasts.columns:
-        id_columns.append("routine_nominal_spending_drift_pct")
-    long = forecasts.melt(
-        id_vars=id_columns,
-        value_vars=list(METRIC_MAPPINGS),
-        var_name="metric",
-        value_name="prediction",
-    )
+    id_columns = ["origin_month", "target_month", "as_of_date", "state_provenance", "scenario"]
+    rows: list[pd.DataFrame] = []
+    for metric, mapping in METRIC_MAPPINGS.items():
+        required = {metric, mapping["visible_baseline_field"]}
+        missing = required.difference(forecasts.columns)
+        if missing:
+            raise ValueError(
+                f"forecast paths missing macro-contract fields for {metric}: "
+                f"{', '.join(sorted(missing))}"
+            )
+        block = forecasts.loc[:, id_columns].copy()
+        block["metric"] = metric
+        block["prediction"] = forecasts[metric].to_numpy(dtype=float)
+        block["context_prediction"] = forecasts[
+            mapping["visible_baseline_field"]
+        ].to_numpy(dtype=float)
+        rows.append(block)
+    long = pd.concat(rows, ignore_index=True)
     joined = long.merge(actuals, on=["target_month", "metric"], how="left", validate="many_to_one")
     if joined["actual"].isna().any():
         raise ValueError("forecast-to-actual join produced missing outcomes")
@@ -402,9 +372,20 @@ def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
             else float("nan")
         )
         score_mode = METRIC_MAPPINGS[str(metric)]["score_mode"]
-        direction_mask = (np.abs(prediction) > 1e-12) | (np.abs(actual) > 1e-12)
+        if METRIC_MAPPINGS[str(metric)].get("direction_mode") == "change_from_visible_baseline":
+            baseline = eligible["context_prediction"].to_numpy(dtype=float)
+            direction_prediction = prediction - baseline
+            direction_actual = actual - baseline
+        else:
+            direction_prediction = prediction
+            direction_actual = actual
+        direction_mask = (
+            (np.abs(direction_prediction) > 1e-12)
+            | (np.abs(direction_actual) > 1e-12)
+        )
         direction_match = (
-            np.sign(prediction[direction_mask]) == np.sign(actual[direction_mask])
+            np.sign(direction_prediction[direction_mask])
+            == np.sign(direction_actual[direction_mask])
             if score_mode in {"full", "direction_only"}
             else np.asarray([], dtype=bool)
         )
@@ -457,14 +438,13 @@ def _score_rows(joined: pd.DataFrame) -> pd.DataFrame:
 
 def _origin_visible_context_score_rows(joined: pd.DataFrame) -> pd.DataFrame:
     eligible = joined.loc[
-        joined["metric"].eq("consumption_growth_pct")
-        & joined["state_provenance"].eq("fixed_survey_scf_anchor")
-    ].drop_duplicates("target_month")
-    if "routine_nominal_spending_drift_pct" not in eligible.columns:
+        joined["state_provenance"].eq("fixed_survey_scf_anchor")
+    ].drop_duplicates(["target_month", "metric"])
+    if "context_prediction" not in eligible.columns:
         return pd.DataFrame()
     context = eligible.copy()
-    context["scenario"] = "origin_visible_drift"
-    context["prediction"] = context["routine_nominal_spending_drift_pct"]
+    context["scenario"] = "origin_visible_baseline"
+    context["prediction"] = context["context_prediction"]
     return _score_rows(context)
 
 
@@ -550,6 +530,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         manifest = {
             "schema_version": SCHEMA_VERSION,
+            "macro_prediction_schema_version": MACRO_PREDICTION_SCHEMA_VERSION,
             "mapping_schema_version": MAPPING_SCHEMA_VERSION,
             "evaluation_status": "retrospective_diagnostic_not_confirmatory",
             "outcomes_loaded_after_all_forecasts": True,
@@ -557,8 +538,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "score_eligibility": "all_fixed_survey_scf_anchor_rows",
             "initialization_transition": "fixed_survey_scf_anchor_reinitialized_at_each_rolling_origin",
             "forecast_semantics": {
-                "consumption_growth_pct": "executed target-month spending relative to an SCF-conditioned recent-typical recurring baseline; origin-visible PCE growth is context only and is not pre-applied; interpreted as month-over-month nominal PCE growth, a load-bearing aggregate proxy rather than linked household-level growth",
-                "revolving_credit_growth_pct": "simulated month opening to closing debt-stock change",
+                metric: mapping["note"] for metric, mapping in METRIC_MAPPINGS.items()
             },
             "origin_months": origins,
             "target_months": target_months,
@@ -618,9 +598,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "accounting_passed": all(bool(row["accounting_passed"]) for row in child_manifests),
             "mapping_contract": METRIC_MAPPINGS,
             "context_comparator": {
-                "scenario": "origin_visible_drift",
-                "metric": "consumption_growth_pct",
-                "source": "origin-visible one-month PCE change supplied in every household card",
+                "scenario": "origin_visible_baseline",
+                "metrics": list(METRIC_MAPPINGS),
+                "source": "the declared one-month change, or latest level for unemployment, visible at each forecast origin",
                 "execution_role": "context_only_not_pre_applied",
             },
             "inputs_sha256": {
@@ -672,22 +652,41 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 else "not scored"
             )
             report.append(f"| `{row.metric}` | {mae} | {rmse} | {direction} |")
-        context_score = scores.loc[
-            scores["scenario"].eq("origin_visible_drift")
-            & scores["metric"].eq("consumption_growth_pct")
-        ].iloc[0]
         report.extend(
             [
                 "",
-                "## Origin-Visible Context Comparator",
+                "## Origin-Visible Baselines",
                 "",
-                "The one-month PCE drift shown to every household is scored separately. "
-                "It is not executed by the economy, but it is a required comparator for deciding whether the household layer adds forecast information.",
+                "Each origin-visible one-month change, plus the latest unemployment-rate level, is scored separately. These values are context supplied to households; they are not executed by the economy.",
                 "",
-                f"Context RMSE: **{context_score.rmse:.3f}**; correlation: **{context_score.correlation:.3f}**; "
-                f"direction: **{context_score.direction_accuracy:.1%}**. The household layer does not beat this comparator on the four retrospective months.",
+                "| Metric | LLM RMSE | Visible-baseline RMSE | LLM direction | Baseline direction |",
+                "| --- | ---: | ---: | ---: | ---: |",
             ]
         )
+        visible_scores = scores.loc[
+            scores["scenario"].eq("origin_visible_baseline")
+        ].set_index("metric")
+        llm_scores = median_scores.set_index("metric")
+        for metric in METRIC_MAPPINGS:
+            llm = llm_scores.loc[metric]
+            visible = visible_scores.loc[metric]
+            llm_rmse = f"{llm.rmse:.3f}" if math.isfinite(llm.rmse) else "not scored"
+            visible_rmse = (
+                f"{visible.rmse:.3f}" if math.isfinite(visible.rmse) else "not scored"
+            )
+            llm_direction = (
+                f"{llm.direction_accuracy:.1%}"
+                if math.isfinite(llm.direction_accuracy)
+                else "not scored"
+            )
+            visible_direction = (
+                f"{visible.direction_accuracy:.1%}"
+                if math.isfinite(visible.direction_accuracy)
+                else "not scored"
+            )
+            report.append(
+                f"| `{metric}` | {llm_rmse} | {visible_rmse} | {llm_direction} | {visible_direction} |"
+            )
         report.extend(["", f"Accounting passed across all child runs: **{manifest['accounting_passed']}**."])
         (staging / "retrospective_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
         for path in sorted(staging.iterdir()):

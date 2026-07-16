@@ -4,18 +4,36 @@
     "origin_month": "2026-05-01",
     "origin_visible_macro_context": {
       "CPIAUCSL": {"observation_date": "2026-04-01", "value": 320.0},
+      "DSPIC96": {"observation_date": "2026-04-01", "value": 16120.0},
       "FEDFUNDS": {"observation_date": "2026-04-01", "value": 4.25},
+      "PAYEMS": {"observation_date": "2026-04-01", "value": 159200.0},
+      "PCE": {"observation_date": "2026-04-01", "value": 20500.0},
+      "PCEC96": {"observation_date": "2026-04-01", "value": 15800.0},
+      "PCEPI": {"observation_date": "2026-04-01", "value": 129.0},
+      "PSAVERT": {"observation_date": "2026-04-01", "value": 4.5},
+      "REVOLSL": {"observation_date": "2026-04-01", "value": 1125000.0},
+      "RSAFS": {"observation_date": "2026-04-01", "value": 710000.0},
+      "UNRATE": {"observation_date": "2026-04-01", "value": 4.1},
       "UMCSENT": {"observation_date": "2026-04-01", "value": 72.0}
     },
     "origin_visible_macro_history": {
       "CPIAUCSL": [{"observation_date": "2026-03-01", "value": 319.0}, {"observation_date": "2026-04-01", "value": 320.0}],
+      "DSPIC96": [{"observation_date": "2026-03-01", "value": 16080.0}, {"observation_date": "2026-04-01", "value": 16120.0}],
       "FEDFUNDS": [{"observation_date": "2026-03-01", "value": 4.25}, {"observation_date": "2026-04-01", "value": 4.25}],
+      "PAYEMS": [{"observation_date": "2026-03-01", "value": 159000.0}, {"observation_date": "2026-04-01", "value": 159200.0}],
+      "PCE": [{"observation_date": "2026-03-01", "value": 20300.0}, {"observation_date": "2026-04-01", "value": 20500.0}],
+      "PCEC96": [{"observation_date": "2026-03-01", "value": 15720.0}, {"observation_date": "2026-04-01", "value": 15800.0}],
+      "PCEPI": [{"observation_date": "2026-03-01", "value": 128.0}, {"observation_date": "2026-04-01", "value": 129.0}],
+      "PSAVERT": [{"observation_date": "2026-03-01", "value": 4.3}, {"observation_date": "2026-04-01", "value": 4.5}],
+      "REVOLSL": [{"observation_date": "2026-03-01", "value": 1120000.0}, {"observation_date": "2026-04-01", "value": 1125000.0}],
+      "RSAFS": [{"observation_date": "2026-03-01", "value": 705000.0}, {"observation_date": "2026-04-01", "value": 710000.0}],
+      "UNRATE": [{"observation_date": "2026-03-01", "value": 4.2}, {"observation_date": "2026-04-01", "value": 4.1}],
       "UMCSENT": [{"observation_date": "2026-03-01", "value": 71.0}, {"observation_date": "2026-04-01", "value": 72.0}]
     },
     "public_events": []
   },
   "schema_version": "household_ecology_origin_snapshot_v1",
-  "snapshot_sha256": "2555fd7a60859928700d723201d33dbdd15ceea806f2884b7405545623072b21",
+  "snapshot_sha256": "9d4fa366dd55419851c0ada5b3767665c9d4c25faa4458d07f97d89d1bb34d08",
   "source": "Fully synthetic clean-clone test fixture; no realized targets.",
   "source_requests": []
 }

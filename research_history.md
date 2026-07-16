@@ -212,3 +212,26 @@ payloads. Every historical record is still hash-bound and replays exactly; the 4
 without journals simply lack an independently retained record of the original Codex
 CLI attempt. The report now states this distinction instead of treating replayable
 cache records and journal-backed calls as equivalent evidence.
+
+## V23 Nine-Variable First-Release Panel
+
+The next milestone broadened the published comparison from nominal consumption alone
+to a nine-variable predicted-versus-first-release-actual panel: nominal PCE, PCEPI,
+real PCE, real disposable income, payrolls, unemployment, personal saving, revolving
+credit, and retail sales. The panel preserves the four rolling historical origins as
+retrospective development evidence (`n=4` for every target) and keeps the July origin
+frozen for August, unscored.
+
+The expansion is an observability improvement, not evidence that the economy forecasts
+nine macro aggregates. Executed nominal household consumption is the only closest
+aggregate comparison, to nominal PCE, and it remains the central negative result:
+RMSE 0.782 percentage points and 1/4 direction versus the visible PCE-drift baseline's
+0.243 RMSE and 4/4 direction. PCEPI, real consumption, and real disposable income are
+household-belief/deflation proxies; payroll and unemployment are mechanical firm-loop
+proxies; saving is a gross household budget-residual proxy rather than national saving;
+revolving credit is direction-only; and retail sales is a declared demand proxy.
+
+The new figure and tidy panel separate those claims from the internal simulation
+diagnostics. They show where the declared outputs land against first releases; they do
+not validate the proxy mappings, identify a labor market, establish a national-accounts
+saving model, or rehabilitate the consumption forecast.
