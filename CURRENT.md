@@ -29,7 +29,7 @@ wages, and family income forward once.
 - Live and replay executions are hash-bound to the materialized household history,
   source inputs, prompts, payloads, parent artifacts, and result.
 
-## Latest Numbers
+## Latest Numbers: The Primary Comparison
 
 The v23 historical forecasts are `-0.24%, +0.01%, -0.08%, -0.17%` against
 first-release PCE growth of `+0.48%, +0.90%, +0.51%, +0.71%`.
@@ -49,6 +49,31 @@ first-release PCE growth of `+0.48%, +0.90%, +0.51%, +0.71%`.
 The July origin is frozen for August at **-0.13%**. In the two-period mechanism
 trace, fresh period-two household spending falls **0.31%**; producer employment and
 wages remain nearly flat because the demand change is small.
+
+## Nine-Variable Panel
+
+`outputs/household_ecology_observability_v23/` now binds a predicted-versus-
+first-release-actual panel for all nine declared macro outputs. The four historical
+origins are retrospective development evidence (`n=4` for every variable); the July
+row is frozen for August and unscored.
+
+| Variable | Realized comparator | What the comparison is |
+| --- | --- | --- |
+| Nominal consumption growth | nominal PCE | the only closest aggregate comparison; the main result |
+| Price growth | PCEPI | household-belief/deflation proxy |
+| Real consumption growth | real PCE | belief/deflation proxy |
+| Real disposable income growth | real disposable income | belief/deflation proxy |
+| Payroll growth | PAYEMS | target-month producer-plan proxy using origin inventory |
+| Unemployment-rate level | UNRATE | target-month producer-plan proxy using origin inventory |
+| Saving-rate change | PSAVERT | gross household budget-residual proxy, not a national saving identity |
+| Revolving-credit growth | revolving credit | direction-only proxy |
+| Retail-sales growth | retail sales | declared demand proxy |
+
+The panel makes the model's cross-variable surface inspectable. It does not validate
+the belief/deflation mappings, the target-month producer plan, a national-accounts saving
+equation, or a retail-sales model. Credit has no level-error score. The consumption
+result still controls the conclusion: the household layer loses to PCE drift already
+visible in its own prompt.
 
 ## What This Means
 

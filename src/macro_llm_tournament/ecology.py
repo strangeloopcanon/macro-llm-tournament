@@ -23,6 +23,11 @@ from .ecology_history import (
 )
 from .ecology_inputs import load_origin_information
 from .ecology_information import build_macro_information_card
+from .ecology_macro import (
+    MACRO_PREDICTION_SCHEMA_VERSION,
+    annual_to_monthly_growth,
+    build_standardized_macro_predictions,
+)
 from .ecology_households import (
     HOUSEHOLD_PROMPT_VERSION,
     HouseholdElicitor,
@@ -41,7 +46,7 @@ from .ecology_provider import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE = PROJECT_ROOT / "work/ecology_cache"
-SCHEMA_VERSION = "household_first_rolling_microeconomy_v5"
+SCHEMA_VERSION = "household_first_rolling_microeconomy_v6"
 LIVE_REFERENCE_SCHEMA_VERSION = "household_ecology_live_reference_v2"
 LIQUID_BUFFER_CLOSURE_MONTHS = 12.0
 
@@ -590,14 +595,47 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
     baseline_gross_income_residual_rate = 100.0 * (
         baseline_gross_household_income - fixed_outflows - baseline_consumption
     ) / max(baseline_gross_household_income, 1.0)
-    price_growth = 100.0 * (result.employer.next_price_per_unit_usd / result.employer.current_price_per_unit_usd - 1.0)
+    next_period_price_growth = 100.0 * (
+        result.employer.next_price_per_unit_usd
+        / result.employer.current_price_per_unit_usd
+        - 1.0
+    )
     latest_visible_pce = _latest_visible_value(origin, "PCE")
     consumption_growth = 100.0 * (
         weighted("consumption_usd") / max(baseline_consumption, 1.0) - 1.0
     )
     routine_drift = float(origin.get("routine_nominal_spending_drift_pct", 0.0))
-    return {
-        "consumption_growth_pct": consumption_growth,
+    expected_inflation_annual = sum(
+        row.trajectory.median.inflation_pct * weights[row.household_id]
+        for row in result.households
+    ) / total_weight
+    expected_income_growth_annual = sum(
+        row.trajectory.median.income_growth_pct * weights[row.household_id]
+        for row in result.households
+    ) / total_weight
+    expected_inflation_monthly = annual_to_monthly_growth(expected_inflation_annual)
+    # The target-month firm plan must use only origin state plus the household
+    # demand forecast. Reconstruct the origin baseline sales scale used by
+    # ``_initial_employer``; settled target-month sales and closing inventory
+    # would be one-period-ahead information here.
+    baseline_sales_units = (
+        baseline_consumption
+        * len(states)
+        / max(result.employer.current_price_per_unit_usd, 1e-9)
+    )
+    standardized = build_standardized_macro_predictions(
+        nominal_consumption_growth_pct=consumption_growth,
+        annual_nominal_household_income_expectation_pct=expected_income_growth_annual,
+        price_growth_pct=expected_inflation_monthly,
+        personal_saving_rate_change_pp=(
+            gross_income_residual_rate - baseline_gross_income_residual_rate
+        ),
+        revolving_credit_growth_pct=100.0 * (debt_end / max(debt_start, 1.0) - 1.0),
+        inventory_start_units=result.employer.inventory_start_units,
+        baseline_sales_units=baseline_sales_units,
+        compact_macro_information=origin["compact_macro_information"],
+    )
+    return standardized | {
         "routine_nominal_spending_drift_pct": routine_drift,
         "gap_to_visible_spending_drift_pct": consumption_growth - routine_drift,
         "gross_income_residual_rate_pct": gross_income_residual_rate,
@@ -612,11 +650,12 @@ def _weighted_macro(result: Any, states: list[HouseholdState], origin: dict[str,
         "transfer_income_usd": transfer_income,
         "gross_household_income_usd": gross_household_income,
         "gross_income_residual_usd": gross_income_residual,
-        "revolving_credit_growth_pct": 100.0 * (debt_end / max(debt_start, 1.0) - 1.0),
         "employment_rate_pct": 100.0 * employed_weight,
         "employment_rate_change_pp": 100.0 * (employed_weight - prior_employed_weight),
-        "unemployment_rate_pct": 100.0 * (1.0 - employed_weight),
-        "price_growth_pct": price_growth,
+        "household_nonemployment_share_pct": 100.0 * (1.0 - employed_weight),
+        "expected_inflation_annual_pct": expected_inflation_annual,
+        "expected_income_growth_annual_pct": expected_income_growth_annual,
+        "next_period_price_growth_pct": next_period_price_growth,
         "output_units": result.employer.output_units,
         "units_sold": result.employer.units_sold,
         "inventory_end_units": result.employer.inventory_end_units,
@@ -823,6 +862,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     journal_coverage = accepted_call_journal_coverage(records, attempt_journal_dir)
     manifest = {
         "schema_version": SCHEMA_VERSION,
+        "macro_prediction_schema_version": MACRO_PREDICTION_SCHEMA_VERSION,
         "origin_month": args.origin,
         "target_month": target_month,
         "as_of_date": origin["as_of_date"],
@@ -1002,7 +1042,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "",
         "## Forecast Paths",
         "",
-        "| Path | Consumption growth | Gross-income residual rate | Revolving-credit growth | Employment rate | Price growth |",
+        "| Path | Consumption growth | Gross-income residual rate | Revolving-credit growth | Employment rate | Monthly inflation belief |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in macro_rows:

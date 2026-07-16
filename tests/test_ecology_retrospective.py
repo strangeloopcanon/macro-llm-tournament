@@ -43,27 +43,27 @@ class EcologyRetrospectiveTests(unittest.TestCase):
 
     def test_origin_visible_context_is_scored_separately(self) -> None:
         joined = pd.DataFrame(
-            {
-                "scenario": ["median", "median"],
-                "metric": ["consumption_growth_pct", "consumption_growth_pct"],
-                "prediction": [-0.2, 0.1],
-                "actual": [0.4, 0.8],
-                "routine_nominal_spending_drift_pct": [0.3, 0.6],
-                "state_provenance": ["fixed_survey_scf_anchor"] * 2,
-                "mapping_quality": ["closest_aggregate_proxy"] * 2,
-                "target_month": ["2026-02-01", "2026-03-01"],
-            }
+            [
+                {
+                    "scenario": "median",
+                    "metric": metric,
+                    "prediction": -0.2,
+                    "context_prediction": 0.3,
+                    "actual": 0.4,
+                    "state_provenance": "fixed_survey_scf_anchor",
+                    "mapping_quality": mapping["mapping_quality"],
+                    "target_month": "2026-02-01",
+                }
+                for metric, mapping in ecology_retrospective.METRIC_MAPPINGS.items()
+            ]
         )
-        row = ecology_retrospective._origin_visible_context_score_rows(joined).iloc[0]
-        self.assertEqual(row["scenario"], "origin_visible_drift")
-        self.assertAlmostEqual(row["rmse"], (0.01 + 0.04) ** 0.5 / 2 ** 0.5)
-        self.assertEqual(row["direction_accuracy"], 1.0)
-        self.assertAlmostEqual(row["mean_bias"], -0.15)
-
-    def test_cumulative_index_compounds_sequential_growth(self) -> None:
-        values = ecology_retrospective._cumulative_growth_index([10.0, -10.0])
-        for value, expected in zip(values, [100.0, 110.0, 99.0], strict=True):
-            self.assertAlmostEqual(value, expected)
+        rows = ecology_retrospective._origin_visible_context_score_rows(joined)
+        self.assertEqual(set(rows["metric"]), set(ecology_retrospective.METRIC_MAPPINGS))
+        self.assertEqual(set(rows["scenario"]), {"origin_visible_baseline"})
+        consumption = rows.loc[rows["metric"].eq("consumption_growth_pct")].iloc[0]
+        self.assertAlmostEqual(consumption["rmse"], 0.1)
+        self.assertEqual(consumption["direction_accuracy"], 1.0)
+        self.assertAlmostEqual(consumption["mean_bias"], -0.1)
 
     def test_join_rejects_realization_available_by_forecast_cutoff(self) -> None:
         forecasts = pd.DataFrame(
@@ -75,6 +75,10 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                     "state_provenance": "prior_simulated_month",
                     "scenario": scenario,
                     **{metric: 0.0 for metric in ecology_retrospective.METRIC_MAPPINGS},
+                    **{
+                        mapping["visible_baseline_field"]: 0.0
+                        for mapping in ecology_retrospective.METRIC_MAPPINGS.values()
+                    },
                 }
                 for scenario in ecology_retrospective.SCENARIOS
             ]
@@ -97,20 +101,16 @@ class EcologyRetrospectiveTests(unittest.TestCase):
 
     def test_realization_mapping_uses_observation_month_and_declared_transforms(self) -> None:
         rows = []
-        values = {
-            "pce_growth_pct": (0.4, 100.4),
-            "revolving_credit_growth_pct": (0.7, 100.7),
-        }
-        for target_name, (target_value, first_release) in values.items():
-            mapping = next(row for row in ecology_retrospective.METRIC_MAPPINGS.values() if row["target_name"] == target_name)
+        for index, mapping in enumerate(ecology_retrospective.METRIC_MAPPINGS.values()):
+            target_value = float(index + 1) / 10.0
             rows.append({
                 "origin_month": "2026-03-01",
-                "target_name": target_name,
+                "target_name": mapping["target_name"],
                 "series_id": mapping["series_id"],
                 "target_observation_date": "2026-02-01",
                 "first_release_as_of_date": "2026-04-01",
-                "first_release_value": first_release,
-                "first_release_denominator_value": first_release,
+                "first_release_value": target_value,
+                "first_release_denominator_value": target_value,
                 "target_value": target_value,
             })
         with tempfile.TemporaryDirectory() as temporary:
@@ -118,11 +118,11 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             pd.DataFrame(rows).to_csv(path, index=False)
             actuals = ecology_retrospective._realization_rows(path, ["2026-02-01"])
         by_metric = actuals.set_index("metric")["actual"].to_dict()
-        self.assertEqual(by_metric["consumption_growth_pct"], 0.4)
-        self.assertEqual(by_metric["revolving_credit_growth_pct"], 0.7)
+        self.assertEqual(by_metric["consumption_growth_pct"], 0.1)
+        self.assertEqual(set(by_metric), set(ecology_retrospective.METRIC_MAPPINGS))
         self.assertEqual(
-            ecology_retrospective.METRIC_MAPPINGS["consumption_growth_pct"]["note"],
-            "Prediction is executed target-month spending relative to an SCF-conditioned recent-typical recurring baseline; origin-visible PCE growth is context only and is not pre-applied. The result is interpreted as month-over-month nominal PCE growth, a load-bearing aggregate proxy rather than linked household-level growth.",
+            ecology_retrospective.METRIC_MAPPINGS["price_growth_pct"]["series_id"],
+            "PCEPI",
         )
 
     def test_two_origin_runner_uses_median_point_path_and_joins_outputs(self) -> None:
@@ -161,8 +161,11 @@ class EcologyRetrospectiveTests(unittest.TestCase):
                 pd.DataFrame([
                     {
                         "scenario": scenario,
-                        "routine_nominal_spending_drift_pct": 0.25,
                         **{metric: float(index + 1) for index, metric in enumerate(ecology_retrospective.METRIC_MAPPINGS)},
+                        **{
+                            mapping["visible_baseline_field"]: float(index + 1) / 10.0
+                            for index, mapping in enumerate(ecology_retrospective.METRIC_MAPPINGS.values())
+                        },
                     }
                     for scenario in ecology_retrospective.SCENARIOS
                 ]).to_csv(args.output_dir / "macro_forecast_paths.csv", index=False)
@@ -212,7 +215,7 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             self.assertTrue(all(not hasattr(child, "state_json") for child in seen_child_args))
             self.assertTrue(all(not hasattr(child, "state_policy") for child in seen_child_args))
             self.assertEqual(len(pd.read_csv(output / "one_step_forecasts_by_origin.csv")), 2)
-            self.assertEqual(len(pd.read_csv(output / "predicted_vs_actual.csv")), 4)
+            self.assertEqual(len(pd.read_csv(output / "predicted_vs_actual.csv")), 18)
             self.assertTrue((output / "predicted_vs_actual.png").exists())
             self.assertNotIn("state_policy", manifest)
             self.assertEqual(manifest["score_eligibility"], "all_fixed_survey_scf_anchor_rows")
@@ -224,8 +227,9 @@ class EcologyRetrospectiveTests(unittest.TestCase):
             scored = pd.read_csv(output / "retrospective_scores.csv")
             self.assertTrue(scored["n"].eq(2).all())
             self.assertEqual(
-                set(scored["scenario"]), {"median", "origin_visible_drift"}
+                set(scored["scenario"]), {"median", "origin_visible_baseline"}
             )
+            self.assertEqual(set(scored["metric"]), set(ecology_retrospective.METRIC_MAPPINGS))
             self.assertEqual(
                 manifest["accepted_call_journal_coverage"]["matched_response_count"], 2
             )

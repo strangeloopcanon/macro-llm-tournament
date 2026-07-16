@@ -1,15 +1,16 @@
 # The Household Economy Runs, But Has Not Added Forecast Signal Yet
 
-The 200-household economy now produces its forecast from household decisions alone.
-That correction overturns the previous 4/4 directional result: across four historical
-months, the anchor-free forecasts have RMSE `0.782` percentage points and get one
-direction right. Their correlation with first-release PCE is `0.683`, but this is not
-incremental forecast evidence. The origin-visible PCE drift supplied to every household
-does better on RMSE, correlation, demeaned RMSE, and direction.
+The 200-household economy now has a nine-variable predicted-versus-first-release-
+actual surface. It makes the mappings and their limits visible. It does not change the
+primary result: only executed nominal household consumption has a close aggregate
+counterpart, nominal PCE, and the household economy fails there.
 
-So we have a real simulated household economy, but not evidence that its household
-layer improves the public information it receives. The households are systematically
-too pessimistic by `0.771` points and generate a little over half the observed
+Across four retrospective monthly origins (`n=4`), anchor-free nominal consumption
+forecasts have RMSE `0.782` percentage points and get one direction right. Their
+correlation with first-release PCE is `0.683`, but that is not incremental forecast
+evidence: the origin-visible PCE drift supplied to every household has RMSE `0.243`,
+correlation `0.974`, and 4/4 direction. The households are systematically too
+pessimistic by `0.771` points and generate a little over half the observed
 month-to-month variation.
 
 ## What The Economy Does
@@ -45,7 +46,7 @@ spending before the model acts. GPT-5.5 returns signed dollar changes in committ
 spending, discretionary spending, one-off purchases, debt repayment, and borrowing.
 Code then applies cash, credit, goods, and counterparty constraints.
 
-## Historical Result
+## Historical Result: Nominal Consumption
 
 | Origin | Target | LLM household economy | First-release PCE | Origin-visible drift |
 | --- | --- | ---: | ---: | ---: |
@@ -69,7 +70,7 @@ Code then applies cash, credit, goods, and counterparty constraints.
 | Revolving-credit direction | 1/4 |
 | Settlement audit | PASS |
 
-![Economic observability surface](current_ecology_observability_surface.png)
+![Nine-variable macro prediction surface](current_macro_prediction_surface.png)
 
 The households reduce spending in three months when nominal PCE rose in all four, so
 their point forecasts are poor. They rank the four months moderately well, but the
@@ -77,6 +78,33 @@ visible drift ranks them better (`0.974` correlation versus `0.683`) and also ha
 lower demeaned RMSE (`0.113` versus `0.126`). We therefore cannot attribute the timing
 pattern to household reasoning. The current household layer transforms stronger public
 context into weaker forecasts.
+
+## What The New Panel Shows And Does Not Show
+
+The generated surface compares nine declared model outputs with first-release series
+for the same target month. Every retrospective row has `n=4`; the July row is frozen
+for August and unscored.
+
+| Model output | Comparator | Retrospective read |
+| --- | --- | --- |
+| Nominal consumption growth | nominal PCE | closest aggregate proxy; RMSE 0.782 pp, 1/4 direction; the central failure |
+| Price growth | PCEPI | household-belief/deflation proxy; RMSE 0.193 pp, 4/4 direction |
+| Real consumption growth | real PCE | belief/deflation proxy; RMSE 0.622 pp, 0/4 direction |
+| Real disposable income growth | real disposable income | belief/deflation proxy; RMSE 0.313 pp, 3/4 direction |
+| Payroll growth | PAYEMS | target-month producer-plan proxy using origin inventory; RMSE 0.104 pp, 2/4 direction |
+| Unemployment-rate level | UNRATE | target-month producer-plan proxy using origin inventory; RMSE 0.069 pp, 0/4 direction |
+| Saving-rate change | PSAVERT | gross household budget-residual proxy; RMSE 0.510 pp, 1/4 direction |
+| Revolving-credit growth | revolving credit | direction-only proxy; 1/4 direction, no level-error score |
+| Retail-sales growth | retail sales | declared demand proxy; RMSE 1.103 pp, 1/4 direction |
+
+PCEPI, real consumption, and real income are constructed from household beliefs and
+deflation; they are not independent validated forecasts. Payroll and unemployment come
+from a target-month plan based on predicted demand and origin inventory, not an estimated
+labor market. The saving row is
+not a national-accounts saving identity. Retail reuses executed spending as a declared
+demand proxy. Credit is explicitly direction-only. The panel is useful because it
+separates these objects rather than letting a single consumption chart obscure them; it
+does not establish that any proxy mapping is an empirical macro model.
 
 ## Why The Previous Result Changed
 
@@ -102,7 +130,7 @@ discretionary spending. One-off purchases remain one-off. Producer wage and inco
 feedback updates the next household state, and the same policy schema is used in
 rolling and recursive runs.
 
-## Current Forecast And Recursive Trace
+## Frozen August Panel Row And Recursive Trace
 
 The frozen July origin predicts **-0.13%** nominal consumption growth for August.
 Its weighted household actions add about `$10.80` to committed spending, subtract
@@ -145,5 +173,6 @@ state and a better elicitation of ordinary nominal inertia. The current SCF-cond
 expenditure, and the model responds to uncertainty with broad discretionary cuts. Those
 two effects can explain the level shift without changing the economy's structure.
 
-January-April remains retrospective development evidence. The July forecast stays
-frozen until the August realization arrives.
+January-April remains retrospective development evidence (`n=4` for each panel
+variable). The July panel row stays frozen and unscored until the August realizations
+arrive.
