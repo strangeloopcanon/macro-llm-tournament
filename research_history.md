@@ -235,3 +235,87 @@ The new figure and tidy panel separate those claims from the internal simulation
 diagnostics. They show where the declared outputs land against first releases; they do
 not validate the proxy mappings, identify a labor market, establish a national-accounts
 saving model, or rehabilitate the consumption forecast.
+
+## Macro StructuredStateJEPA Companion
+
+The two superseded scratch JEPA experiments were deleted and replaced with one
+reproducible `make macro-jepa` path using the current VEI StructuredStateJEPA. The
+first replacement still compressed the archive into monthly snapshots; a fresh review
+showed that this was not the event-stream world model the project intended. Version 3
+therefore canonicalizes duplicate ALFRED twins and no-op revisions, groups same-day
+releases into atomic actions, augments the archive with direct monthly PCEC96 vintages,
+and trains on **4,958 release-day transitions** through the final evaluation cutoff,
+with exact monthly evaluation anchors.
+
+The model trains only through 2021. Readout alpha and residual gain are selected on
+2022-2023, then locked before an untouched 24-origin 2024-2025 backtest. A later audit
+found that REVOLSL and TOTALSL change from billions to millions inside the raw event
+history and that exact 2026 cards bypassed the first correction. V3 canonicalizes both
+ingress paths and fails closed if a raw million-valued level remains.
+
+After the unit repair, nominal-PCE RMSE on the locked block is **0.458 pp**, versus
+**0.331 pp** for the origin-visible lag-1 baseline and **0.234 pp** for a frozen
+historical median. On the four 2026 household-comparison origins, Event-JEPA scores
+**0.256 pp**, the macro-state ridge **0.413 pp**, the household economy **1.703 pp**,
+and lag-one **0.243 pp**. The correction removes the ridge explosion and makes
+Event-JEPA competitive on the small current panel, but the 24-origin result still
+rejects a superior-PCE-dynamics claim.
+
+This is not a hybrid result. The active household economy supplies only four realized
+aggregate paths, so a HANK-conditioned JEPA would currently be an underidentified fit.
+The prospective JEPA marker remains removed: its July 10 origin card covered only a
+subset of the 22 state series while the dense archive ended June 23. The household
+economy and origin-visible baseline retain their frozen August markers, but JEPA will
+not emit one until the full origin-date state is available. The next hybrid dataset
+must backfill many origin-safe household belief and policy distributions before any
+HANK-JEPA training or comparison is credible.
+
+## V24 Repaired Household Population
+
+A fresh review found that v23's 200-household aggregate was dominated by a few SCF
+donor matches. One $135,000-income SCE household inherited a $21.9 million SCF state
+and contributed 31.3% of weighted baseline spending. The top five contributed 46.5%,
+and spending-contribution effective sample size was only 9.2.
+
+V24 keeps the SCE annual-income anchor, restricts each SCF donor to an income ratio
+from 0.5 through 2.0, and scales all donor dollar flows and stocks to the SCE anchor.
+The new population's largest contribution is 2.36%, its top-five contribution is
+8.87%, and its effective spending household count is 140.4. All 200 matches satisfy
+the income caliper without relaxing demographic fields. The observability report now
+also rejects source runs whose household-file hash differs from the supplied population.
+
+The repair required new Codex CLI decisions because every prompt card contains the
+household's financial state. The full run used 1,201 live attempts for 1,200 accepted
+responses: 200 for the frozen July origin, 800 across the four historical origins,
+and 200 for the two-period feedback experiment. One historical provider attempt failed
+and was retried. Accounting passed throughout, and the feedback run was published as
+a verified zero-call replay.
+
+Forecasting worsened. Historical nominal-consumption forecasts became -1.08%, -1.00%,
+-1.06%, and -1.05% against first-release PCE growth of +0.48%, +0.90%, +0.51%, and
++0.71%. RMSE is 1.703 percentage points, mean bias is -1.696 points, and direction is
+0/4, versus the visible-data baseline's 0.243 RMSE and 4/4 direction. Roughly 78-81%
+of represented households cut spending at each origin, while settlement constraints
+materially bind for only about 0.7%. The main failure is therefore the LLM-authored
+behavior, not the population arithmetic or accounting code.
+
+The frozen July-to-August forecast is -1.12%. In the unscored recursive trace,
+period-two spending falls another 0.80% while producer employment and wages move only
+slightly. The system is a functioning dynamic simulator, but its current household
+action interface is systematically too cautious.
+
+The combined nine-panel scorecard was refreshed without retraining Event-JEPA. On the
+four 2026 nominal-PCE rows the unit-corrected Event-JEPA now nearly matches lag-one,
+0.256 RMSE versus 0.243, while the repaired household economy remains at 1.703. The
+locked 24-origin block still favors the simple baselines.
+
+## V5 Revolving-Payment Semantics
+
+A follow-up audit found that V24 treated SCF `REVPAY` as the contractual minimum due
+on the modeled card balance. The SCF program defines it as a composite of card, BNPL,
+and revolving-line payments. V5 preserves the scaled observed composite in a separate
+audit field and derives the executable minimum from the simulation's 3%/$25 card
+contract. Donor selection is pinned to V4, so the same 200 households and donors are
+retained. The correction changes 109 payment fields; the largest falls from $4,660 to
+$410 per month. V5 has not yet been through a new LLM run, so the V24 forecast remains
+the current household result.

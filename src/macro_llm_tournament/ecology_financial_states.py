@@ -19,9 +19,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .ecology_models import (
+    DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD,
+    DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT,
+)
 
-SCHEMA_VERSION = "ecology_scf_financial_states_v3"
+SCHEMA_VERSION = "ecology_scf_financial_states_v5"
+# Preserve the v4 donor draw so this schema change alters payment semantics only.
+DONOR_SELECTION_VERSION = "ecology_scf_financial_states_v4"
 DEFAULT_SEED = 20260714
+INCOME_CALIPER_MIN_RATIO = 0.5
+INCOME_CALIPER_MAX_RATIO = 2.0
+MAX_BASELINE_SPENDING_SHARE = 0.05
+MIN_BASELINE_SPENDING_EFFECTIVE_HOUSEHOLDS = 100.0
 SCF_MEMBER_NAME = "rscfp2022.dta"
 SCF_REQUIRED_COLUMNS = (
     "y1",
@@ -202,6 +212,16 @@ def _target_match_fields(row: pd.Series) -> dict[str, str]:
     return fields
 
 
+def _target_annual_income(row: pd.Series) -> float:
+    value = _first_present(row, ("annual_income", "annual_income_usd"))
+    income = _number(value)
+    if income <= 0.0:
+        raise FinancialStateError(
+            "each household must have a positive annual-income anchor"
+        )
+    return income
+
+
 def collapse_scf_implicates(scf: pd.DataFrame) -> pd.DataFrame:
     """Select one coherent canonical implicate per SCF household.
 
@@ -264,8 +284,13 @@ def read_scf_2022_donors(scf_zip: Path | str) -> tuple[pd.DataFrame, dict[str, s
 
 
 def _select_donor(
-    donors: pd.DataFrame, match_fields: dict[str, str], *, household_id: str, seed: int
-) -> tuple[pd.Series, tuple[str, ...]]:
+    donors: pd.DataFrame,
+    match_fields: dict[str, str],
+    *,
+    household_id: str,
+    target_annual_income: float,
+    seed: int,
+) -> tuple[pd.Series, tuple[str, ...], int]:
     active = dict(match_fields)
     relaxed: list[str] = []
     # Employment determines whether a household receives labor income in the
@@ -281,32 +306,52 @@ def _select_donor(
         candidates = donors
         for column, value in active.items():
             candidates = candidates.loc[candidates[column].eq(value)]
+        donor_income = pd.to_numeric(candidates["income"], errors="coerce")
+        income_ratio = donor_income / target_annual_income
+        candidates = candidates.loc[
+            donor_income.gt(0.0)
+            & income_ratio.ge(INCOME_CALIPER_MIN_RATIO)
+            & income_ratio.le(INCOME_CALIPER_MAX_RATIO)
+        ]
         if not candidates.empty:
             break
         next_field = next((field for field in relax_order if field in active), None)
         if next_field is None:
-            candidates = donors
-            break
+            raise FinancialStateError(
+                f"no SCF donor satisfies the income caliper for {household_id}"
+            )
         active.pop(next_field)
         relaxed.append(next_field)
     candidates = candidates.sort_values("yy1", kind="stable").reset_index(drop=True)
     profile = "|".join(f"{field}={value}" for field, value in sorted(active.items()))
-    token = f"{SCHEMA_VERSION}|{int(seed)}|{household_id}|{profile}"
+    token = f"{DONOR_SELECTION_VERSION}|{int(seed)}|{household_id}|{profile}"
     draw = int(hashlib.sha256(token.encode("utf-8")).hexdigest()[:16], 16) / 2**64
     weights = candidates["wgt"].to_numpy(dtype=float)
     index = int(np.searchsorted(np.cumsum(weights) / weights.sum(), draw, side="right"))
     index = min(index, len(candidates) - 1)
-    return candidates.iloc[index], tuple(relaxed)
+    return candidates.iloc[index], tuple(relaxed), len(candidates)
 
 
-def _financial_fields(donor: pd.Series) -> dict[str, float]:
-    annual_income = max(0.0, _number(donor["income"]))
+def _financial_fields(
+    donor: pd.Series, *, target_annual_income: float
+) -> dict[str, float]:
+    donor_annual_income = max(0.0, _number(donor["income"]))
+    if donor_annual_income <= 0.0:
+        raise FinancialStateError("selected SCF donor income must be positive")
+    financial_state_scale = target_annual_income / donor_annual_income
+    annual_income = target_annual_income
     monthly_income = annual_income / 12.0
-    raw_wage = max(0.0, _number(donor["wageinc"]) / 12.0)
-    raw_business = max(0.0, _number(donor["bussefarminc"]) / 12.0)
+    raw_wage = max(
+        0.0, _number(donor["wageinc"]) * financial_state_scale / 12.0
+    )
+    raw_business = max(
+        0.0, _number(donor["bussefarminc"]) * financial_state_scale / 12.0
+    )
     raw_transfers = max(
         0.0,
-        (_number(donor["ssretinc"]) + _number(donor["transfothinc"])) / 12.0,
+        (_number(donor["ssretinc"]) + _number(donor["transfothinc"]))
+        * financial_state_scale
+        / 12.0,
     )
     positive_components = raw_wage + raw_business + raw_transfers
     component_scale = (
@@ -319,18 +364,26 @@ def _financial_fields(donor: pd.Series) -> dict[str, float]:
     transfers = raw_transfers * component_scale
     monthly_earned_income = monthly_wage + monthly_business_income
     monthly_nonwage = max(0.0, monthly_income - monthly_earned_income - transfers)
-    monthly_food = max(0.0, sum(_number(donor[column]) for column in ("foodhome", "foodaway", "fooddelv")) / 12.0)
+    monthly_food = max(
+        0.0,
+        sum(
+            _number(donor[column])
+            for column in ("foodhome", "foodaway", "fooddelv")
+        )
+        * financial_state_scale
+        / 12.0,
+    )
     # SCF rent is reported monthly, while the food variables are annualized.
     committed = (
-        max(0.0, _number(donor["rent"]))
-        + max(0.0, _number(donor["mortpay"]))
+        max(0.0, _number(donor["rent"])) * financial_state_scale
+        + max(0.0, _number(donor["mortpay"])) * financial_state_scale
         + monthly_food
     )
     consumption_propensity_proxy = 0.80 if _number(donor["saved"]) > 0.0 else 0.97
     total_consumption_proxy = max(committed, monthly_income * consumption_propensity_proxy)
     discretionary = max(0.0, total_consumption_proxy - committed)
-    debt = max(0.0, _number(donor["ccbal"]))
-    deposits = max(0.0, _number(donor["liq"]))
+    debt = max(0.0, _number(donor["ccbal"])) * financial_state_scale
+    deposits = max(0.0, _number(donor["liq"])) * financial_state_scale
     # Public SCF summary data contain balances but not a credit-limit total.
     # This conservative capacity proxy is donor-conditioned and never uses SCE
     # outcomes: 25% of income, at least $1,000 for a card borrower, and never
@@ -342,11 +395,28 @@ def _financial_fields(donor: pd.Series) -> dict[str, float]:
         else 0.0
     )
     utilization = 0.0 if credit_limit == 0.0 else debt / credit_limit
-    minimum_payment = max(0.0, _number(donor["revpay"]))
-    if debt > 0.0 and minimum_payment == 0.0:
-        minimum_payment = debt * 0.02
+    observed_revolving_payment = (
+        max(0.0, _number(donor["revpay"])) * financial_state_scale
+    )
+    # SCF REVPAY is an observed composite of card, BNPL, and revolving-line
+    # payments. It is not the contractual minimum on the card balance stored
+    # here, so the executable state uses the credit engine's actual contract.
+    minimum_payment = (
+        min(
+            debt,
+            max(
+                DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD,
+                debt * DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT / 100.0,
+            ),
+        )
+        if debt > 0.0
+        else 0.0
+    )
     return {
         "annual_income_usd": annual_income,
+        "scf_donor_annual_income_usd": donor_annual_income,
+        "scf_income_to_anchor_ratio": donor_annual_income / annual_income,
+        "financial_state_scale": financial_state_scale,
         "monthly_wage_income_usd": monthly_wage,
         "monthly_business_income_usd": monthly_business_income,
         "monthly_earned_income_usd": monthly_earned_income,
@@ -360,8 +430,71 @@ def _financial_fields(donor: pd.Series) -> dict[str, float]:
         "revolving_debt_usd": debt,
         "revolving_credit_limit_usd": credit_limit,
         "revolving_credit_utilization": utilization,
+        "scf_observed_revolving_payment_monthly_usd": observed_revolving_payment,
         "recurring_minimum_debt_payment_usd": minimum_payment,
     }
+
+
+def financial_state_population_audit(
+    states: pd.DataFrame, *, enforce: bool = True
+) -> dict[str, float | int]:
+    required = {
+        "population_weight",
+        "baseline_committed_consumption_monthly_usd",
+        "baseline_discretionary_consumption_monthly_usd",
+    }
+    missing = sorted(required - set(states.columns))
+    if missing:
+        raise FinancialStateError(
+            f"financial-state audit is missing columns: {', '.join(missing)}"
+        )
+    weights = pd.to_numeric(states["population_weight"], errors="coerce")
+    baseline = (
+        pd.to_numeric(
+            states["baseline_committed_consumption_monthly_usd"],
+            errors="coerce",
+        )
+        + pd.to_numeric(
+            states["baseline_discretionary_consumption_monthly_usd"],
+            errors="coerce",
+        )
+    )
+    contributions = weights * baseline
+    total = float(contributions.sum())
+    if (
+        weights.isna().any()
+        or baseline.isna().any()
+        or (weights <= 0.0).any()
+        or (baseline < 0.0).any()
+        or total <= 0.0
+    ):
+        raise FinancialStateError(
+            "financial-state population audit requires positive finite weights and spending"
+        )
+    shares = contributions / total
+    audit: dict[str, float | int] = {
+        "household_count": int(len(states)),
+        "max_baseline_spending_contribution_share": float(shares.max()),
+        "top_five_baseline_spending_contribution_share": float(
+            shares.nlargest(min(5, len(shares))).sum()
+        ),
+        "baseline_spending_effective_households": float(
+            1.0 / float(np.square(shares).sum())
+        ),
+    }
+    if enforce and len(states) >= 100:
+        if audit["max_baseline_spending_contribution_share"] > MAX_BASELINE_SPENDING_SHARE:
+            raise FinancialStateError(
+                "one household contributes more than 5% of baseline spending"
+            )
+        if (
+            audit["baseline_spending_effective_households"]
+            < MIN_BASELINE_SPENDING_EFFECTIVE_HOUSEHOLDS
+        ):
+            raise FinancialStateError(
+                "baseline spending effective household count is below 100"
+            )
+    return audit
 
 
 def generate_financial_states(
@@ -387,9 +520,18 @@ def generate_financial_states(
     for _, row in prepared.sort_values("household_id", kind="stable").iterrows():
         household_id = str(row["household_id"])
         match_fields = _target_match_fields(row)
-        donor, relaxed = _select_donor(donors, match_fields, household_id=household_id, seed=seed)
+        target_annual_income = _target_annual_income(row)
+        donor, relaxed, candidate_count = _select_donor(
+            donors,
+            match_fields,
+            household_id=household_id,
+            target_annual_income=target_annual_income,
+            seed=seed,
+        )
         record = row.to_dict()
-        record.update(_financial_fields(donor))
+        record.update(
+            _financial_fields(donor, target_annual_income=target_annual_income)
+        )
         record.update(
             {
                 "household_id": household_id,
@@ -406,6 +548,7 @@ def generate_financial_states(
                 "scf_match_fields": ",".join(sorted(match_fields)),
                 "scf_match_relaxed_fields": ",".join(relaxed),
                 "scf_match_rule": "exact" if not relaxed else "relaxed_" + "_then_".join(relaxed),
+                "scf_income_caliper_candidate_count": int(candidate_count),
                 "financial_state_source": "SCF_2022_public_summary_canonical_first_implicate",
                 "consumption_baseline_measurement": "SCF_food_housing_plus_saved_status_calibrated_proxy",
             }
@@ -413,7 +556,13 @@ def generate_financial_states(
         if scf_provenance:
             record["scf_source_member_sha256"] = scf_provenance.get("scf_member_sha256", "")
         rows.append(record)
-    return pd.DataFrame(rows).sort_values("household_id", kind="stable").reset_index(drop=True)
+    result = (
+        pd.DataFrame(rows)
+        .sort_values("household_id", kind="stable")
+        .reset_index(drop=True)
+    )
+    financial_state_population_audit(result)
+    return result
 
 
 def write_financial_states(
@@ -434,6 +583,7 @@ def write_financial_states(
     states = generate_financial_states(
         pd.read_csv(households_path), donors, seed=seed, scf_provenance=provenance
     )
+    population_audit = financial_state_population_audit(states)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     states.to_csv(output_path, index=False, lineterminator="\n")
     manifest_file = Path(manifest_path) if manifest_path else output_path.with_suffix(".manifest.json")
@@ -460,8 +610,25 @@ def write_financial_states(
             ],
             "implicate_rule": "lowest y1 implicate per yy1; no cross-implicate averaging",
             "selection": "stable household-id hash mapped through sorted donor survey-weight CDF",
+            "selection_version": DONOR_SELECTION_VERSION,
+            "income_caliper_ratio": [
+                INCOME_CALIPER_MIN_RATIO,
+                INCOME_CALIPER_MAX_RATIO,
+            ],
+            "financial_scaling": (
+                "all SCF dollar flows and stocks scaled by "
+                "SCE income anchor / SCF donor income"
+            ),
             "target_or_actual_data_used": False,
+            "revolving_payment_semantics": {
+                "observed_field": "scf_observed_revolving_payment_monthly_usd",
+                "observed_measure": "SCF_REVPAY_composite_card_BNPL_and_revolving_line_payment",
+                "executable_field": "recurring_minimum_debt_payment_usd",
+                "minimum_payment_rate_pct": DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT,
+                "minimum_payment_floor_usd": DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD,
+            },
         },
+        "population_contribution_audit": population_audit,
     }
     manifest["manifest_sha256"] = _canonical_sha256(manifest)
     manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

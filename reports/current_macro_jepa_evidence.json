@@ -1,0 +1,798 @@
+{
+  "evidence_schema_version": "macro_jepa_tracked_evidence_v1",
+  "evidence_sha256": "eb183433d56f87dbda5d4cb4ffa585867eca2044aa8c7f673e91d6911310fe2b",
+  "extraction_manifest": {
+    "event_count": 140749,
+    "forecast_anchor_count": 435,
+    "origin_information_overrides": {
+      "2026-01-01": {
+        "path": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/outputs/household_ecology_retrospective_2026_01_04_v24/runs/2026-01-01/normalized_origin_information.json",
+        "sha256": "f77d5504dcca85c25687680b8b23a53b28daecc591018239d58f7df3da89eac5"
+      },
+      "2026-02-01": {
+        "path": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/outputs/household_ecology_retrospective_2026_01_04_v24/runs/2026-02-01/normalized_origin_information.json",
+        "sha256": "e23f573ff45da64ab5c2704c3018c2af1d86a67c0d05f2b8297689a9c8dfe441"
+      },
+      "2026-03-01": {
+        "path": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/outputs/household_ecology_retrospective_2026_01_04_v24/runs/2026-03-01/normalized_origin_information.json",
+        "sha256": "14e2e9258a3b4118a51b0297bd579f7a7c2c82a74cbbdabf8d8b1da49ae7ce2f"
+      },
+      "2026-04-01": {
+        "path": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/outputs/household_ecology_retrospective_2026_01_04_v24/runs/2026-04-01/normalized_origin_information.json",
+        "sha256": "5ec8b320f51fa0a4a60c2444994dc92eeba05cc351b1edc9e787e1a2add49321"
+      }
+    },
+    "readout_cutoff": "2024-01-15",
+    "release_day_count": 4958,
+    "row_count": 5393,
+    "schema_version": "macro_event_residual_jepa_v3",
+    "series_value_normalization": {
+      "REVOLSL": {
+        "canonical_unit": "billions_of_dollars",
+        "million_to_billion_scale": 0.001,
+        "million_value_threshold": 100000.0
+      },
+      "TOTALSL": {
+        "canonical_unit": "billions_of_dollars",
+        "million_to_billion_scale": 0.001,
+        "million_value_threshold": 100000.0
+      }
+    },
+    "split_counts": {
+      "test": 378,
+      "train": 4676,
+      "val": 339
+    },
+    "state_end": "2026-04-15",
+    "state_series": [
+      "PCE",
+      "PCEC96",
+      "PCEPI",
+      "DSPIC96",
+      "PAYEMS",
+      "UNRATE",
+      "PSAVERT",
+      "REVOLSL",
+      "RSAFS",
+      "CPIAUCSL",
+      "CPILFESL",
+      "INDPRO",
+      "UMCSENT",
+      "FEDFUNDS",
+      "M2SL",
+      "TOTALSL",
+      "BUSLOANS",
+      "ICSA",
+      "CCSA",
+      "CES0500000003",
+      "AWHMAN",
+      "HOUST",
+      "PERMIT"
+    ],
+    "state_start": "1990-02-02",
+    "target_specs": {
+      "consumption_growth_pct": {
+        "series_id": "PCE",
+        "transform": "pct_change"
+      },
+      "payroll_growth_pct": {
+        "series_id": "PAYEMS",
+        "transform": "pct_change"
+      },
+      "personal_saving_rate_change_pp": {
+        "series_id": "PSAVERT",
+        "transform": "diff"
+      },
+      "price_growth_pct": {
+        "series_id": "PCEPI",
+        "transform": "pct_change"
+      },
+      "real_consumption_growth_pct": {
+        "series_id": "PCEC96",
+        "transform": "pct_change"
+      },
+      "real_disposable_income_growth_pct": {
+        "series_id": "DSPIC96",
+        "transform": "pct_change"
+      },
+      "retail_sales_growth_pct": {
+        "series_id": "RSAFS",
+        "transform": "pct_change"
+      },
+      "revolving_credit_growth_pct": {
+        "series_id": "REVOLSL",
+        "transform": "pct_change"
+      },
+      "unemployment_rate_level": {
+        "series_id": "UNRATE",
+        "transform": "level"
+      }
+    }
+  },
+  "generator_source_sha256": {
+    "macro_jepa.py": "a3d3356e76d7757e16246eeda0f55c72a0a001248df24dce8b44199af6111b77",
+    "macro_jepa_data.py": "f929204667d8e3b43249a4e055f839cd076689446b505cfbdff9db7ea2207008",
+    "macro_jepa_events.py": "14cf16ac8a4a7018e75e6acf9daacf533c932af784a995aa5020f1dec4227bbc"
+  },
+  "jepa_evaluation": {
+    "latent_mse": 0.030739525333046913,
+    "mean_surprise": 0.030739525333046913,
+    "naive_latent_mse": 0.04060301184654236,
+    "naive_observation_mse": 0.45422667264938354
+  },
+  "locked_training_spec": {
+    "blocked_backtest_origins": [
+      "2024-01-01",
+      "2024-02-01",
+      "2024-03-01",
+      "2024-04-01",
+      "2024-05-01",
+      "2024-06-01",
+      "2024-07-01",
+      "2024-08-01",
+      "2024-09-01",
+      "2024-10-01",
+      "2024-11-01",
+      "2024-12-01",
+      "2025-01-01",
+      "2025-02-01",
+      "2025-03-01",
+      "2025-04-01",
+      "2025-05-01",
+      "2025-06-01",
+      "2025-07-01",
+      "2025-08-01",
+      "2025-09-01",
+      "2025-10-01",
+      "2025-11-01",
+      "2025-12-01"
+    ],
+    "context_length": 16,
+    "evaluation_actual_source": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1/targets.csv",
+    "evaluation_origins": [
+      "2026-01-01",
+      "2026-02-01",
+      "2026-03-01",
+      "2026-04-01"
+    ],
+    "model_config": {
+      "auxiliary_loss_weight": 0.0,
+      "context_length": 16,
+      "contrastive_lambda": 0.15,
+      "contrastive_temperature": 0.1,
+      "d_action": 64,
+      "d_state": 96,
+      "depth": 2,
+      "dropout": 0.05,
+      "encoder_type": "flat",
+      "feature_token_depth": 2,
+      "fixed_target_observation_indices": null,
+      "heads": 4,
+      "sigreg_knots": 17,
+      "sigreg_lambda": 0.005,
+      "sigreg_num_proj": 32,
+      "target_ema_decay": 0.99,
+      "time_encoding": "relative_fourier",
+      "time_feature_index": null,
+      "time_fourier_bands": 4
+    },
+    "primary_metric": "consumption_growth_pct",
+    "prospective_jepa_status": "not_emitted_until_a_complete_origin_state_is_available",
+    "readout_alpha_grid": [
+      0.01,
+      0.1,
+      1.0,
+      10.0,
+      100.0,
+      1000.0,
+      10000.0,
+      100000.0
+    ],
+    "readout_cutoff": "2024-01-15",
+    "readout_train_period": "1995-01-01:2021-12-31",
+    "readout_validation_period": "2022-01-01:2023-12-31",
+    "residual_gain_grid": [
+      0.0,
+      0.25,
+      0.5,
+      0.75,
+      1.0
+    ],
+    "schema_version": "macro_event_residual_jepa_v3",
+    "train_config": {
+      "action_sensitivity_margin": 0.01,
+      "action_sensitivity_weight": 0.0,
+      "batch_size": 128,
+      "contrastive_group_column": null,
+      "cosine_lr": true,
+      "device": "mps",
+      "early_stopping_min_delta": 0.0001,
+      "early_stopping_patience": 6,
+      "epochs": 24,
+      "grad_clip_norm": 1.0,
+      "lr": 0.0008,
+      "matched_action_column_ranking": false,
+      "ranking_loss_weight": 0.0,
+      "ranking_pair_weighting": "uniform",
+      "ranking_target_difference_floor": 1e-08,
+      "ranking_target_index": 0,
+      "ranking_temperature": 0.1,
+      "rollout_horizon": 1,
+      "rollout_loss_weight": 0.0,
+      "seed": 20260715,
+      "selection_metric": "total",
+      "state_sensitivity_donor_count": 1,
+      "state_sensitivity_donor_mode": "previous_batch",
+      "state_sensitivity_margin": 0.01,
+      "state_sensitivity_target_index": 0,
+      "state_sensitivity_temperature": 0.1,
+      "state_sensitivity_weight": 0.0,
+      "warmup_epochs": 3,
+      "weight_decay": 0.0001
+    }
+  },
+  "primary_metric_readout_selection": {
+    "historical_constants": {
+      "fit_count": 403,
+      "historical_mean": 0.36340040217653247,
+      "historical_median": 0.3833928860886182
+    },
+    "jepa": {
+      "baseline_validation_rmse": 0.6436944812081491,
+      "candidate_scores": [
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.665351776455977
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.8321947780326545
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.75,
+          "validation_rmse": 1.0788457125988462
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 1.0,
+          "validation_rmse": 1.3626344907778474
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6527882232742409
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.7658055403219957
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.9462132785819476
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 1.0,
+          "validation_rmse": 1.1630635379790495
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6339635057581222
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.6815879049592167
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.7760796491330805
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.9028412792227778
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6339861230671355
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.649056366389421
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.6872771439998947
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.7450943040875685
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6381898476304723
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.6470925806983466
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.6698284588359548
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.7050605296240303
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6382637033163127
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.6360530872476002
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.6370961541370949
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.6413770298570679
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6419155374584365
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.6402023014927566
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.6385553021908398
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.6369750533488663
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.643452491533895
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.64321129077836
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.6429708798293974
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.6427312595732784
+        }
+      ],
+      "chosen_alpha": 1.0,
+      "chosen_residual_gain": 0.25,
+      "fit_count": 403,
+      "selection_boundary_hit": false,
+      "train_count": 381,
+      "validation_count": 22,
+      "validation_rmse": 0.6339635057581222
+    },
+    "macro_state_ridge": {
+      "baseline_validation_rmse": 0.6436944812081491,
+      "candidate_scores": [
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.25,
+          "validation_rmse": 1.8896281069297696
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.5,
+          "validation_rmse": 3.6621165043795925
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 0.75,
+          "validation_rmse": 5.471339078561033
+        },
+        {
+          "alpha": 0.01,
+          "residual_gain": 1.0,
+          "validation_rmse": 7.289997012709817
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.25,
+          "validation_rmse": 1.1680665991966528
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.5,
+          "validation_rmse": 2.130188388053917
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 0.75,
+          "validation_rmse": 3.151874291665288
+        },
+        {
+          "alpha": 0.1,
+          "residual_gain": 1.0,
+          "validation_rmse": 4.1897740423251095
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6939148934088536
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.9901303258060792
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 1.3823397315770551
+        },
+        {
+          "alpha": 1.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 1.8091525898999334
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.578303723984523
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.6053727891760625
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.7144687783515404
+        },
+        {
+          "alpha": 10.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.8754447219941295
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.5636247413028513
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.5311349888759859
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.5546504911532947
+        },
+        {
+          "alpha": 100.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.6279102020142672
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.594889475168987
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.5739301820093546
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.5838233325255189
+        },
+        {
+          "alpha": 1000.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.623101096938986
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6266030797918964
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.6145490187598033
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.60783206208596
+        },
+        {
+          "alpha": 10000.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.6066295223015357
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.0,
+          "validation_rmse": 0.6436944812081491
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.25,
+          "validation_rmse": 0.6410556097743466
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.5,
+          "validation_rmse": 0.6385116462937646
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 0.75,
+          "validation_rmse": 0.636063729532404
+        },
+        {
+          "alpha": 100000.0,
+          "residual_gain": 1.0,
+          "validation_rmse": 0.633712972523722
+        }
+      ],
+      "chosen_alpha": 100.0,
+      "chosen_residual_gain": 0.5,
+      "fit_count": 403,
+      "selection_boundary_hit": false,
+      "train_count": 381,
+      "validation_count": 22,
+      "validation_rmse": 0.5311349888759859
+    },
+    "metric": "consumption_growth_pct"
+  },
+  "run_manifest": {
+    "artifacts": {
+      "blocked_backtest_predictions.csv": "d99bc327adfe95ee4234d8bd4495a6411b85adc9f3476d91747ff2417076e7ee",
+      "blocked_backtest_score_table.csv": "9f07c4743e1188b4e88aed5f5a8af27641790b4e2a69c0c571ec841f12409ec7",
+      "comparison_predictions.csv": "1be80aa9fc63a24e1bb9c48748b1cde825f094f96594a64a5c3491823371ee39",
+      "dataset/schema.json": "1dc75cbe00007690370474c1355992090653c2dc334b17030d191d903a12d1fc",
+      "dataset/steps.parquet": "8406e48bca6e6b519b40ad11d717511677a3987efffaf4c0511104e275ef3d95",
+      "dataset/target_manifest.json": "b3820030960d3fe2916851ecaa1efb1feccdb333f92124656776b194f86a1e6a",
+      "extraction_manifest.json": "1aaf0fc29e986e39aa61479afec9d665436e8970fd4d529e80ca99eb5438d332",
+      "first_release_targets.csv": "b474d22f03a33c08cd7dbc73f42e4ffb7044f20ad2475ac9ab189d92709aa4fc",
+      "jepa_evaluation.json": "746186c14e6941d14e22e3e6c4203aa2bf0876320a87e49c7b47a1dd00aa9c0a",
+      "locked_training_spec.json": "e1e2aa831db474412db12a6d5a0f5ba457c099dd825972ff235ea468528673fe",
+      "macro_jepa_comparison.png": "5de7544499e4086b33c90c8a76f9c0ca9ac0fb70a563350fef2437815274ace4",
+      "macro_jepa_report.md": "fe7a8b4038530cde3b77ba5a38d7b54b7f2da6501ddab2a060626ea2e3843842",
+      "model/model.pt": "0698de864ab888477869d470e08860c988977d70b588ffa91317c1d2b00d2be1",
+      "model/training_summary.json": "250b40f5b61feffda11dd37a865b82fd6876ec04f0137ecb0d9b0ec9a93f0158",
+      "monthly_anchor_states.csv": "c46cd8261a3deaf2da677d8ff6ee2f04c72d7772a43095048ef97e1ceab5a254",
+      "origin_safe_event_states.csv": "7e5e45f34ac05b7a8b4aec72731dbbcc8624c0c0d845f80a7f92cb59863340f6",
+      "origin_visible_baselines.csv": "dd0ed5a3a197b65d0e62b06f5b4bcd724c281cf48538bec2b3aeefd3f35f5767",
+      "readout_selection.json": "3783c9f2025f6e63c33b4a1317526a14c4ef1ba9aff302ea7331c134f8af2fce",
+      "readouts/jepa/consumption_growth_pct.joblib": "1343cd2f28f5e988ca7ce1bf85a239d832bb03f07ee9e6afa38ff3622e20df23",
+      "readouts/jepa/payroll_growth_pct.joblib": "ade9dcaf359d9f9fbad85e896c3b63477511244323a5edcaf5b64e1b44c74cab",
+      "readouts/jepa/personal_saving_rate_change_pp.joblib": "3009f8471d05013cab382d24154f89b7d2b32c6d79f6a8b7b043016efc9028b3",
+      "readouts/jepa/price_growth_pct.joblib": "5b12954834008ff4e8aece3787fc8004feaedab2da2cf1d72393d0f9d2599382",
+      "readouts/jepa/real_consumption_growth_pct.joblib": "64956bd2d99ada685d34568d2d9d5c1397c2ad18be9fbf332c9bd5c0b105bd72",
+      "readouts/jepa/real_disposable_income_growth_pct.joblib": "95851c201898bda449e20d0e1b77a56d08ec63125d49068054b8353545ba2d53",
+      "readouts/jepa/retail_sales_growth_pct.joblib": "ba101627dc82efa05ddd459b209064e9ad5e5e0659c0770217039002c74b2685",
+      "readouts/jepa/revolving_credit_growth_pct.joblib": "d3495b8566cb78713d5fd0d4c0af284907318988b3b9463d554470f7288a225c",
+      "readouts/jepa/unemployment_rate_level.joblib": "1e312fbc1004ae24c089fa0b7cb4ef3c4c7a9f93b3feae4eca42406a40bb65df",
+      "readouts/macro_state_ridge/consumption_growth_pct.joblib": "b9e59f7514f8d23084fbea77010dc3ad17c08752bf70b861b6e7478fa99013ad",
+      "readouts/macro_state_ridge/payroll_growth_pct.joblib": "e7dc7e7969ad597f6b2c13cad03f184de2d9f30c14791dbace3995375244e973",
+      "readouts/macro_state_ridge/personal_saving_rate_change_pp.joblib": "d1c41701f5335eee1e7e0591993f7e3caea7243a255aa6d82aeaf1778e14c28a",
+      "readouts/macro_state_ridge/price_growth_pct.joblib": "d16cd566717c87377bcb25204411f5e338abdbd9a5d2b00f0d93c00c30c3f047",
+      "readouts/macro_state_ridge/real_consumption_growth_pct.joblib": "5dc13e9a575609c4824933661cff7f967faefcc8b8b3dda418da069eb10ead2c",
+      "readouts/macro_state_ridge/real_disposable_income_growth_pct.joblib": "c33d3357da7644c3cbcecd973fec6930b83c0876f65e1ab6f3c0ab5cd808093c",
+      "readouts/macro_state_ridge/retail_sales_growth_pct.joblib": "406d4942d3a93e19a748129c3e3e016cc549c2cd6ce5133b4fb2959b1bf94862",
+      "readouts/macro_state_ridge/revolving_credit_growth_pct.joblib": "cc8b3dd889963db8f54c26c6d7007a61f7eab10295e3c70ba01ea813ecd82348",
+      "readouts/macro_state_ridge/unemployment_rate_level.joblib": "62566f94a8c424929792335e5cc65f648778f6b02cd914b3fe3900448aa3a546",
+      "score_table.csv": "3c46f72ea19b8c4a925e31372d6cbe9d22a813861fba5478ed72dd42c9864063"
+    },
+    "blocked_backtest": "2024-01-01:2025-12-01",
+    "blocked_backtest_primary_score": {
+      "event_jepa_residual": {
+        "direction_accuracy": 0.8333333333333334,
+        "n": 24,
+        "rmse": 0.4575202870029496
+      },
+      "historical_mean": {
+        "direction_accuracy": 0.9166666666666666,
+        "n": 24,
+        "rmse": 0.2369855813777239
+      },
+      "historical_median": {
+        "direction_accuracy": 0.9166666666666666,
+        "n": 24,
+        "rmse": 0.23447618097897233
+      },
+      "macro_state_ridge": {
+        "direction_accuracy": 0.8333333333333334,
+        "n": 24,
+        "rmse": 0.5886860134324851
+      },
+      "origin_visible_baseline": {
+        "direction_accuracy": 0.8333333333333334,
+        "n": 24,
+        "rmse": 0.3312704584092382
+      }
+    },
+    "claim_scope": "Event-time residual StructuredStateJEPA companion benchmark. The design was locked before scoring 2024-2026. It does not use household-ecology outputs as training features and is not an LLM-HANK-JEPA hybrid.",
+    "comparison_panel_sha256": "7ca31051fb54bf3c1d6756eb2fc2a9c2eea2ff0ec09b956291c79190a230aa0c",
+    "events_sha256": "90aadf76040297df9c9e50e12a620b6b1b37c1474cf52dbaa9c3ca28443b7b94",
+    "frozen_targets_sha256": "2be7063fb1a579247be77409e9636ef34edb38c360ff67fafe14980abf17fe8e",
+    "household_overlay_refresh": {
+      "comparison_panel": "/Users/rohit/Documents/Workspace/Coding/macro-llm-tournament/outputs/household_ecology_observability_v24/observed_comparison_panel.csv",
+      "policy": "replace_household_actual_and_visible_baseline_only_no_jepa_retraining"
+    },
+    "model_checkpoint": "work/macro_jepa_v3/model/model.pt",
+    "model_checkpoint_sha256": "0698de864ab888477869d470e08860c988977d70b588ffa91317c1d2b00d2be1",
+    "primary_score": {
+      "event_jepa_residual": {
+        "direction_accuracy": 1.0,
+        "n": 4,
+        "rmse": 0.25584550179876203
+      },
+      "historical_mean": {
+        "direction_accuracy": 1.0,
+        "n": 4,
+        "rmse": 0.3341194829876596
+      },
+      "historical_median": {
+        "direction_accuracy": 1.0,
+        "n": 4,
+        "rmse": 0.3170925272824769
+      },
+      "llm_household_economy": {
+        "direction_accuracy": 0.0,
+        "n": 4,
+        "rmse": 1.7025840045288692
+      },
+      "macro_state_ridge": {
+        "direction_accuracy": 0.75,
+        "n": 4,
+        "rmse": 0.4134529854077258
+      },
+      "origin_visible_baseline": {
+        "direction_accuracy": 1.0,
+        "n": 4,
+        "rmse": 0.2425917232077572
+      }
+    },
+    "prospective_jepa_status": "not_emitted_until_a_complete_origin_state_is_available",
+    "readout_cutoff": "2024-01-15",
+    "readout_selection_split": "2022-01-01:2023-12-31",
+    "retrospective_evaluation": "2026-01-01:2026-04-01",
+    "schema_version": "macro_event_residual_jepa_v3",
+    "self_supervised_train_split_end": "2021-12-31",
+    "self_supervised_validation_split": "2022-01-01:2023-12-31",
+    "vei_git_commit": "682a3691bd5796951e8a7e7f5c1b78c35b2d2828",
+    "vei_root": "../vei",
+    "vei_runtime": {
+      "base_commit": "682a3691bd5796951e8a7e7f5c1b78c35b2d2828",
+      "dependency_file_sha256": {
+        "pipeline/train/model.py": "0fae66850c172348091d14a526ceb4fbc641a36b2a8bea8720cd062cba97e4c4",
+        "pipeline/train/schema.py": "e0c49307686f3a4d453b54fac4283ef95ae9872d677c4006c7b9c23885decd51",
+        "pipeline/train/storage.py": "52608d682f0cda4a320eff638d3a448800acfc8549480ae8b77798fa8ed3463c",
+        "pipeline/train/training.py": "7a2be984b987b3ab5afb2fbea5c0b6bcc63b6238411c1f00a9dbfc5f68e8aabc"
+      },
+      "dependency_files_dirty": true,
+      "reproduction_patch": "vendor/vei_macro_jepa_runtime_682a369.patch",
+      "reproduction_patch_sha256": "c45d2d472c2786642f71b923dd148a83202f091b02740a8c5a76e5fd7c140a6a"
+    }
+  }
+}

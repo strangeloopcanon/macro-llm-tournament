@@ -12,8 +12,13 @@ from pandas.testing import assert_frame_equal, assert_series_equal
 from macro_llm_tournament.ecology_financial_states import (
     SCHEMA_VERSION,
     collapse_scf_implicates,
+    financial_state_population_audit,
     generate_financial_states,
     write_financial_states,
+)
+from macro_llm_tournament.ecology_models import (
+    DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD,
+    DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT,
 )
 
 
@@ -63,6 +68,7 @@ def _households() -> pd.DataFrame:
                 "type_id": "household_z",
                 "population_weight": 0.2,
                 "income_group": "low",
+                "annual_income": 30_000.0,
                 "age_bucket": "18_34",
                 "employment_status": "employed",
                 "homeownership": "renter",
@@ -73,6 +79,7 @@ def _households() -> pd.DataFrame:
                 "type_id": "household_a",
                 "population_weight": 0.8,
                 "income_group": "high",
+                "annual_income": 135_000.0,
                 "age_bucket": "55_plus",
                 "employment_status": "unemployed",
                 "homeownership": "owner",
@@ -102,21 +109,51 @@ class EcologyFinancialStatesTests(unittest.TestCase):
         self.assertEqual(forward["population_weight"].tolist(), [0.8, 0.2])
         self.assertEqual(forward["inflation_expectation_1y"].tolist(), [4.0, 3.0])
         self.assertEqual(forward.loc[forward["household_id"].eq("household_z"), "annual_income_usd"].item(), 30_000.0)
-        self.assertEqual(forward.loc[forward["household_id"].eq("household_a"), "annual_income_usd"].item(), 220_000.0)
+        self.assertEqual(forward.loc[forward["household_id"].eq("household_a"), "annual_income_usd"].item(), 135_000.0)
+        self.assertTrue(forward["scf_income_to_anchor_ratio"].between(0.5, 2.0).all())
+        self.assertTrue((forward["scf_income_caliper_candidate_count"] >= 1).all())
         self.assertIn("scf_donor_employment_group", forward.columns)
 
     def test_business_income_is_earned_income_not_nonwage_income(self) -> None:
         household = _households().iloc[[0]].copy()
         household["income_group"] = "middle"
+        household["annual_income"] = 72_000.0
         household["age_bucket"] = "35_54"
         household["homeownership"] = "owner"
         household["cohort_stratum"] = "middle|35_54|some_college"
         middle = generate_financial_states(household, _scf_implicates(), seed=91).iloc[0]
-        self.assertEqual(middle["monthly_business_income_usd"], 1_000.0)
+        self.assertEqual(middle["monthly_business_income_usd"], 900.0)
         self.assertEqual(
             middle["monthly_earned_income_usd"],
-            middle["monthly_wage_income_usd"] + 1_000.0,
+            middle["monthly_wage_income_usd"] + 900.0,
         )
+
+    def test_observed_revolving_payment_is_not_used_as_contractual_minimum(self) -> None:
+        household = _households().iloc[[1]].copy()
+        output = generate_financial_states(household, _scf_implicates(), seed=91)
+        row = output.iloc[0]
+        debt = float(row["revolving_debt_usd"])
+        expected_minimum = min(
+            debt,
+            max(
+                DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD,
+                debt * DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT / 100.0,
+            ),
+        )
+        self.assertAlmostEqual(
+            row["recurring_minimum_debt_payment_usd"], expected_minimum
+        )
+        self.assertNotAlmostEqual(
+            row["scf_observed_revolving_payment_monthly_usd"], expected_minimum
+        )
+
+    def test_debt_free_household_has_no_contractual_minimum(self) -> None:
+        output = generate_financial_states(
+            _households().iloc[[0]], _scf_implicates(), seed=91
+        )
+        row = output.iloc[0]
+        self.assertEqual(row["revolving_debt_usd"], 0.0)
+        self.assertEqual(row["recurring_minimum_debt_payment_usd"], 0.0)
 
     def test_income_components_reconcile_to_total_household_income(self) -> None:
         output = generate_financial_states(_households(), _scf_implicates(), seed=91)
@@ -135,7 +172,7 @@ class EcologyFinancialStatesTests(unittest.TestCase):
     def test_financial_state_allows_observed_zero_debt_and_liquidity_dispersion(self) -> None:
         output = generate_financial_states(_households(), _scf_implicates(), seed=1)
         debt_free = output.loc[output["annual_income_usd"].eq(30_000.0)].iloc[0]
-        indebted = output.loc[output["annual_income_usd"].eq(220_000.0)].iloc[0]
+        indebted = output.loc[output["annual_income_usd"].eq(135_000.0)].iloc[0]
         self.assertEqual(debt_free["revolving_debt_usd"], 0.0)
         self.assertGreater(debt_free["revolving_credit_limit_usd"], 0.0)
         self.assertEqual(debt_free["revolving_credit_utilization"], 0.0)
@@ -150,6 +187,35 @@ class EcologyFinancialStatesTests(unittest.TestCase):
         row = output.iloc[0]
         self.assertIn("age_group", row["scf_match_relaxed_fields"])
         self.assertTrue(row["scf_match_rule"].startswith("relaxed_"))
+
+    def test_extreme_income_donor_is_excluded_before_weighted_selection(self) -> None:
+        scf = _scf_implicates()
+        extreme = scf.loc[scf["yy1"].eq(303)].copy()
+        extreme["yy1"] = 404
+        extreme["y1"] = 4040 + pd.Series(range(1, 6), index=extreme.index)
+        extreme["income"] = 20_000_000.0
+        extreme["wgt"] = 1_000_000_000.0
+        output = generate_financial_states(
+            _households().iloc[[1]], pd.concat([scf, extreme], ignore_index=True), seed=5
+        )
+        row = output.iloc[0]
+        self.assertEqual(row["scf_donor_annual_income_usd"], 220_000.0)
+        self.assertLessEqual(row["scf_income_to_anchor_ratio"], 2.0)
+        self.assertEqual(row["annual_income_usd"], 135_000.0)
+
+    def test_population_audit_reports_concentration(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "population_weight": [0.5, 0.5],
+                "baseline_committed_consumption_monthly_usd": [80.0, 20.0],
+                "baseline_discretionary_consumption_monthly_usd": [0.0, 0.0],
+            }
+        )
+        audit = financial_state_population_audit(frame, enforce=False)
+        self.assertAlmostEqual(
+            audit["max_baseline_spending_contribution_share"], 0.8
+        )
+        self.assertAlmostEqual(audit["baseline_spending_effective_households"], 1.4705882353)
 
     def test_writer_reads_a_small_synthetic_stata_zip_and_writes_hashed_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -173,6 +239,14 @@ class EcologyFinancialStatesTests(unittest.TestCase):
         self.assertEqual(manifest["manifest_sha256"], on_disk_manifest["manifest_sha256"])
         self.assertEqual(manifest["output_csv"]["row_count"], 2)
         self.assertFalse(manifest["matching"]["target_or_actual_data_used"])
+        self.assertEqual(manifest["matching"]["income_caliper_ratio"], [0.5, 2.0])
+        self.assertEqual(
+            manifest["matching"]["revolving_payment_semantics"][
+                "minimum_payment_rate_pct"
+            ],
+            3.0,
+        )
+        self.assertIn("population_contribution_audit", manifest)
 
 
 if __name__ == "__main__":

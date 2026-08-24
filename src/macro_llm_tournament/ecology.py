@@ -37,7 +37,13 @@ from .ecology_households import (
     household_card,
     normalize_household_payload,
 )
-from .ecology_models import CreditIntermediaryState, EmployerState, HouseholdState
+from .ecology_models import (
+    DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD,
+    DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT,
+    CreditIntermediaryState,
+    EmployerState,
+    HouseholdState,
+)
 from .ecology_provider import (
     CODEX_INSTRUCTION_CONTEXT_VERSION,
     CODEX_TOOL_ISOLATION_VERSION,
@@ -500,8 +506,8 @@ def _initial_credit(states: list[HouseholdState], origin: dict[str, Any]) -> Cre
     return CreditIntermediaryState(
         intermediary_id="aggregate_credit_intermediary",
         annual_interest_rate_pct=max(0.0, policy_rate + 14.0),
-        minimum_payment_rate_pct=3.0,
-        minimum_payment_floor_usd=25.0,
+        minimum_payment_rate_pct=DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT,
+        minimum_payment_floor_usd=DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD,
         loss_given_default_pct=55.0,
         new_lending_budget_usd=(
             len(states)

@@ -439,6 +439,19 @@ class EcologyObservabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "artifact hash mismatch"):
                 ecology_observability._validate_artifact(root, manifest, "data.csv")
 
+    def test_source_run_must_bind_the_same_household_file(self) -> None:
+        ecology_observability._require_household_input(
+            {"inputs_sha256": {"households": "expected"}},
+            "expected",
+            source=Path("run/manifest.json"),
+        )
+        with self.assertRaisesRegex(ValueError, "household input does not match"):
+            ecology_observability._require_household_input(
+                {"household_input_sha256": "old"},
+                "new",
+                source=Path("run/manifest.json"),
+            )
+
     def test_child_status_is_not_an_accuracy_label(self) -> None:
         self.assertEqual(
             ecology_observability._evaluation_status(

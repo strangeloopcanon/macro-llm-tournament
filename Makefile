@@ -1,4 +1,4 @@
-.PHONY: all check test ecology-fixture ecology-financial-states ecology-history ecology-live-canary ecology-live-200 ecology-current-replay ecology-feedback-live ecology-feedback-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay ecology-observability household-cohort vintage-bundle origin-snapshot
+.PHONY: all check test ecology-fixture ecology-financial-states ecology-history ecology-live-canary ecology-live-200 ecology-current-replay ecology-feedback-live ecology-feedback-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay ecology-observability household-cohort vintage-bundle origin-snapshot macro-jepa-events macro-jepa macro-jepa-refresh-overlay
 
 ORIGIN ?= 2026-07-01
 AS_OF ?= 2026-07-10
@@ -6,19 +6,25 @@ MODEL ?= gpt-5.5
 ECOLOGY_WORKERS ?= 8
 RETROSPECTIVE_WORKERS ?= 16
 ORIGIN_SNAPSHOT ?= work/ecology_origins/$(AS_OF).json
-ECOLOGY_CACHE ?= work/ecology_cache_200_july_v23
-ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v3/initial_households_200.csv
+ECOLOGY_CACHE ?= work/ecology_cache_200_july_v24
+ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v4/initial_households_200.csv
+NEXT_ECOLOGY_HOUSEHOLDS ?= work/persona_beliefs/persistent_household_scale_v5/initial_households_200.csv
+NEXT_ECOLOGY_FINANCIAL_STATE_MANIFEST ?= work/persona_beliefs/persistent_household_scale_v5/financial_state_manifest.json
 ECOLOGY_HISTORY_DIR ?= work/persona_beliefs/persistent_household_scale_v23
 ECOLOGY_HISTORY ?= $(ECOLOGY_HISTORY_DIR)/selected_observed_history.csv
 ECOLOGY_HISTORY_MANIFEST ?= $(ECOLOGY_HISTORY_DIR)/history_manifest.json
 ECOLOGY_BUNDLE ?= work/dynamic_macro/frozen_2026_01_2026_05_common_month_v1
 ECOLOGY_FIXTURE_DIR := examples/ecology_fixture
-CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v23_current
-FEEDBACK_CACHE ?= work/ecology_feedback_cache_200_july_v23
-FEEDBACK_RUN_DIR ?= outputs/household_ecology_feedback_200_july_v23
-RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v23
-RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v23
-OBSERVABILITY_DIR ?= outputs/household_ecology_observability_v23
+CURRENT_RUN_DIR ?= outputs/household_ecology_200_july_v24_current
+FEEDBACK_CACHE ?= work/ecology_feedback_cache_200_july_v24
+FEEDBACK_RUN_DIR ?= outputs/household_ecology_feedback_200_july_v24
+RETROSPECTIVE_DIR ?= outputs/household_ecology_retrospective_2026_01_04_v24
+RETROSPECTIVE_CACHE ?= work/ecology_cache_retrospective_2026_01_04_v24
+OBSERVABILITY_DIR ?= outputs/household_ecology_observability_v24
+VEI_ROOT ?= $(abspath ../vei)
+JEPA_DEVICE ?= mps
+MACRO_JEPA_EVENTS_DIR ?= work/fred_dense_events_event_jepa_v2
+MACRO_JEPA_DIR ?= work/macro_jepa_v3
 
 all: check test
 
@@ -30,6 +36,34 @@ check:
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+macro-jepa-events:
+	rm -rf $(MACRO_JEPA_EVENTS_DIR)
+	PYTHONPATH=src python3 -m macro_llm_tournament.macro_jepa_events \
+		--output-dir $(MACRO_JEPA_EVENTS_DIR)
+
+macro-jepa: macro-jepa-events
+	rm -rf $(MACRO_JEPA_DIR)
+	PYTHONPATH=src $(VEI_ROOT)/.venv/bin/python -m macro_llm_tournament.macro_jepa \
+		--events $(MACRO_JEPA_EVENTS_DIR)/dense_macro_events.jsonl \
+		--comparison-panel $(OBSERVABILITY_DIR)/observed_comparison_panel.csv \
+		--retrospective-run $(RETROSPECTIVE_DIR) \
+		--vei-root $(VEI_ROOT) \
+		--vei-runtime-patch vendor/vei_macro_jepa_runtime_682a369.patch \
+		--device $(JEPA_DEVICE) \
+		--output-dir $(MACRO_JEPA_DIR) \
+		--report-figure reports/current_macro_jepa_comparison.png \
+		--report-evidence-json reports/current_macro_jepa_evidence.json
+
+macro-jepa-refresh-overlay:
+	PYTHONPATH=src python3 -m macro_llm_tournament.macro_jepa \
+		--refresh-comparison-only \
+		--comparison-panel $(OBSERVABILITY_DIR)/observed_comparison_panel.csv \
+		--vei-root $(VEI_ROOT) \
+		--vei-runtime-patch vendor/vei_macro_jepa_runtime_682a369.patch \
+		--output-dir $(MACRO_JEPA_DIR) \
+		--report-figure reports/current_macro_jepa_comparison.png \
+		--report-evidence-json reports/current_macro_jepa_evidence.json
 
 ecology-fixture:
 	rm -rf outputs/household_ecology_fixture_v1
@@ -47,12 +81,12 @@ ecology-fixture:
 		--output-dir outputs/household_ecology_fixture_v1
 
 ecology-financial-states:
-	mkdir -p work/persona_beliefs/persistent_household_scale_v3
+	mkdir -p $$(dirname $(NEXT_ECOLOGY_HOUSEHOLDS)) $$(dirname $(NEXT_ECOLOGY_FINANCIAL_STATE_MANIFEST))
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_financial_states \
 		--households work/persona_beliefs/persistent_household_scale_v2/initial_households_200.csv \
 		--scf-zip work/scf/2022/scfp2022s.zip \
-		--output-csv $(ECOLOGY_HOUSEHOLDS) \
-		--manifest work/persona_beliefs/persistent_household_scale_v3/financial_state_manifest.json \
+		--output-csv $(NEXT_ECOLOGY_HOUSEHOLDS) \
+		--manifest $(NEXT_ECOLOGY_FINANCIAL_STATE_MANIFEST) \
 		--seed 20260714
 
 ecology-history:
@@ -67,7 +101,7 @@ ecology-history:
 		--output-manifest-json $(ECOLOGY_HISTORY_MANIFEST)
 
 ecology-live-canary: ecology-history
-	rm -rf outputs/household_ecology_canary_v23
+	rm -rf outputs/household_ecology_canary_v24
 	CODEX_CLI_REASONING_EFFORT=high CODEX_CLI_TIMEOUT_SECONDS=600 \
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology \
 		--origin 2026-05-01 \
@@ -81,7 +115,7 @@ ecology-live-canary: ecology-history
 		--workers $(ECOLOGY_WORKERS) \
 		--max-live-calls 14 \
 		--cache-dir $(ECOLOGY_CACHE) \
-		--output-dir outputs/household_ecology_canary_v23
+		--output-dir outputs/household_ecology_canary_v24
 
 ecology-live-200: ecology-history
 	rm -rf $(CURRENT_RUN_DIR)

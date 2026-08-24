@@ -1,107 +1,108 @@
 # Current Project Surface
 
-The active system is an anchor-free, 200-household LLM economy with a one-step
-producer and income feedback loop.
+The active system is a 200-household LLM demand economy with a one-step producer,
+income, and household feedback loop.
 
 ```text
-real household priors -> LLM beliefs and dollar policies -> household settlement
--> aggregate demand -> producer output/inventory -> employment/wages -> family
-income -> fresh LLM household decisions
+real household histories + repaired financial states + dated public information
+                                  |
+                                  v
+                    GPT-5.5 household decisions
+                                  |
+                                  v
+               code-enforced budgets and settlement
+                                  |
+                                  v
+            demand -> output -> employment -> wages/income
+                                  |
+                                  v
+                    next household decision
 ```
 
-Rolling forecasts re-anchor financial states at every origin and use the latest SCE
-observations available under a nine-month publication lag. The two-period experiment
-instead carries simulated deposits, debt, recurring spending, inventory, employment,
-wages, and family income forward once.
+## Current Verdict
+
+The simulator works, but the repaired household economy forecasts poorly.
+
+The earlier v23 population was not trustworthy as a 200-household aggregate. One
+survey household had been paired with a $21.9 million SCF donor and contributed
+31.3% of baseline spending; the effective spending sample was about nine households.
+V24 keeps each SCE household's own income, restricts SCF donors to one-half through
+twice that income, and scales donor flows and stocks to the SCE income anchor.
+
+The repair succeeds mechanically:
+
+- largest household spending contribution: **2.36%**;
+- top-five contribution: **8.87%**;
+- effective spending household count: **140.4**;
+- all 200 donor matches stayed within the income bound;
+- no demographic match had to be relaxed.
+
+It does not improve prediction. The four v24 nominal-consumption forecasts are
+`-1.08%, -1.00%, -1.06%, -1.05%`, against first-release PCE growth of
+`+0.48%, +0.90%, +0.51%, +0.71%`.
+
+| Diagnostic | Repaired household economy | Visible-data baseline |
+| --- | ---: | ---: |
+| Nominal PCE RMSE | 1.703 pp | 0.243 pp |
+| Mean bias | -1.696 pp | -0.215 pp |
+| Direction | 0/4 | 4/4 |
+
+About 78-81% of represented households cut spending at each historical origin.
+Only about 0.7% are materially constrained by settlement, so the pessimism comes
+mainly from the decisions authored by the model, not from the accounting code.
+
+The frozen July-to-August forecast is **-1.12%** and remains unscored. In the
+unscored recursive run, period-two spending falls another **0.80%**. The dynamic
+system executes and replays exactly, but its current household behavior is too
+cautious.
+
+## One-Page Scorecard
+
+[`reports/current_macro_jepa_comparison.png`](reports/current_macro_jepa_comparison.png)
+is the complete nine-panel scorecard. It plots first-release actual outcomes, the
+repaired LLM household economy, the locked Event-JEPA predictions, the origin-visible
+lag-one baseline, and frozen unscored points where available.
+
+The Event-JEPA remains a separate macro-only diagnostic. A fresh unit audit found that
+REVOLSL and TOTALSL changed from billions to millions inside the archived history and
+that the exact 2026 cards could reintroduce the raw unit. V3 canonicalizes both inputs
+and fails closed if the old unit remains. On the four 2026 nominal-PCE targets it now
+has RMSE **0.256 pp**, close to the visible-data baseline's **0.243 pp**. On its more
+informative locked 2024-2025 block it scores **0.458 pp**, still behind lag-one's
+**0.331 pp** and the historical median's **0.234 pp**.
 
 ## What Works
 
-- All 200 households receive their own observed history, matched financial state,
-  and only public information available at the origin.
-- Households choose signed dollar changes in committed and discretionary spending,
-  one-off purchases, debt repayment, and borrowing under employed and job-loss
-  branches.
-- Aggregate PCE growth is context, not an executable spending anchor.
-- Recurring spending, deposits, debt, and producer state survive the monthly
-  transition; one-off purchases do not become recurring consumption.
-- Household budgets, goods inventory, bank stocks, and named counterparty flows
-  reconcile at numerical tolerance.
-- Live and replay executions are hash-bound to the materialized household history,
-  source inputs, prompts, payloads, parent artifacts, and result.
+- Household histories and financial states are origin-safe and hash-bound.
+- Every LLM call is isolated and goes through `codex_cli`.
+- Household budgets, credit, goods, bank stocks, and counterparties reconcile.
+- Producer output, inventory, employment, wages, and household income feed into the
+  next period.
+- Live and replay runs are equivalent and source-bound.
+- Reporting rejects any attempt to combine runs with a different household file.
 
-## Latest Numbers: The Primary Comparison
+## What Does Not Work Yet
 
-The v23 historical forecasts are `-0.24%, +0.01%, -0.08%, -0.17%` against
-first-release PCE growth of `+0.48%, +0.90%, +0.51%, +0.71%`.
+The household action layer turns ordinary public information into broad spending
+cuts. Correcting the household population makes that failure clearer. A further audit
+also found that SCF's composite revolving-payment measure had been treated as the
+minimum due on card debt. V5 preserves that observed measure but uses the simulation's
+actual 3%/$25 card contract. The same 200 households and donors are retained; 109
+payment fields change. This input is ready, but it has not been used for a new LLM run.
 
-- Full consumption RMSE: **0.782 pp**.
-- Mean bias: **-0.771 pp**.
-- Demeaned RMSE: **0.126 pp**.
-- Correlation: **0.683**.
-- Forecast/actual standard-deviation ratio: **0.563**.
-- Direction: **1/4**.
-- Origin-visible drift RMSE: **0.243 pp**.
-- Origin-visible drift demeaned RMSE: **0.113 pp**.
-- Origin-visible drift correlation: **0.974**.
-- Origin-visible drift direction: **4/4**.
-- Settlement audit: **PASS** in every final run.
-
-The July origin is frozen for August at **-0.13%**. In the two-period mechanism
-trace, fresh period-two household spending falls **0.31%**; producer employment and
-wages remain nearly flat because the demand change is small.
-
-## Nine-Variable Panel
-
-`outputs/household_ecology_observability_v23/` now binds a predicted-versus-
-first-release-actual panel for all nine declared macro outputs. The four historical
-origins are retrospective development evidence (`n=4` for every variable); the July
-row is frozen for August and unscored.
-
-| Variable | Realized comparator | What the comparison is |
-| --- | --- | --- |
-| Nominal consumption growth | nominal PCE | the only closest aggregate comparison; the main result |
-| Price growth | PCEPI | household-belief/deflation proxy |
-| Real consumption growth | real PCE | belief/deflation proxy |
-| Real disposable income growth | real disposable income | belief/deflation proxy |
-| Payroll growth | PAYEMS | target-month producer-plan proxy using origin inventory |
-| Unemployment-rate level | UNRATE | target-month producer-plan proxy using origin inventory |
-| Saving-rate change | PSAVERT | gross household budget-residual proxy, not a national saving identity |
-| Revolving-credit growth | revolving credit | direction-only proxy |
-| Retail-sales growth | retail sales | declared demand proxy |
-
-The panel makes the model's cross-variable surface inspectable. It does not validate
-the belief/deflation mappings, the target-month producer plan, a national-accounts saving
-equation, or a retail-sales model. Credit has no level-error score. The consumption
-result still controls the conclusion: the household layer loses to PCE drift already
-visible in its own prompt.
-
-## What This Means
-
-V23 answers a harder question than v22. Once the observed PCE drift is removed from
-the executable baseline, the households do not predict the absolute monthly growth
-rate well. They are about 0.75 points too pessimistic on average and produce a little
-over half the observed variation.
-
-The cross-month ordering does not establish incremental signal. The PCE drift already
-shown in every household prompt has `0.974` correlation, `0.113`-point demeaned RMSE,
-and 4/4 direction, beating the household economy on every scored consumption
-diagnostic. The household layer currently turns its visible context into worse point
-forecasts.
-
-The economy is simulatable: household policies create demand, demand changes the
-producer state and family income, and households respond again. The next model
-problem is the level of ordinary nominal spending, especially the recurring baseline
-and the model's systematic tendency to cut discretionary purchases. Adding LLM firms
-or banks would not fix that.
-
-All cached payloads replay exactly. Retained accepted-call journals cover 200/200
-current payloads, 309/800 historical payloads, and 200/200 period-two payloads. The
-491 historical records without journals remain useful development artifacts, but their
-original provider attempts are not independently evidenced by the retained workspace.
+The next development experiment should use observed household spending history where
+available, distribution-preserving cell assignments elsewhere, and household-authored
+policy schedules evaluated by deterministic code. This changes the information and
+action interface without feeding realized aggregate PCE into the simulation or tuning
+the prompt to these four target months.
 
 ## Active Evidence
 
-- `outputs/household_ecology_200_july_v23_current/`
-- `outputs/household_ecology_retrospective_2026_01_04_v23/`
-- `outputs/household_ecology_feedback_200_july_v23/`
-- `outputs/household_ecology_observability_v23/`
+- `work/persona_beliefs/persistent_household_scale_v5/` (corrected input, not yet live-scored)
+- `outputs/household_ecology_200_july_v24_current/`
+- `outputs/household_ecology_retrospective_2026_01_04_v24/`
+- `outputs/household_ecology_feedback_200_july_v24/`
+- `outputs/household_ecology_observability_v24/`
+- `work/macro_jepa_v3/`
+- `reports/current_macro_jepa_comparison.png`
+- `reports/current_macro_jepa_evidence.json`

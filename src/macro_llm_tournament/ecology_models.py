@@ -10,6 +10,8 @@ from typing import Any
 ACCOUNTING_TOLERANCE = 1e-6
 ECOLOGY_SCHEMA_VERSION = "household_first_monthly_ecology_v7"
 HOUSEHOLD_RESPONSE_SCHEMA_VERSION = "household_conditional_nominal_policy_v7"
+DEFAULT_CREDIT_MINIMUM_PAYMENT_RATE_PCT = 3.0
+DEFAULT_CREDIT_MINIMUM_PAYMENT_FLOOR_USD = 25.0
 
 
 def _require_finite(value: float, field_name: str) -> float:

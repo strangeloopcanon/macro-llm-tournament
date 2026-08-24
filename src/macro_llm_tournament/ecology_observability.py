@@ -70,6 +70,19 @@ def _validate_artifact(run_dir: Path, manifest: dict[str, Any], name: str) -> Pa
     return path
 
 
+def _require_household_input(
+    manifest: dict[str, Any], expected_sha256: str, *, source: Path
+) -> None:
+    actual = manifest.get("household_input_sha256")
+    if actual is None:
+        actual = manifest.get("inputs_sha256", {}).get("households")
+    if actual != expected_sha256:
+        raise ValueError(
+            f"source run household input does not match {source}: "
+            f"{actual} != {expected_sha256}"
+        )
+
+
 def _load_weights(path: Path, expected_count: int) -> dict[str, float]:
     frame = pd.read_csv(path)
     required = {"type_id", "population_weight"}
@@ -776,6 +789,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("retrospective manifest has no origin months")
     expected_count = int(parent.get("household_count", -1))
     weights = _load_weights(args.households, expected_count)
+    household_input_sha256 = _file_sha256(args.households)
+    _require_household_input(
+        parent, household_input_sha256, source=retrospective / "manifest.json"
+    )
 
     simulation_rows: list[dict[str, Any]] = []
     source_runs: dict[str, dict[str, Any]] = {}
@@ -786,6 +803,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if actual_hash != expected_hash:
             raise ValueError(f"child manifest hash mismatch for {origin}")
         manifest, rows = _run_payload(child, weights)
+        _require_household_input(
+            manifest, household_input_sha256, source=child / "manifest.json"
+        )
         # Child runs were frozen before the parent loaded realizations, so their
         # own manifests correctly say prospective_frozen. Once assembled by the
         # retrospective parent, every diagnostic row must inherit the parent's
@@ -803,6 +823,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     prospective_replay_equivalence_sha256: str | None = None
     if prospective is not None:
         manifest, rows = _run_payload(prospective, weights)
+        _require_household_input(
+            manifest, household_input_sha256, source=prospective / "manifest.json"
+        )
         simulation_rows.extend(rows)
         prospective_manifest_sha256 = _artifact_sha256(prospective / "manifest.json")
         prospective_replay_equivalence_sha256 = manifest.get(
@@ -816,6 +839,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "source_child_status": manifest["evaluation_status"],
             "panel_evaluation_status": "prospective_frozen",
         }
+    if feedback is not None:
+        _require_household_input(
+            _read_json(feedback / "manifest.json"),
+            household_input_sha256,
+            source=feedback / "manifest.json",
+        )
     feedback_rows, feedback_manifest_sha256 = _feedback_period_two_rows(
         feedback,
         expected_period_one_replay_equivalence_sha256=(
@@ -892,7 +921,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "retrospective_manifest_sha256": _artifact_sha256(retrospective / "manifest.json"),
         "prospective_manifest_sha256": prospective_manifest_sha256,
         "feedback_manifest_sha256": feedback_manifest_sha256,
-        "household_input_sha256": _file_sha256(args.households),
+        "household_input_sha256": household_input_sha256,
         "source_runs": source_runs,
         "retrospective_is_confirmatory": False,
         "prospective_is_scored": False,
