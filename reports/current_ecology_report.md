@@ -1,9 +1,10 @@
-# The Household Economy Is Now Representative, But Its Behavior Is Too Pessimistic
+# Forecast Evidence Is Mixed Across Macro Targets
 
 The current 200-household economy has credible population arithmetic, complete
-accounting, and a working feedback loop. It does not yet forecast macro behavior
-well. Repairing a serious household-matching problem made the forecast failure
-larger and easier to diagnose.
+accounting, and a working feedback loop. Its nominal spending forecasts trail their
+visible-data baseline. Repairing the household match made that spending bias clearer.
+JEPA's separate payroll comparison showed a measured gain. No predictive uncertainty
+interval was saved, so accounting validity cannot establish a forecast-bounds claim.
 
 ## The Repair
 
@@ -56,7 +57,11 @@ spending. Settlement constraints materially bind for only about 0.7% of them. Th
 downward bias therefore comes from the LLM-authored household policies rather than
 from cash, credit, or accounting restrictions.
 
-![Household economy, Event-JEPA, baselines, and first-release outcomes](current_macro_jepa_comparison.png)
+![Household economy, Event-JEPA, baselines, and first-release outcomes: historical August 23 snapshot](current_macro_jepa_comparison.png)
+
+The image above retains its original unscored August markers. The
+[August outcome chart](august_2026_consumption.png) and
+[recovery report](recovery_and_august_score.md) supply the newly scored result.
 
 ## What The Economy Does
 
@@ -68,8 +73,10 @@ and wages, and feeds the resulting income and balance sheets into a fresh househ
 decision.
 
 The repaired July origin predicts a **1.12% fall** in August nominal consumption.
-That point is frozen and unscored until the first-release August data arrive. The
-two-period mechanism then produces a further **0.80% fall** in spending. All household,
+That point was frozen before the first-release August data arrived. It is now scored:
+BEA reported **+0.9%**, giving an absolute error of **2.021 pp**, versus **0.187 pp**
+for the saved visible baseline. See the [August score](recovery_and_august_score.md).
+The two-period mechanism then produces a further **0.80% fall** in spending. All household,
 goods, bank, and counterparty accounts reconcile to numerical tolerance, and the
 published feedback run is an exact replay of the live run.
 
@@ -84,10 +91,14 @@ remaining mixed unit. On the four 2026 nominal PCE targets its RMSE is **0.256 p
 close to the visible-data baseline's **0.243 pp** and better than the historical
 median's **0.317 pp**. Its direct state ridge is now finite at **0.413 pp**.
 
-The more informative locked 2024-2025 result remains negative: Event-JEPA scores
+The more informative locked 2024-2025 spending result remains negative: Event-JEPA scores
 **0.458 pp**, lag-one **0.331 pp**, and the historical median **0.234 pp**. The record
 repair makes JEPA competitive on four current months; it does not establish a durable
 forecasting advantage.
+
+The saved result is mixed across targets. Payroll RMSE was **0.054 pp**, versus
+lag-one's **0.060 pp** over 24 origins. That target-specific gain is preserved in
+the [recomputed score table](jepa_heldout_scores.csv).
 
 The current evidence does not support the household economy or Event-JEPA as the best
 one-month macro forecaster.
@@ -99,18 +110,18 @@ the aggregate. Fixing that problem did not uncover hidden forecasting skill. Ins
 it showed that the direct first-person household interface systematically produces
 too much caution when ordinary nominal spending is growing.
 
-The next experiment should change the behavior information and action interface, not
-tune prose against these four outcomes. Start households from observed SCE spending
-histories where available, preserve the empirical within-cell distribution for the
-rest, and ask a small set of household-state archetypes to author bounded response
-schedules. Deterministic code then evaluates those schedules for all 200 households
-and keeps the existing settlement. Promotion requires a substantial full-economy PCE
-improvement without weakening the other macro panels or using realized PCE as an input.
+The next step is an offline household purchase-response test. The recovered SCE
+spending supplement contains expected purchases and later reported purchases. Start
+with the respondents' own probabilities and simple baselines. Freeze the mapping and
+test population before adding model predictions. The current LLM dollar policies
+cannot stand in for purchase probabilities. See the
+[readiness inventory](household_response_readiness.md) for evidence and remaining gaps.
 
 ## Evidence Boundary
 
 - January-April 2026 is retrospective development evidence with four observations.
-- The July-to-August forecast is frozen and unscored.
+- The July-to-August forecast is frozen and now scored on four BEA targets; five
+  other macro targets remain unscored. No JEPA August forecast was saved.
 - Nominal household consumption is the closest aggregate mapping. The other eight
   panels contain declared proxies and should not be read as equally validated forecasts.
 - The repair used 1,201 Codex CLI attempts for 1,200 accepted household responses;

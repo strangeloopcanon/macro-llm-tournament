@@ -1,4 +1,4 @@
-.PHONY: all check test ecology-fixture ecology-financial-states ecology-history ecology-live-canary ecology-live-200 ecology-current-replay ecology-feedback-live ecology-feedback-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay ecology-observability household-cohort vintage-bundle origin-snapshot macro-jepa-events macro-jepa macro-jepa-refresh-overlay
+.PHONY: all check test ecology-fixture ecology-financial-states ecology-history ecology-live-canary ecology-live-200 ecology-current-replay ecology-feedback-live ecology-feedback-replay ecology-realize ecology-retrospective-live ecology-retrospective-replay ecology-observability household-cohort vintage-bundle origin-snapshot macro-jepa-events macro-jepa macro-jepa-refresh-overlay review-saved-evidence
 
 ORIGIN ?= 2026-07-01
 AS_OF ?= 2026-07-10
@@ -29,21 +29,22 @@ MACRO_JEPA_DIR ?= work/macro_jepa_v3
 all: check test
 
 check:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q src tests
+	PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q src tests scripts
 	@for file in $$(git ls-files '*.json'); do python3 -m json.tool "$$file" >/dev/null || exit 1; done
 	@python3 -c 'import json, pathlib, subprocess; [json.loads(line) for name in subprocess.check_output(["git", "ls-files", "*.jsonl"], text=True).splitlines() for line in pathlib.Path(name).read_text(encoding="utf-8").splitlines() if line.strip()]'
 	git diff --check
+
+review-saved-evidence:
+	PYTHONPATH=src python3 scripts/review_saved_evidence.py
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 macro-jepa-events:
-	rm -rf $(MACRO_JEPA_EVENTS_DIR)
 	PYTHONPATH=src python3 -m macro_llm_tournament.macro_jepa_events \
 		--output-dir $(MACRO_JEPA_EVENTS_DIR)
 
 macro-jepa: macro-jepa-events
-	rm -rf $(MACRO_JEPA_DIR)
 	PYTHONPATH=src $(VEI_ROOT)/.venv/bin/python -m macro_llm_tournament.macro_jepa \
 		--events $(MACRO_JEPA_EVENTS_DIR)/dense_macro_events.jsonl \
 		--comparison-panel $(OBSERVABILITY_DIR)/observed_comparison_panel.csv \
@@ -183,7 +184,7 @@ ecology-realize:
 	@test -n "$(REALIZATIONS_CSV)" || (echo "REALIZATIONS_CSV is required" >&2; exit 2)
 	PYTHONPATH=src python3 -m macro_llm_tournament.ecology_realizations \
 		--run-dir $(CURRENT_RUN_DIR) \
-		--realizations-csv $(REALIZATIONS_CSV)
+		--realizations-csv $(REALIZATIONS_CSV) $(if $(REALIZATION_TARGETS),--metrics $(REALIZATION_TARGETS))
 
 ecology-retrospective-live: ecology-history
 	rm -rf $(RETROSPECTIVE_DIR)

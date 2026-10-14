@@ -15,6 +15,7 @@ from typing import Any, Sequence
 import pandas as pd
 
 from .ecology import SCHEMA_VERSION, _artifact_sha256, _file_sha256, _write_json
+from .ecology_macro import MACRO_TARGET_CONTRACT
 
 
 REALIZATION_SCHEMA_VERSION = "household_first_rolling_microeconomy_realization_append_v3"
@@ -48,10 +49,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--realizations-csv", type=Path, required=True)
+    parser.add_argument(
+        "--metrics", nargs="+", default=list(REALIZATION_METRICS),
+        choices=sorted(set(REALIZATION_METRICS) | set(MACRO_TARGET_CONTRACT)),
+        help="Score only these observed targets; omitted targets remain unscored.",
+    )
     return parser
 
 
-def append_realizations(run_dir: Path, realizations_csv: Path) -> dict[str, Any]:
+def append_realizations(
+    run_dir: Path, realizations_csv: Path,
+    *, metrics: Sequence[str] = REALIZATION_METRICS,
+) -> dict[str, Any]:
+    metrics = tuple(metrics)
+    supported = set(REALIZATION_METRICS) | set(MACRO_TARGET_CONTRACT)
+    if not metrics or len(set(metrics)) != len(metrics) or not set(metrics) <= supported:
+        raise ValueError("metrics must be non-empty, unique supported targets")
     run_dir = run_dir.resolve()
     realizations_csv = realizations_csv.resolve()
     manifest_path = run_dir / "manifest.json"
@@ -64,11 +77,12 @@ def append_realizations(run_dir: Path, realizations_csv: Path) -> dict[str, Any]
         manifest = _load_manifest(manifest_path)
         _validate_manifest(manifest)
         _verify_original_artifacts(run_dir, manifest)
-        forecast_paths = _load_forecast_paths(run_dir / "macro_forecast_paths.csv")
+        forecast_paths = _load_forecast_paths(run_dir / "macro_forecast_paths.csv", metrics=metrics)
         realization_rows = _load_realization_rows(
             realizations_csv,
             expected_target=str(manifest["target_month"]),
             forecast_cutoff=str(manifest["as_of_date"]),
+            metrics=metrics,
         )
         realization_row = {
             "target_month": str(manifest["target_month"]),
@@ -76,12 +90,13 @@ def append_realizations(run_dir: Path, realizations_csv: Path) -> dict[str, Any]
         }
         realized_outcomes = pd.DataFrame(
             [realization_row],
-            columns=["target_month", *REALIZATION_METRICS],
+            columns=["target_month", *metrics],
         )
         forecast_errors = _build_forecast_errors(
             forecast_paths=forecast_paths,
             realization_row=realization_row,
             target_month=str(manifest["target_month"]),
+            metrics=metrics,
         )
 
         return _stage_and_publish_append(
@@ -157,18 +172,28 @@ def _verify_original_artifacts(run_dir: Path, manifest: dict[str, Any]) -> None:
             raise ValueError(f"Manifest artifact hash mismatch for {name}")
 
 
-def _load_forecast_paths(path: Path) -> pd.DataFrame:
+def _load_forecast_paths(
+    path: Path, *, metrics: Sequence[str] = REALIZATION_METRICS,
+) -> pd.DataFrame:
     if not path.exists():
         raise ValueError(f"Missing macro_forecast_paths.csv: {path}")
     forecast_paths = pd.read_csv(path)
-    required_columns = {"scenario", *REALIZATION_METRICS}
+    required_columns = {"scenario", *metrics}
     if not required_columns.issubset(set(forecast_paths.columns)):
         missing = sorted(required_columns.difference(forecast_paths.columns))
         raise ValueError(f"macro_forecast_paths.csv is missing required columns: {missing}")
     scenarios = tuple(forecast_paths["scenario"].astype(str))
     if scenarios != SCENARIOS:
         raise ValueError("macro_forecast_paths.csv must contain exactly one median row")
-    return forecast_paths.loc[:, ["scenario", *REALIZATION_METRICS]].copy()
+    baseline_columns = [
+        f"visible_baseline_{metric}" for metric in metrics
+        if f"visible_baseline_{metric}" in forecast_paths.columns
+    ]
+    selected = forecast_paths.loc[:, ["scenario", *metrics, *baseline_columns]].copy()
+    for column in [*metrics, *baseline_columns]:
+        if not selected[column].map(lambda value: math.isfinite(float(value))).all():
+            raise ValueError(f"macro_forecast_paths.csv {column} must be finite")
+    return selected
 
 
 def _load_realization_rows(
@@ -176,6 +201,7 @@ def _load_realization_rows(
     *,
     expected_target: str,
     forecast_cutoff: str,
+    metrics: Sequence[str] = REALIZATION_METRICS,
 ) -> list[dict[str, Any]]:
     if not path.exists():
         raise ValueError(f"Missing realizations CSV: {path}")
@@ -186,8 +212,8 @@ def _load_realization_rows(
             "realizations CSV must contain exactly these columns in order: "
             + ", ".join(REALIZATION_COLUMNS)
         )
-    if len(frame) != len(REALIZATION_METRICS):
-        raise ValueError(f"realizations CSV must contain exactly {len(REALIZATION_METRICS)} rows")
+    if len(frame) != len(metrics):
+        raise ValueError(f"realizations CSV must contain exactly {len(metrics)} rows")
     cutoff_date = _parse_iso_date(forecast_cutoff, "manifest as_of_date")
     normalized_by_metric: dict[str, dict[str, Any]] = {}
     for _, row in frame.iterrows():
@@ -197,7 +223,7 @@ def _load_realization_rows(
                 f"realizations CSV target_month {target_month!r} does not match manifest target {expected_target!r}"
             )
         metric = str(row["metric"])
-        if metric not in REALIZATION_METRICS:
+        if metric not in metrics:
             raise ValueError(f"realizations CSV metric {metric!r} is not supported")
         if metric in normalized_by_metric:
             raise ValueError(f"realizations CSV contains duplicate metric {metric!r}")
@@ -229,10 +255,10 @@ def _load_realization_rows(
             "vintage_date": vintage_date.isoformat(),
             "release_date": release_date.isoformat(),
         }
-    missing = sorted(set(REALIZATION_METRICS).difference(normalized_by_metric))
+    missing = sorted(set(metrics).difference(normalized_by_metric))
     if missing:
         raise ValueError(f"realizations CSV is missing required metrics: {', '.join(missing)}")
-    return [normalized_by_metric[metric] for metric in REALIZATION_METRICS]
+    return [normalized_by_metric[metric] for metric in metrics]
 
 
 def _required_text(value: Any, field: str, metric: str) -> str:
@@ -278,6 +304,10 @@ def _stage_and_publish_append(
             "schema_version": REALIZATION_SCHEMA_VERSION,
             "retrospective_label": RETROSPECTIVE_LABEL,
             "target_month": realization_rows[0]["target_month"],
+            "scored_metrics": [row["metric"] for row in realization_rows],
+            "unscored_standard_macro_metrics": sorted(
+                set(MACRO_TARGET_CONTRACT) - {row["metric"] for row in realization_rows}
+            ),
             "forecast_cutoff_as_of_date": forecast_cutoff,
             "error_definition": "realized_minus_forecast",
             "source_forecast_manifest_sha256": _file_sha256(source_manifest_path),
@@ -319,6 +349,7 @@ def _build_forecast_errors(
     forecast_paths: pd.DataFrame,
     realization_row: dict[str, Any],
     target_month: str,
+    *, metrics: Sequence[str] = REALIZATION_METRICS,
 ) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for scenario in SCENARIOS:
@@ -327,19 +358,24 @@ def _build_forecast_errors(
             raise ValueError(f"macro_forecast_paths.csv must contain exactly one {scenario} row")
         forecast_row = match.iloc[0]
         error_row: dict[str, Any] = {"target_month": target_month, "scenario": scenario}
-        for metric in REALIZATION_METRICS:
+        for metric in metrics:
             forecast_value = float(forecast_row[metric])
             realized_value = float(realization_row[metric])
             error_row[f"forecast_{metric}"] = forecast_value
             error_row[f"realized_{metric}"] = realized_value
             error_row[f"error_{metric}"] = realized_value - forecast_value
+            baseline_column = f"visible_baseline_{metric}"
+            if baseline_column in forecast_row:
+                baseline = float(forecast_row[baseline_column])
+                error_row[baseline_column] = baseline
+                error_row[f"baseline_error_{metric}"] = realized_value - baseline
         rows.append(error_row)
     return pd.DataFrame(rows)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    append_realizations(run_dir=args.run_dir, realizations_csv=args.realizations_csv)
+    append_realizations(run_dir=args.run_dir, realizations_csv=args.realizations_csv, metrics=args.metrics)
     return 0
 
 

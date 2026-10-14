@@ -1,0 +1,5 @@
+target_month,metric,value,source,source_url,vintage_date,release_date
+2026-08-01,consumption_growth_pct,0.9,BEA 26-43 first release; reported monthly growth rounded to 0.1 percent,https://www.bea.gov/news/2026/personal-income-and-outlays-august-2026,2026-09-30,2026-09-30
+2026-08-01,real_consumption_growth_pct,0.6,BEA 26-43 first release; reported monthly growth rounded to 0.1 percent,https://www.bea.gov/news/2026/personal-income-and-outlays-august-2026,2026-09-30,2026-09-30
+2026-08-01,price_growth_pct,0.3,BEA 26-43 first release; reported monthly growth rounded to 0.1 percent,https://www.bea.gov/news/2026/personal-income-and-outlays-august-2026,2026-09-30,2026-09-30
+2026-08-01,real_disposable_income_growth_pct,0.0,BEA 26-43 first release; reported monthly growth rounded to 0.1 percent,https://www.bea.gov/news/2026/personal-income-and-outlays-august-2026,2026-09-30,2026-09-30
