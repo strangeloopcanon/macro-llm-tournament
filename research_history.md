@@ -319,3 +319,34 @@ contract. Donor selection is pinned to V4, so the same 200 households and donors
 retained. The correction changes 109 payment fields; the largest falls from $4,660 to
 $410 per month. V5 has not yet been through a new LLM run, so the V24 forecast remains
 the current household result.
+
+## October 14 Recovery and August Score
+
+Restored the full `work/` archive from Strange Lab's `vei-shared` storage. The archive
+matches the October 8 receipt. All 37 saved JEPA artifacts match their manifest,
+including the checkpoint. Recomputed all 99 macro score rows without new training.
+
+The payroll result corrects an overly broad negative summary: JEPA RMSE is 0.0537
+versus lag-one 0.0602 over 24 origins. The primary nominal-spending result remains
+negative. The green chart line is a separate baseline-plus-JEPA correction; it is
+not a JEPA-conditioned household economy.
+
+Scored four August targets against BEA's September 30 first release. Frozen nominal
+spending was -1.1208%, actual was +0.9%, and the saved baseline was +0.7127%.
+Absolute errors are 2.0208 and 0.1873 percentage points. BEA reports these outcomes
+rounded to 0.1 percentage point. No JEPA August forecast exists; five other macro
+targets remain unscored. Original household artifacts and manifests were preserved.
+
+The realization command now accepts selected observed targets and scores the frozen
+baseline alongside the household prediction. A separate August chart preserves the
+historical nine-panel snapshot. Seven focused realization tests passed.
+
+The archive also contains SCE spending microdata and questionnaires. There are 17,827
+matched respondent transitions across 29 four-month wave pairs. QSP4 expectations
+can be tested against next-wave QSP3 purchases. Existing ecology outputs give dollar
+policies, so they do not supply the matching model predictions. The earlier empirical
+bridge's separate validation gate failed despite its `accepted` fit status.
+
+The next step is an offline dataset and baseline study, before model calls or new
+training. See `reports/recovery_and_august_score.md` and
+`reports/household_response_readiness.md`. These changes remain local and unpublished.

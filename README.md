@@ -1,10 +1,24 @@
 # Macro LLM Tournament
 
-![LLM household economy one-month predictions versus first-release reality](reports/current_macro_prediction_surface.png)
+![Nine macro metrics over 2024–2026, with quarter labels](reports/macro_forecast_scorecard.png)
 
-The current result at a glance: four rolling one-month forecasts for nine declared
-macro outputs, plus the frozen and unscored August forecast. Red is the LLM household
-economy, blue is first-release reality, and gray is the information-visible baseline.
+August is now scored against BEA's September 30 first release. Nominal spending rose
+0.9%; the frozen household forecast was -1.121%, while its baseline was +0.713%.
+See the [recovered evidence and score](reports/recovery_and_august_score.md) and
+[household response inventory](reports/household_response_readiness.md). The original
+nine-panel chart remains a historical snapshot of four retrospective forecasts.
+The new [full-period chart](reports/macro_forecast_scorecard.pdf) and
+[2026 detail](reports/macro_forecast_scorecard_2026.pdf) use the
+[portable comparison data](reports/macro_forecast_panel.csv). Values are monthly;
+quarter labels do not imply quarterly aggregation. "Mixed forecast evidence" is
+the project verdict. There was no saved interval to establish an August bounds claim.
+
+Raw inputs, checkpoints, cached responses, and run outputs are retained in private
+research storage. Full byte readback passed before removing the local bulk. Restore
+metadata accompanies each archive. Charts and their portable data are retained in
+this repository. To rebuild only
+the chart environment, create a Python 3.12 virtual environment and install
+`reports/review_requirements.txt`. The raw archive is unnecessary for plotting.
 
 This repository contains a runnable 200-household LLM economy. Real SCE histories
 supply household priors, matched SCF records supply continuous financial states,
@@ -12,7 +26,7 @@ GPT-5.5 writes conditional household policies in dollars, and ordinary code sett
 budgets and counterparties. A small producer turns household demand into output,
 inventory, employment, wages, and family income before the households decide again.
 
-The latest repaired-population evaluation is a clean negative on forecast value. Its
+The latest repaired-population evaluation is negative on its primary spending comparison. Its
 predicted-versus-first-release-actual panel covers nine macro variables across four
 retrospective monthly origins. Only executed nominal household consumption has a close
 aggregate counterpart: nominal PCE. On that central comparison, the household economy
@@ -69,7 +83,9 @@ The producer is deliberately mechanical. There are no LLM firms or banks.
 - Origin-visible drift correlation: **0.974**.
 - Origin-visible drift direction: **4/4**.
 
-The frozen July-to-August nominal-consumption forecast is **-1.12%**. August remains
+The frozen July-to-August nominal-consumption forecast was **-1.12%**, against
+first-release growth of **+0.9%**. Absolute error is **2.021 pp**, versus the saved
+baseline's **0.187 pp**. Four BEA targets are scored; five other macro targets remain
 unscored. In the unscored recursive run, fresh period-two household spending falls
 **0.80%** from period one while producer employment and wages barely move. This proves
 the state transition executes; it is not a September forecast or evidence that
@@ -119,6 +135,11 @@ direct state ridge scores **0.413 pp** rather than exploding on mixed units. The
 origins are too few to distinguish Event-JEPA from lag-1; the 24-origin block remains
 the more informative test.
 
+The result is mixed across targets. On the 24-origin payroll test, Event-JEPA scores
+**0.054 pp**, versus lag-1's **0.060 pp** and the historical median's **0.062 pp**.
+This measured payroll gain does not establish a spending advantage. The recovered
+prediction files reproduce all 99 saved score rows without new training.
+
 This is a macro-only companion benchmark, not an LLM-HANK-JEPA hybrid. The current
 household ecology has only four realized aggregate paths, so using it to train a
 hybrid would not be credible. The plotted green series is specifically a next-release
@@ -143,6 +164,7 @@ make ecology-retrospective-replay
 make ecology-feedback-replay
 make ecology-observability
 make macro-jepa
+make review-saved-evidence
 make check
 make test
 ```

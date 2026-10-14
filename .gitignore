@@ -1,6 +1,7 @@
 .env
 __pycache__/
 *.pyc
+*.egg-info/
 .pytest_cache/
 outputs/
 work/
@@ -18,3 +19,4 @@ coverage/
 .mypy_cache/
 .ipynb_checkpoints/
 reports/*.json.lock
+reports/cloud_offload_*.json

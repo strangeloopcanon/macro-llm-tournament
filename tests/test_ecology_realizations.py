@@ -22,6 +22,27 @@ FIXTURE_ROOT = PROJECT_ROOT / "examples/ecology_fixture"
 
 
 class EcologyRealizationsTests(unittest.TestCase):
+    def test_scores_observed_subset_and_saved_baseline_without_changing_forecast(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = self._build_fixture_run(root)
+            original = {path.name: path.read_bytes() for path in run_dir.iterdir()}
+            rows = [self._realization_rows()[0]]
+            realizations = root / "realizations.csv"
+            pd.DataFrame(rows, columns=list(REALIZATION_COLUMNS)).to_csv(realizations, index=False)
+            append_realizations(run_dir, realizations, metrics=["consumption_growth_pct"])
+            scored = pd.read_csv(run_dir / "realization_append/forecast_errors.csv").iloc[0]
+            self.assertIn("error_consumption_growth_pct", scored.index)
+            self.assertNotIn("error_employment_rate_pct", scored.index)
+            self.assertAlmostEqual(
+                rows[0]["value"] - scored["visible_baseline_consumption_growth_pct"],
+                scored["baseline_error_consumption_growth_pct"],
+            )
+            for name, data in original.items():
+                self.assertEqual(data, (run_dir / name).read_bytes())
+            with self.assertRaisesRegex(ValueError, "unique supported"):
+                append_realizations(run_dir, realizations, metrics=["consumption_growth_pct"] * 2)
+
     def test_append_cli_writes_realization_outputs_and_preserves_original_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
